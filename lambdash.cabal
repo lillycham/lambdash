@@ -11,8 +11,8 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash
-  build-depends:   base
+  exposed-modules: Lambdash, Lambdash.Unify
+  build-depends:   base, containers
 
 executable lambdash
   import:         shared
@@ -29,3 +29,10 @@ executable spike-jobs
   c-sources:      spike/spawn.c
   build-depends:  base, unix
   ghc-options:    -threaded
+
+test-suite unify-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        UnifyTests.hs
+  build-depends:  base, lambdash
