@@ -1,0 +1,110 @@
+#!/usr/bin/env expect
+# Drives spike-jobs through a real pty, because job control needs a terminal.
+# Usage: expect spike/test.exp path/to/spike-jobs
+
+set timeout 5
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc pass {what} { puts "\nPASS: $what" }
+proc see {pattern what} {
+  expect {
+    -re $pattern { pass $what }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {spike> $} "prompt" }
+
+spawn [lindex $argv 0]
+prompt
+
+send "sleep 100 | cat\r"
+after 500
+send "\003"
+see {signal 2} "Ctrl-C ends the pipeline"
+prompt
+
+send "\003"
+after 200
+send "true\r"
+see {exit 0} "Ctrl-C at the prompt leaves the shell alive"
+prompt
+
+send "sleep 100 | cat\r"
+after 500
+send "\032"
+see {\[stopped\] sleep 100 \| cat} "Ctrl-Z stops the pipeline"
+prompt
+
+send "jobs\r"
+see {sleep 100 \| cat} "jobs lists it"
+prompt
+
+send "fg\r"
+after 500
+send "\003"
+see {signal 2} "fg resumes it and Ctrl-C ends it"
+prompt
+
+send "cat\r"
+after 500
+send "hello\r"
+see {hello\r\nhello} "a foreground job can read the terminal"
+send "\004"
+see {exit 0} "Ctrl-D ends it"
+prompt
+
+# The reader retries, because on macOS a blocked tty read fails with EINTR when
+# the process is continued. `cat` dies there under bash as well.
+send "sh spike/reader.sh\r"
+after 500
+send "\032"
+see {\[stopped\]} "Ctrl-Z stops a terminal reader"
+prompt
+send "fg\r"
+after 500
+send "again\r"
+see {got:again} "the reader gets the terminal back after fg"
+send "\003"
+see {signal 2} "and Ctrl-C still reaches it"
+prompt
+
+# Terminal modes belong to the job: the shell restores its own at the prompt,
+# and fg restores the job's.
+send "sh spike/noecho.sh\r"
+after 500
+send "\032"
+see {\[stopped\]} "Ctrl-Z stops a job with echo off"
+prompt
+send "echo visible\r"
+see {echo visible} "the shell gets echo back at the prompt"
+prompt
+send "fg\r"
+after 500
+send "hidden\r"
+expect {
+  -re {hidden} { fail "fg should restore the job's echo-off mode" }
+  -timeout 1 timeout { pass "fg restores the job's terminal modes" }
+}
+send "\003"
+see {signal 2} "Ctrl-C ends it"
+prompt
+send "echo visible2\r"
+see {echo visible2} "echo is back after the job ends"
+prompt
+
+send "yes | head -1\r"
+# Statuses print in completion order here, not stage order.
+see {y\r\n\[[^\]]*signal 13} "SIGPIPE reaches yes, so the pipeline ends"
+prompt
+
+send "false | true\r"
+see {exit 1, exit 0|exit 0, exit 1} "each stage reports its own status"
+prompt
+
+send "no-such-command-xyz\r"
+see {spawn failed} "a missing command is reported"
+prompt
+
+send "exit\r"
+expect eof
+puts "\nALL PASSED"
