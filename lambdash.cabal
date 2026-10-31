@@ -1,0 +1,22 @@
+cabal-version:   3.0
+name:            lambdash
+version:         0.1.0.0
+synopsis:        A functional shell with composable environments
+build-type:      Simple
+
+common shared
+  default-language: GHC2021
+  ghc-options:      -Wall
+
+library
+  import:          shared
+  hs-source-dirs:  src
+  exposed-modules: Lambdash
+  build-depends:   base
+
+executable lambdash
+  import:         shared
+  hs-source-dirs: app
+  main-is:        Main.hs
+  build-depends:  base, lambdash
+  ghc-options:    -threaded
