@@ -49,6 +49,7 @@ tests =
   , ("bind: an unknown equals itself", bind v0 t0 == Right emptySubst)
   , ("bind: refuses an infinite type", bind v0 (t0 ~> t1) == Left (Infinite v0 (t0 ~> t1)))
   , ("unify: same concrete types", unify TInt TInt == Right emptySubst)
+  , ("unify: every concrete type equals itself", unify TBool TBool == Right emptySubst)
   , ("unify: different concrete types", unify TInt TBool == Left (Mismatch TInt TBool))
   , ("unify: a function is not an Int", unify (TInt ~> TInt) TInt == Left (Mismatch (TInt ~> TInt) TInt))
   , ("unify: unknown on the left", solvesTo t0 TInt t0 TInt)
