@@ -16,7 +16,8 @@ module Lambdash.Infer
   , inferType
   ) where
 
-import Control.Monad.Trans.State.Strict (StateT, evalStateT)
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
+import Control.Monad.Trans.Class (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Lambdash.Unify
@@ -51,18 +52,45 @@ type Infer = StateT Int (Either InferError)
 
 -- | Make an unknown that nothing has used yet.
 fresh :: Infer Ty
-fresh = undefined
+fresh = do
+  n <- get
+  put (n + 1)
+  pure (TVar (Var n))
 
 -- | Apply a substitution to every type in the environment.
 applyEnv :: Subst -> Env -> Env
-applyEnv = undefined
+applyEnv s e = Map.map (apply s) e
 
 -- | Find the type of an expression, and what that taught us.
 --
 -- Note: the 'Subst' from each step has to reach the steps after it, in the
 -- environment and in the types you already hold.
+-- | Find the type of an expression, and what that taught us.
 infer :: Env -> Expr -> Infer (Subst, Ty)
-infer = undefined
+infer env (EVar name) =
+  case Map.lookup name env of
+    Nothing -> lift (Left (Unbound name))
+    Just t  -> pure (emptySubst, t)
+
+infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
+infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
+
+infer env (ELam name body) = do
+  tv <- fresh
+  let env' = Map.insert name tv env
+  (s, t) <- infer env' body
+  pure (s, apply s (TFun tv t))
+
+infer env (EApp e1 e2) = do
+  (s1, t1) <- infer env e1
+  (s2, t2) <- infer (applyEnv s1 env) e2
+  tv <- fresh
+  let t1' = apply s2 t1
+  s3 <- case unify t1' (TFun t2 tv) of
+    Left err -> lift (Left (Unify err))
+    Right s  -> pure s
+  let s_final = s3 `compose` s2 `compose` s1
+  pure (s_final, apply s3 tv)
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty
