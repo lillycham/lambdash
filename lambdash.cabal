@@ -11,8 +11,8 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Unify
-  build-depends:   base, containers
+  exposed-modules: Lambdash, Lambdash.Infer, Lambdash.Unify
+  build-depends:   base, containers, transformers
 
 executable lambdash
   import:         shared
@@ -36,3 +36,10 @@ test-suite unify-tests
   hs-source-dirs: test
   main-is:        UnifyTests.hs
   build-depends:  base, lambdash
+
+test-suite infer-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        InferTests.hs
+  build-depends:  base, containers, lambdash, transformers
