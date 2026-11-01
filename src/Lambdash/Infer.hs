@@ -17,6 +17,8 @@ module Lambdash.Infer
   , unifying
   , ftv
   , ftvRow
+  , ftvEffects
+  , actionEffects
   , ftvScheme
   , ftvEnv
   , applyScheme
@@ -113,8 +115,18 @@ ftv (TVar v) = Set.singleton v
 ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
 ftv (TCon _) = Set.empty
 ftv (TRecord r) = ftvRow r
-ftv (TComp t) = ftv t
-ftv (TStream i o r) = Set.unions (map ftv [i, o, r])
+ftv (TComp eff t) = ftvEffects eff `Set.union` ftv t
+ftv (TStream eff i o r) = Set.unions (ftvEffects eff : map ftv [i, o, r])
+
+ftvEffects :: EffRow -> Set Var
+ftvEffects (EffRow _ vars) = vars
+
+-- | Only the outer action executes. A returned action, or one inside a
+-- record, stays latent until it is run separately.
+actionEffects :: Ty -> EffRow
+actionEffects (TComp eff _) = eff
+actionEffects (TStream eff _ _ _) = eff
+actionEffects _ = noEffects
 
 -- | The unknowns that appear in a row.
 ftvRow :: Row -> Set Var
@@ -141,6 +153,7 @@ applyScheme sub (Forall bound ty) =
   freeSubst = Subst
     { getSubst = Map.withoutKeys (getSubst sub) boundVars
     , getRowSubst = Map.withoutKeys (getRowSubst sub) boundVars
+    , getEffectSubst = Map.withoutKeys (getEffectSubst sub) boundVars
     }
 
 -- | Apply a substitution to every scheme in the environment.
@@ -164,6 +177,7 @@ instantiate (Forall bound ty) = do
       sub = Subst
         { getSubst = TVar <$> renaming
         , getRowSubst = RVar <$> renaming
+        , getEffectSubst = effectVar <$> renaming
         }
   pure (apply sub ty)
 
@@ -186,9 +200,9 @@ infer _ (ELit LUnit)     = pure (emptySubst, TUnit)
 infer _ (ELit (LStr _))  = pure (emptySubst, TString)
 
 -- For now, an argument must be a String. The checker has nothing to convert with.
-infer env (ECmd _ args) = do
+infer env (ECmd command args) = do
   subs <- mapM check args
-  pure (foldr compose emptySubst subs, TStream TBytes TBytes TStatus)
+  pure (foldr compose emptySubst subs, TStream (effect (Exec command)) TBytes TBytes TStatus)
  where
   check (AWord _) = pure emptySubst
   check (AVar name) = do
@@ -220,29 +234,30 @@ infer env (EPipe left right) = do
       input <- fresh
       output <- fresh
       result <- fresh
-      unifying (unify (apply s2 leftTy) (TStream input output result))
+      eff <- unifying (effectVar <$> freshVar)
+      unifying (unify (apply s2 leftTy) (TStream eff input output result))
     _ -> pure emptySubst
   let known = shape `compose` s2 `compose` s1
       left' = apply shape (apply s2 leftTy)
       right' = apply shape rightTy
   (s3, result) <- case (left', right') of
-    (TStream input output _, TStream input' output' result') -> do
+    (TStream eff input output _, TStream eff' input' output' result') -> do
       s <- unifying (unify output input')
-      pure (s, TStream input output' result')
-    (TStream input output result', _) -> do
+      pure (s, TStream (unionEffects eff eff') input output' result')
+    (TStream eff input output result', _) -> do
       item <- fresh
       s <- unifying (unify right' (TFun output item))
-      pure (s, TStream input item result')
-    (TComp value, TStream input output result') -> do
+      pure (s, TStream eff input item result')
+    (TComp eff value, TStream eff' input output result') -> do
       s <- unifying (unify value input)
-      pure (s, TStream TBytes output result')
-    (_, TStream input output result') -> do
+      pure (s, TStream (unionEffects eff eff') TBytes output result')
+    (_, TStream eff input output result') -> do
       s <- unifying (unify left' input)
-      pure (s, TStream TBytes output result')
-    (TComp value, _) -> do
+      pure (s, TStream eff TBytes output result')
+    (TComp eff value, _) -> do
       item <- fresh
       s <- unifying (unify right' (TFun value item))
-      pure (s, TComp item)
+      pure (s, TComp eff item)
     _ -> do
       item <- fresh
       s <- unifying (unify right' (TFun left' item))
@@ -288,7 +303,7 @@ commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty
-inferIn env expr = evalStateT (go env expr) 0
+inferIn env expr = evalStateT (go env expr) (nextUnknown env)
  where
   go e x = do
     (s, t) <- infer e x
@@ -297,16 +312,25 @@ inferIn env expr = evalStateT (go env expr) 0
 -- | The return type of a computation or stream. A stream's output items are
 -- separate from its return value. An unknown action defaults to @TComp a@.
 inferRunIn :: Env -> Expr -> Either InferError Ty
-inferRunIn env expr = evalStateT go 0
+inferRunIn env expr = evalStateT go (nextUnknown env)
  where
   go = do
     (s1, t) <- infer env expr
     case apply s1 t of
-      TStream _ _ result -> pure result
+      TStream _ _ _ result -> pure result
+      TComp _ result -> pure result
       ty -> do
         result <- fresh
-        s2 <- unifying (unify ty (TComp result))
+        eff <- case ty of
+          TVar _ -> unifying (effectVar <$> freshVar)
+          _ -> pure noEffects
+        s2 <- unifying (unify ty (TComp eff result))
         pure (apply s2 result)
+
+-- Free unknowns in a supplied environment must not collide with fresh type,
+-- record-row or effect-row unknowns. Bound scheme variables are renamed.
+nextUnknown :: Env -> Int
+nextUnknown env = 1 + maximum (-1 : [number | Var number <- Set.toList (ftvEnv env)])
 
 -- | Infer with nothing in scope.
 inferType :: Expr -> Either InferError Ty

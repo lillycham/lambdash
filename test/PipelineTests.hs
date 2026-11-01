@@ -93,7 +93,15 @@ awaitFile path = do
 
 tests :: [(String, IO Bool)]
 tests =
-  [ ("parser: left associative and application binds tighter", pure $
+  [ ("effects: latent function needs no command", gives ["f = x -> missing-effects-xyz", "pure 1"] "" ["f : a -> Stream Bytes Bytes Status", "1"])
+  , ("effects: higher-order missing command gets a preflight error", gives ["f = x -> missing-effects-xyz", "(g x -> g x) f 1"] "" ["f : a -> Stream Bytes Bytes Status", "command not found: missing-effects-xyz"])
+  , ("effects: latent record field needs no command", gives ["pure {job = missing-effects-xyz}"] "" ["{job = <stream>}"])
+  , ("effects: selecting a command checks its row", gives ["r = {job = missing-effects-xyz}", "r.job"] "" ["r : {job : Stream Bytes Bytes Status}", "command not found: missing-effects-xyz"])
+  , ("effects: a returned stream stays latent", gives ["c <- pure (missing-effects-xyz)", "c"] "" ["c : Stream Bytes Bytes Status", "command not found: missing-effects-xyz"])
+  , ("effects: preflight precedes source computation effects", gives ["bad = missing-effects-xyz", "(print \"started\" | (x -> encodeUtf8 \"data\")) | bad"] "" ["bad : Stream Bytes Bytes Status", "command not found: missing-effects-xyz"])
+  , ("effects: independent input rows instantiate separately", gives ["join = a b -> (a | cat) | (b | cat)", "join (printf abc) (head -c 3)"] "abc" ["join : Stream a Bytes b -> Stream Bytes Bytes c -> Stream a Bytes Status", ""])
+  , ("effects: distinct comp effects instantiate separately", gives ["id = x -> x", "a = id (print 1)", "b = id (pure 2)", "a", "b"] "1\n" ["id : a -> a", "a : Comp ()", "b : Comp Int", "", "2"])
+  , ("parser: left associative and application binds tighter", pure $
       parseExpr "f x | g y | h" == Right (EPipe (EPipe (EApp (EVar "f") (EVar "x")) (EApp (EVar "g") (EVar "y"))) (EVar "h")))
   , ("parser: a quoted pipe stays in its word", pure $
       parseExprIn (BoundNames Set.empty) "printf \"a|b\"|cat" == Right (EPipe (ECmd "printf" [AWord "a|b"]) (ECmd "cat" [])))
@@ -105,10 +113,10 @@ tests =
   , ("type: a generic producer is a stream", pure $ typed "s -> s | byteLength" "Stream a Bytes b -> Stream a Int b")
   , ("type: a pipe cannot turn Bytes into Int implicitly", pure $ not (typed "echo hi | add 1" "Stream Bytes Int Status"))
   , ("types: all stream positions substitute", pure $
-      apply (singleton (Var 0) TInt) (TStream (TVar (Var 0)) (TComp (TVar (Var 0))) (TVar (Var 0))) == TStream TInt (TComp TInt) TInt)
+      apply (singleton (Var 0) TInt) ((TStream noEffects) (TVar (Var 0)) ((TComp noEffects) (TVar (Var 0))) (TVar (Var 0))) == (TStream noEffects) TInt ((TComp noEffects) TInt) TInt)
   , ("types: all stream positions have free variables", pure $
-      ftv (TStream (TVar (Var 0)) (TVar (Var 1)) (TVar (Var 2))) == Set.fromList [Var 0, Var 1, Var 2])
-  , ("types: occurs checks the stream return value", pure $ occurs (Var 0) (TStream TBytes TBytes (TVar (Var 0))))
+      ftv ((TStream noEffects) (TVar (Var 0)) (TVar (Var 1)) (TVar (Var 2))) == Set.fromList [Var 0, Var 1, Var 2])
+  , ("types: occurs checks the stream return value", pure $ occurs (Var 0) ((TStream noEffects) TBytes TBytes (TVar (Var 0))))
   , ("pipe: bytes flow through two externals", gives ["printf abc | cat"] "abc" [""])
   , ("pipe: Bytes source feeds an external", gives ["encodeUtf8 \"hello\" | cat"] "hello" [""])
   , ("pipe: computation source feeds an external", gives ["pure (encodeUtf8 \"hello\") | cat"] "hello" [""])
@@ -119,7 +127,7 @@ tests =
   , ("pipe: a generic stage keeps its inferred meaning", gives ["f = s -> s | (x -> 1)", "f (printf abc)"] "1\n" ["f : Stream a b c -> Stream a Int c", ""])
   , ("pipe: named stages stay reusable", gives ["source = printf hi", "copy = x -> x", "p = source | copy | cat", "p", "p"] "hihi"
       ["source : Stream Bytes Bytes Status", "copy : a -> a", "p : Stream Bytes Bytes Status", "", ""])
-  , ("pipe: a type query runs nothing", gives [":t printf abc | byteLength"] "" ["Stream Bytes Int Status"])
+  , ("pipe: a type query runs nothing", gives [":t printf abc | byteLength"] "" ["Stream {exec printf} Bytes Int Status"])
   , ("pipe: a run binds the final status", gives ["s <- printf abc | sh -c \"cat; exit 7\"", "s"] "abc" ["s : Status", "exit 7"])
   , ("pipe: the last stage controls status", gives ["sh -c \"exit 9\" | cat"] "" [""])
   , ("pipe: a pure stage preserves status", gives ["sh -c \"printf abc; exit 9\" | byteLength"] "3\n" ["exit 9"])
@@ -127,7 +135,7 @@ tests =
   , ("cancel: demand crosses a pure stage", gives ["yes | (x -> x) | head -1"] "y\n" [""])
   , ("cancel: demand crosses bounded pure queues", gives ["yes | (x -> x) | (x -> x) | head -1"] "y\n" [""])
   , ("preflight: a missing downstream command runs nothing", gives ["echo side-effect | nope-pipeline-xyz"] "" ["command not found: nope-pipeline-xyz"])
-  , ("preflight: bound commands also resolve before spawn", gives ["bad = nope-pipeline-xyz", "echo side-effect | bad"] "" ["bad : Stream Bytes Bytes Status", "exit 127"])
+  , ("preflight: bound commands also resolve before spawn", gives ["bad = nope-pipeline-xyz", "echo side-effect | bad"] "" ["bad : Stream Bytes Bytes Status", "command not found: nope-pipeline-xyz"])
   , ("preflight: type failure prevents a file write", withPath $ \path -> do
       (_, results) <- capture (linesIO ["sh -c \"touch " <> path <> "\" | add 1"])
       exists <- doesFileExist path

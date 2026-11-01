@@ -73,3 +73,10 @@ test-suite pipeline-tests
   main-is:        PipelineTests.hs
   build-depends:  base, async, bytestring, containers, directory, lambdash, unix
   ghc-options:    -threaded
+
+test-suite effect-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        EffectTests.hs
+  build-depends:  base, containers, lambdash, transformers

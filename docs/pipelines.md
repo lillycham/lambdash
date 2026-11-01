@@ -1,7 +1,8 @@
 # Pipelines
 
-An external command has type `Stream Bytes Bytes Status`.
-The three parameters mean input item, output item and return value.
+An external command has type `Stream {exec command} Bytes Bytes Status`.
+The parameters mean effect row, input item, output item and return value.
+Normal prompt output omits effects. `:t` shows them.
 `Bytes` holds a finite byte chunk. It is separate from `String`.
 
 ```text
@@ -55,8 +56,10 @@ A pure stage preserves that status. There is no `pipefail` option yet.
 An upstream `SIGPIPE` after a downstream exit is normal cancellation.
 
 Inference checks the whole expression before any stage runs.
-The preflight resolves all external names in a stream plan before the first spawn.
-This includes external names inside bound streams.
+The REPL preflight reads the outer action's inferred effect row.
+It resolves external names through bindings and higher-order functions before any action runs.
+Latent actions in records, functions and return values keep their own requirements.
+The runtime also checks the concrete stream plan before the first spawn.
 A runtime spawn failure returns status 127 and cancels the stages that did start.
 The executable can still change after preflight; that race cannot be eliminated here.
 
@@ -65,3 +68,5 @@ A downstream close propagates upstream through OS pipes and pure stage queues.
 An exception or caller cancellation closes resources, kills the job group and reaps direct children.
 All external stages share one foreground process group, so terminal signals reach the whole job.
 Ctrl-Z resumes the group immediately because the shell has no job table yet.
+
+See [effect rows](effects.md) for row inference and current solver limits.

@@ -141,8 +141,8 @@ builtins :: [(Name, Scheme, Value)]
 builtins =
   [ ("not", mono (TFun TBool TBool), VBuiltin "not" notV),
     ("add", mono (TFun TInt (TFun TInt TInt)), VBuiltin "add" add),
-    ("print", Forall [t] (TFun (TVar t) (TComp TUnit)), VBuiltin "print" printV),
-    ("pure", Forall [t] (TFun (TVar t) (TComp (TVar t))), VBuiltin "pure" (VComp . pure)),
+    ("print", Forall [t] (TFun (TVar t) (TComp (effect Console) TUnit)), VBuiltin "print" printV),
+    ("pure", Forall [t] (TFun (TVar t) (TComp noEffects (TVar t))), VBuiltin "pure" (VComp . pure)),
     ("encodeUtf8", mono (TFun TString TBytes), VBuiltin "encodeUtf8" encode),
     ("byteLength", mono (TFun TBytes TInt), VBuiltin "byteLength" byteLength)
   ]

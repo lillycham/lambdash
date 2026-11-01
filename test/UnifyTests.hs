@@ -75,10 +75,10 @@ solvesTo a b t expected = case solve a b of
 
 tests :: [(String, Bool)]
 tests =
-  [ ("stream: constraints reach later positions", solve (TStream t0 t0 t1) (TStream TBytes TBytes TStatus) == Right (compose (singleton v1 TStatus) (singleton v0 TBytes)))
-  , ("stream: shared positions cannot disagree", case solve (TStream t0 t0 t1) (TStream TBytes TInt TStatus) of Left (Mismatch _ _) -> True; _ -> False)
-  , ("stream: rows unify in stream items", solves (TStream TBytes (TRecord (RVar v0)) TStatus) (TStream TBytes (TRecord (ext "size" TInt REmpty)) TStatus))
-  , ("stream: occurs checks the return value", solve t0 (TStream TBytes TBytes t0) == Left (Infinite v0 (TStream TBytes TBytes t0)))
+  [ ("stream: constraints reach later positions", solve ((TStream noEffects) t0 t0 t1) ((TStream noEffects) TBytes TBytes TStatus) == Right (compose (singleton v1 TStatus) (singleton v0 TBytes)))
+  , ("stream: shared positions cannot disagree", case solve ((TStream noEffects) t0 t0 t1) ((TStream noEffects) TBytes TInt TStatus) of Left (Mismatch _ _) -> True; _ -> False)
+  , ("stream: rows unify in stream items", solves ((TStream noEffects) TBytes (TRecord (RVar v0)) TStatus) ((TStream noEffects) TBytes (TRecord (ext "size" TInt REmpty)) TStatus))
+  , ("stream: occurs checks the return value", solve t0 ((TStream noEffects) TBytes TBytes t0) == Left (Infinite v0 ((TStream noEffects) TBytes TBytes t0)))
   , ("apply: empty changes nothing", apply emptySubst (t0 ~> TInt) == t0 ~> TInt)
   , ("apply: replaces an unknown", apply (singleton v0 TInt) t0 == TInt)
   , ("apply: leaves other unknowns", apply (singleton v0 TInt) t1 == t1)
@@ -158,11 +158,11 @@ tests =
   , ("rows: a solved row reaches the other side", solve (TFun (TRecord r) (TRecord r)) (TFun (TRecord (ext "a" TInt REmpty)) (TRecord (ext "a" TBool REmpty))) == Left (Mismatch TInt TBool))
   , ("rows: a row containing itself", infiniteRow (solve (TRecord r) (TRecord (ext "a" TInt r))))
   , ("rows: the same tail with other fields", infiniteRow (solve (TRecord (ext "a" TInt r)) (TRecord (ext "b" TBool r))))
-  , ("comp: apply goes inside", apply (singleton v0 TInt) (TComp t0) == TComp TInt)
-  , ("comp: occurs goes inside", occurs v0 (TComp t0))
-  , ("comp: unifies inside", solvesTo (TComp t0) (TComp TInt) t0 TInt)
-  , ("comp: an infinite computation", refusesInfinite (solve t0 (TComp t0)))
-  , ("comp: is not its result", solve (TComp TInt) TInt == Left (Mismatch (TComp TInt) TInt))
+  , ("comp: apply goes inside", apply (singleton v0 TInt) ((TComp noEffects) t0) == (TComp noEffects) TInt)
+  , ("comp: occurs goes inside", occurs v0 ((TComp noEffects) t0))
+  , ("comp: unifies inside", solvesTo ((TComp noEffects) t0) ((TComp noEffects) TInt) t0 TInt)
+  , ("comp: an infinite computation", refusesInfinite (solve t0 ((TComp noEffects) t0)))
+  , ("comp: is not its result", solve ((TComp noEffects) TInt) TInt == Left (Mismatch ((TComp noEffects) TInt) TInt))
   , ("rows: a grown tail reaches the field", refusesInfinite (solve (TRecord (ext "a" (TRecord r) (ext "b" TBool REmpty))) (TRecord (ext "b" TBool r))))
   ]
 

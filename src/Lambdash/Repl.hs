@@ -8,6 +8,7 @@ module Lambdash.Repl
   , command
   , parseCommand
   , renderType
+  , renderEffectsType
   , renderError
   , Step (..)
   , step
@@ -18,6 +19,8 @@ import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.Bifunctor (first)
 import Data.Char (chr, ord)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
+import Data.List (intercalate)
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
@@ -76,7 +79,21 @@ parseCommand bound = first errorBundlePretty . runIn bound (sc *> command <* eof
 -- Note: an unknown can be in a row tail as well as in a type, and they share
 -- letters. Only the left of an arrow needs parentheses.
 renderType :: Ty -> String
-renderType ty = evalState (renderTy ty) Map.empty
+renderType ty = evalState (renderTy (hideEffects ty)) Map.empty
+
+-- | Effect rows appear only when the user asks for a type.
+renderEffectsType :: Ty -> String
+renderEffectsType ty = evalState (renderTy ty) Map.empty
+
+hideEffects :: Ty -> Ty
+hideEffects (TFun a b) = TFun (hideEffects a) (hideEffects b)
+hideEffects (TComp _ t) = TComp noEffects (hideEffects t)
+hideEffects (TStream _ i o r) = TStream noEffects (hideEffects i) (hideEffects o) (hideEffects r)
+hideEffects (TRecord row) = TRecord (hideRow row)
+ where
+  hideRow (RExtend label ty rest) = RExtend label (hideEffects ty) (hideRow rest)
+  hideRow rest = rest
+hideEffects ty = ty
 
 -- The same name table serves types, row tails and both sides of an error.
 type TypeNames = Map.Map Var String
@@ -102,24 +119,37 @@ renderTy (TFun argument result) = do
         TFun _ _ -> "(" <> left <> ")"
         _ -> left
   pure (parameter <> " -> " <> right)
-renderTy (TComp result) = do
+renderTy (TComp eff result) = do
+  effects <- renderEffects eff
   text <- renderTy result
   pure $ case result of
-    TFun _ _ -> "Comp (" <> text <> ")"
-    TComp _ -> "Comp (" <> text <> ")"
-    TStream _ _ _ -> "Comp (" <> text <> ")"
-    _ -> "Comp " <> text
-renderTy (TStream input output result) = do
+    TFun _ _ -> "Comp" <> effects <> " (" <> text <> ")"
+    TComp _ _ -> "Comp" <> effects <> " (" <> text <> ")"
+    TStream _ _ _ _ -> "Comp" <> effects <> " (" <> text <> ")"
+    _ -> "Comp" <> effects <> " " <> text
+renderTy (TStream eff input output result) = do
+  effects <- renderEffects eff
   parts <- mapM renderTy [input, output, result]
   let argument ty text = case ty of
         TFun _ _ -> "(" <> text <> ")"
-        TComp _ -> "(" <> text <> ")"
-        TStream _ _ _ -> "(" <> text <> ")"
+        TComp _ _ -> "(" <> text <> ")"
+        TStream _ _ _ _ -> "(" <> text <> ")"
         _ -> text
-  pure ("Stream " <> unwords (zipWith argument [input, output, result] parts))
+  pure ("Stream" <> effects <> " " <> unwords (zipWith argument [input, output, result] parts))
 renderTy (TRecord row) = do
   fields <- renderRow row
   pure ("{" <> fields <> "}")
+
+renderEffects :: EffRow -> State TypeNames String
+renderEffects row@(EffRow labels vars)
+  | row == noEffects = pure ""
+  | otherwise = do
+      tails <- mapM renderVar (Set.toList vars)
+      let label Console = "console"
+          label (Exec name) = "exec " <> name
+          fixed = intercalate ", " (map label (Set.toList labels))
+          open = if null tails then "" else " | " <> intercalate " + " tails
+      pure (" {" <> fixed <> open <> "}")
 
 renderRow :: Row -> State TypeNames String
 renderRow REmpty = pure ""
@@ -145,6 +175,14 @@ renderError (Unify err) = case err of
   InfiniteRow var row ->
     renderPair "infinite row: " (TRecord (RVar var)) (TRecord row)
   MissingField label _ -> "no field: " <> label
+  EffectMismatch left right -> renderEffectError "effect mismatch:" left right
+  UnresolvedEffects left right -> renderEffectError "cannot solve effect-row equality:" left right
+
+renderEffectError :: String -> EffRow -> EffRow -> String
+renderEffectError message left right = flip evalState Map.empty $ do
+  l <- renderEffects left
+  r <- renderEffects right
+  pure (message <> (if null l then " {}" else l) <> " and" <> (if null r then " {}" else r))
 
 renderPair :: String -> Ty -> Ty -> String
 renderPair message left right = flip evalState Map.empty $ do
@@ -169,20 +207,21 @@ step session input =
     Right Blank -> pure (Continue session "")
     Right Exit -> pure Quit
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
-      pure (Continue session (renderType ty))
+      pure (Continue session (renderEffectsType ty))
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
       case ty of
-        TComp _ -> preflight expression $ do
+        TComp _ _ -> preflight ty $ do
           result <- runComp (eval values expression)
           pure (Continue session (showResult result))
-        TStream _ _ _ -> preflight expression $ do
+        TStream _ _ _ _ -> preflight ty $ do
           result <- runComp (eval values expression)
           pure (Continue session (showResult result))
         _ -> pure (Continue session (render (eval values expression)))
     Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
       pure (bound name ty (eval values expression))
-    Right (BindRun name expression) -> checked (inferRunIn types expression) $ \ty ->
-      preflight expression (bound name ty <$> runComp (eval values expression))
+    Right (BindRun name expression) -> checked (inferIn types expression) $ \actionTy ->
+      checked (inferRunIn types expression) $ \ty ->
+        preflight actionTy (bound name ty <$> runComp (eval values expression))
   where
     types = sessionTypes session
     values = sessionValues session
@@ -197,13 +236,15 @@ step session input =
             , sessionValues = Map.insert name value values
             }
       in Continue next (name <> " : " <> renderType ty)
-    -- This sees only the commands that the line names. The commands inside a
-    -- bound name wait for effect rows.
-    preflight expression action = do
-      missing <- filterM (fmap not . programExists) (commands expression)
-      case missing of
-        [] -> action
-        name : _ -> pure (Continue session ("command not found: " <> name))
+    preflight ty action = do
+      let EffRow labels tails = actionEffects ty
+      if not (Set.null tails)
+        then pure (Continue session "cannot run an action with an unresolved effect row")
+        else do
+          missing <- filterM (fmap not . programExists) [name | Exec name <- Set.toList labels]
+          case missing of
+            [] -> action
+            name : _ -> pure (Continue session ("command not found: " <> name))
     showResult VUnit = ""
     showResult (VStatus (ExitedWith 0)) = ""
     showResult value = render value
