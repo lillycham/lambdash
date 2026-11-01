@@ -10,7 +10,7 @@ import Data.List (isInfixOf)
 import Data.Set qualified as Set
 import Data.Map.Strict qualified as Map
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import Lambdash.Eval (Value (..), typeEnv)
+import Lambdash.Eval (Return (..), Value (..), runComp, typeEnv)
 import Lambdash.Infer
 import Lambdash.Parser
 import Lambdash.Process (Status (..))
@@ -60,7 +60,7 @@ gives input output results = do
   pure (actual == (B8.pack output, results))
 
 typed :: String -> String -> Bool
-typed source expected = case parseExprIn (BoundNames (Set.fromList ["pure", "add", "not", "byteLength", "encodeUtf8"])) source of
+typed source expected = case parseExprIn (BoundNames (Map.keysSet typeEnv)) source of
   Left _ -> False
   Right expression -> fmap renderType (inferIn typeEnv expression) == Right expected
 
@@ -94,11 +94,85 @@ awaitFile path = do
 
 tests :: [(String, IO Bool)]
 tests =
-  [ ("constraints: preflight proves a closed outer row", do
+  [ ("lists: commas separate latent external commands", gives ["length [echo a, echo b]"] "" ["2"])
+  , ("lists: parentheses preserve a comma inside a command", gives ["length [(echo a,b), (echo c)]"] "" ["2"])
+  , ("records: commas separate command-valued fields", gives ["r = {a = echo hi, b = 2}", "r.b"] ""
+      ["r : {a : Stream Bytes Bytes Status, b : Int}", "2"])
+  , ("commands: ordinary argument commas remain literal", gives ["echo a,b"] "a,b\n" [""])
+  , ("lists: literals and length", gives ["[1, 2, 3]", "length [1, 2, 3]"] "" ["[1, 2, 3]", "3"])
+  , ("lists: nested and empty literals", gives ["[[], [1, 2]]", ":t []"] "" ["[[], [1, 2]]", "[a]"])
+  , ("lists: empty bindings remain polymorphic", gives ["xs = []", "each xs | filter isEmpty | collect", "each xs | add 1 | collect"] ""
+      ["xs : [a]", "{items = [], status = ()}", "{items = [], status = ()}"])
+  , ("lists: heterogeneous items fail", do
+      (_, results) <- capture (linesIO ["[1, true]"])
+      pure (any (isInfixOf "type mismatch") results))
+  , ("lists: actions stay latent", gives ["[print 1, print 2]", "each [print 1] | collect"] ""
+      ["[<computation>, <computation>]", "{items = [<computation>], status = ()}"])
+  , ("lines: collected external output", gives ["printf \"owl\\ncat\\n\" | lines | collect"] ""
+      ["{items = [\"owl\", \"cat\"], status = exit 0}"])
+  , ("lines: a finite byte value can be a source", gives ["encodeUtf8 \"λ\\ncat\" | lines | collect"] ""
+      ["{items = [" <> show "λ" <> ", \"cat\"], status = ()}"])
+  , ("lines: a computation can be a byte source", gives ["pure (encodeUtf8 \"owl\\n\") | lines | collect"] ""
+      ["{items = [\"owl\"], status = ()}"])
+  , ("filter: string predicates select lines", gives ["printf \"owl\\ncat\\nbarn owl\\n\" | lines | filter (contains \"owl\") | collect"] ""
+      ["{items = [\"owl\", \"barn owl\"], status = exit 0}"])
+  , ("filter: composed pure predicates skip empty items", gives ["each [\"owl\", \"\", \"cat\"] | filter (x -> not (isEmpty x)) | collect"] ""
+      ["{items = [\"owl\", \"cat\"], status = ()}"])
+  , ("filter: Boolean data remains structured", gives ["each [true, false, true] | filter (x -> x) | collect"] ""
+      ["{items = [true, true], status = ()}"])
+  , ("map: row accessors map structured records", gives ["each [{size = 1}, {size = 2}] | map .size | add 1 | collect"] ""
+      ["{items = [2, 3], status = ()}"])
+  , ("stages: byte adapters compose and stay reusable", gives
+      ["clean = lines | filter (x -> not (isEmpty x))", "readClean = clean | collect", "printf \"a\\n\\nb\\n\" | readClean", "printf \"c\\n\" | readClean"] ""
+      ["clean : Stage Bytes String", "readClean : Collector Bytes String", "{items = [\"a\", \"b\"], status = exit 0}", "{items = [\"c\"], status = exit 0}"])
+  , ("collect: items and status bind with <-", gives
+      ["r <- printf \"a\\nb\\n\" | lines | collect", "r.items", "length r.items", "r.status"] ""
+      ["r : {items : [String], status : Status}", "[\"a\", \"b\"]", "2", "exit 0"])
+  , ("collect: a nonzero status remains data", gives ["sh -c \"printf yes; exit 7\" | lines | filter (startsWith \"y\") | collect"] ""
+      ["{items = [\"yes\"], status = exit 7}"])
+  , ("collect: a signal status remains data", gives ["sh -c \"printf yes; kill -9 $$\" | lines | collect"] ""
+      ["{items = [\"yes\"], status = signal 9}"])
+  , ("collect: raw bytes are retained independent of chunking", gives
+      ["r <- printf abc | collect", "each r.items", "r.status"] "abc"
+      ["r : {items : [Bytes], status : Status}", "", "exit 0"])
+  , ("collect: naming it runs nothing", gives ["r = echo hi | lines | collect", ":t r"] ""
+      ["r : Comp {items : [String], status : Status}", "Comp {exec echo} {items : [String], status : Status}"])
+  , ("collect: a plain item collects once", gives ["42 | collect"] "" ["{items = [42], status = ()}"])
+  , ("collect: pure computation effects are retained", gives ["print 1 | collect"] "1\n" ["{items = [()], status = ()}"])
+  , ("collect: source failures cannot become a unit success", do
+      result <- try (runComp (VStream [SourceStage (ioError (userError "source failed")), MapStage id] ReturnUnit)) :: IO (Either StreamError Value)
+      pure $ case result of Left (StreamError _) -> True; _ -> False)
+  , ("collect: a pure right stream retains its own return type", gives ["sh -c \"exit 7\" | each [1, 2] | collect"] ""
+      ["{items = [1, 2], status = ()}"])
+  , ("preflight: adapters preserve missing-command requirements", gives ["bad = missing-lines-command-xyz", "r <- bad | lines | filter isEmpty | collect"] ""
+      ["bad : Stream Bytes Bytes Status", "command not found: missing-lines-command-xyz"])
+  , ("preflight: predicates must be pure Booleans", do
+      (output, results) <- capture (linesIO ["echo should-not-print | lines | filter (x -> pure true) | collect"])
+      pure (BS.null output && any (isInfixOf "type mismatch") results))
+  , ("types: list item constraints propagate", pure $ typed "x -> [x, add x 1]" "Int -> [Int]")
+  , ("types: filters remain generic", pure $ typed "filter" "(a -> Bool) -> Stage a a")
+  , ("types: collector item types follow maps", pure $ typed "each [{size = 1}] | .size | collect" "Comp {items : [Int], status : ()}")
+  , ("types: adapters require an explicit source", do
+      (output, results) <- capture (linesIO ["filter (contains \"a\") | encodeLine | cat"])
+      pure (BS.null output && any (isInfixOf "type mismatch") results))
+  , ("lines: bare output prints unquoted strings", gives ["printf \"owl\\ncat\\n\" | lines"] "owl\ncat\n" [""])
+  , ("cancel: demand crosses line framing and filters", gives ["yes | lines | filter (contains \"y\") | encodeLine | head -3"] "y\ny\ny\n" [""])
+  , ("decode: invalid UTF-8 leaves a previous binding intact", gives
+      ["r = 42", "r <- printf \"\\\\377\\n\" | lines | collect", "r"] ""
+      ["r : Int", "lines: invalid or incomplete UTF-8", "42"])
+  , ("decode: data errors do not end the session", gives ["printf \"\\\\302\" | lines | collect", "add 1 2"] ""
+      ["lines: invalid or incomplete UTF-8", "3"])
+  , ("decode: a worker error kills and reaps its producer", withPath $ \path -> do
+      let script = "echo $$ > \"$1\"; printf '\\377\\n'; exec sleep 100"
+          source = "sh -c " <> show script <> " test " <> show path <> " | lines | collect"
+      (output, results) <- capture (linesIO [source])
+      done <- reaped path
+      pure (BS.null output && results == ["lines: invalid or incomplete UTF-8"] && done))
+  , ("constraints: preflight proves a closed outer row", do
       let row = unionEffects (effect (Exec "cat")) (effectVar (Var 0))
           qualified = qualify [EffEqual row (effect (Exec "cat"))] (TStream row TBytes TBytes TStatus)
           session = Session (Map.singleton "job" (Forall [Var 0] qualified))
-            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]]))
+            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]] ReturnStatus))
       (output, result) <- capture (step session "job")
       pure $ BS.null output && case result of Continue _ "" -> True; _ -> False)
   , ("constraints: proved requirements still get preflight", do
@@ -106,7 +180,7 @@ tests =
           row = unionEffects missing (effectVar (Var 0))
           qualified = qualify [EffEqual row missing] (TStream row TBytes TBytes TStatus)
           session = Session (Map.singleton "job" (Forall [Var 0] qualified))
-            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []]))
+            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []] ReturnStatus))
       (output, result) <- capture (step session "job")
       pure $ BS.null output && case result of Continue _ "command not found: missing-constraint-command-xyz" -> True; _ -> False)
   , ("constraints: a binding retains and resolves its bound", gives
@@ -202,10 +276,10 @@ tests =
       writeFile path "#!/no-such-pipeline-interpreter\n"
       permissions <- getPermissions path
       setPermissions path permissions {executable = True}
-      statuses <- mapM (\_ -> runStages id id (BS.hPut stdout)
-        [External "sleep" ["100"], External path []]) [1 :: Int .. 3]
+      outcomes <- mapM (\_ -> try (runStages id id (BS.hPut stdout)
+        [External "sleep" ["100"], External path []]) :: IO (Either StreamError Status)) [1 :: Int .. 3]
       children <- try (getAnyProcessStatus False False) :: IO (Either IOException (Maybe (ProcessID, ProcessStatus)))
-      pure (statuses == replicate 3 (ExitedWith 127) && either isDoesNotExistError (const False) children))
+      pure (all (either (const True) (const False)) outcomes && either isDoesNotExistError (const False) children))
   ]
  where
   bounded = "s -> ((f -> {a = f (s | cat), b = f (cat)}) (x -> x)).a"

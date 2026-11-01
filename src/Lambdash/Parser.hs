@@ -59,16 +59,24 @@ isBound name (BoundNames names) = Set.member name names
 
 -- | Add names for the length of a parser.
 binding :: [Name] -> Parser a -> Parser a
-binding names = local add
+binding names = local (\context -> context {contextBound = add (contextBound context)})
  where
   add AllBound = AllBound
   add (BoundNames bound) = BoundNames (Set.union (Set.fromList names) bound)
 
-type Parser = ParsecT Void String (Reader Bound)
+data ParseContext = ParseContext
+  { contextBound :: Bound
+  , commaDelimiter :: Bool
+  }
+
+type Parser = ParsecT Void String (Reader ParseContext)
+
+withComma :: Bool -> Parser a -> Parser a
+withComma active = local (\context -> context {commaDelimiter = active})
 
 -- | Run a parser, given what is bound.
 runIn :: Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
-runIn bound p input = runReader (runParserT p "<input>" input) bound
+runIn bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False)
 
 -- | Skip spaces and comments.
 sc :: Parser ()
@@ -128,7 +136,7 @@ literal =
 record :: Parser Expr
 record = ERecord <$> between (symbol "{") (char '}') (field `sepBy` symbol ",")
   where
-    field = (,) <$> lexeme identifier <*> (symbol "=" *> expr)
+    field = (,) <$> lexeme identifier <*> (symbol "=" *> withComma True expr)
 
 -- | @.a.b@ means @\\r -> r.a.b@. Use the name @r@, which cannot capture anything,
 -- because the body mentions nothing else.
@@ -143,10 +151,11 @@ atom :: Parser Expr
 atom =
   (ELit <$> literal)
     <|> record
+    <|> (EList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
     <|> accessor
     <|> (EVar <$> identifier)
     <|> (ELit LUnit <$ try (symbol "(" *> char ')'))
-    <|> between (symbol "(") (char ')') expr
+    <|> between (symbol "(") (char ')') (withComma False expr)
 
 -- | An atom, then any number of @.label@, then skip what follows.
 --
@@ -167,7 +176,9 @@ stringLiteral = char '"' *> manyTill L.charLiteral (char '"')
 
 -- | One character of a bareword. These end a word because the line needs them.
 wordChar :: Parser Char
-wordChar = satisfy (\c -> not (isSpace c) && c `notElem` (")}|\"$" :: String))
+wordChar = do
+  comma <- asks commaDelimiter
+  satisfy (\c -> not (isSpace c) && c `notElem` (")}]|\"$" :: String) && not (comma && c == ','))
 
 -- | The head of an external command: a path, or a word that starts with a name
 -- that nothing binds. A bound name is left for 'application'.
@@ -177,11 +188,11 @@ commandHead = do
   if isPath
     then do
       -- The empty name is bound only under 'AllBound'.
-      everything <- asks (isBound "")
+      everything <- asks (isBound "" . contextBound)
       when everything (fail "no external commands here")
     else do
       name <- lookAhead identifier
-      bound <- asks (isBound name)
+      bound <- asks (isBound name . contextBound)
       when bound (fail "a bound name is not a command")
   some wordChar
 

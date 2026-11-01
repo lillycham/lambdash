@@ -75,7 +75,11 @@ solvesTo a b t expected = case solve a b of
 
 tests :: [(String, Bool)]
 tests =
-  [ ("stream: constraints reach later positions", solve ((TStream noEffects) t0 t0 t1) ((TStream noEffects) TBytes TBytes TStatus) == Right (compose (singleton v1 TStatus) (singleton v0 TBytes)))
+  [ ("list: recursive item types fail the occurs check", refusesInfinite (solve t0 (TList t0)))
+  , ("stage: recursive input types fail the occurs check", refusesInfinite (solve t0 (TStage t0 TInt)))
+  , ("collector: recursive output types fail the occurs check", refusesInfinite (solve t0 (TCollector TInt t0)))
+  , ("list: record rows unify inside items", solves (TList (TRecord (RVar v0))) (TList (TRecord (ext "size" TInt REmpty))))
+  , ("stream: constraints reach later positions", solve ((TStream noEffects) t0 t0 t1) ((TStream noEffects) TBytes TBytes TStatus) == Right (compose (singleton v1 TStatus) (singleton v0 TBytes)))
   , ("stream: shared positions cannot disagree", case solve ((TStream noEffects) t0 t0 t1) ((TStream noEffects) TBytes TInt TStatus) of Left (Mismatch _ _) -> True; _ -> False)
   , ("stream: rows unify in stream items", solves ((TStream noEffects) TBytes (TRecord (RVar v0)) TStatus) ((TStream noEffects) TBytes (TRecord (ext "size" TInt REmpty)) TStatus))
   , ("stream: occurs checks the return value", solve t0 ((TStream noEffects) TBytes TBytes t0) == Left (Infinite v0 ((TStream noEffects) TBytes TBytes t0)))

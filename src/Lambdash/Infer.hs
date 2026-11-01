@@ -70,6 +70,7 @@ data Expr
     ECmd Name [Arg]
   | -- | @{name = 1, ok = true}@.
     ERecord [(Label, Expr)]
+  | EList [Expr]
   | -- | @r.name@.
     ESelect Expr Label
   deriving (Eq, Show)
@@ -119,6 +120,9 @@ ftv (TRecord r) = ftvRow r
 ftv (TComp eff t) = ftvEffects eff `Set.union` ftv t
 ftv (TStream eff i o r) = Set.unions (ftvEffects eff : map ftv [i, o, r])
 ftv (TQualified cs ty) = Set.unions (ftv ty : map constraintVars cs)
+ftv (TList ty) = ftv ty
+ftv (TStage i o) = ftv i `Set.union` ftv o
+ftv (TCollector i o) = ftv i `Set.union` ftv o
 
 ftvEffects :: EffRow -> Set Var
 ftvEffects (EffRow _ vars) = vars
@@ -264,6 +268,35 @@ infer env (EPipe left right) = do
       left' = apply shape (apply s2 leftTy)
       right' = apply shape rightTy
   (s3, result) <- case (left', right') of
+    (TStream eff input output result', TCollector item collected) -> do
+      a <- unifying (unify output item)
+      b <- unifying (unify (apply a input) TBytes)
+      pure (b `compose` a, TComp eff (collectedTy collected result'))
+    (TStage input output, TCollector item collected) -> do
+      s <- unifying (unify output item)
+      pure (s, TCollector input collected)
+    (TComp eff value, TCollector item collected) -> do
+      s <- unifying (unify value item)
+      pure (s, TComp eff (collectedTy collected TUnit))
+    (_, TCollector item collected) -> do
+      s <- unifying (unify left' item)
+      pure (s, TComp noEffects (collectedTy collected TUnit))
+    (TStream eff input output result', TStage item output') -> do
+      s <- unifying (unify output item)
+      pure (s, TStream eff input output' result')
+    (TStage input output, TStage item output') -> do
+      s <- unifying (unify output item)
+      pure (s, TStage input output')
+    (TComp eff value, TStage input output) -> do
+      s <- unifying (unify value input)
+      pure (s, TStream eff TBytes output TUnit)
+    (_, TStage input output) -> do
+      s <- unifying (unify left' input)
+      pure (s, TStream noEffects TBytes output TUnit)
+    (TStage input output, _) -> do
+      item <- fresh
+      s <- unifying (unify right' (TFun output item))
+      pure (s, TStage input item)
     (TStream eff input output _, TStream eff' input' output' result') -> do
       s <- unifying (unify output input')
       pure (s, TStream (unionEffects eff eff') input output' result')
@@ -286,6 +319,19 @@ infer env (EPipe left right) = do
       s <- unifying (unify right' (TFun left' item))
       pure (s, item)
   pure (s3 `compose` known, apply s3 result)
+ where
+  collectedTy item result = TRecord (RExtend "items" (TList item) (RExtend "status" result REmpty))
+
+infer env (EList items) = do
+  itemTy <- fresh
+  sub <- foldM (check itemTy) emptySubst items
+  pure (sub, TList (apply sub itemTy))
+ where
+  check itemTy known item = do
+    (learned, ty) <- infer (applyEnv known env) item
+    let combined = learned `compose` known
+    equal <- unifying (unify (apply combined itemTy) ty)
+    pure (equal `compose` combined)
 
 infer env (ELet x e1 e2) = do
   (raw, t1) <- infer env e1
@@ -326,6 +372,7 @@ commands (EApp f x) = commands f <> commands x
 commands (EPipe left right) = commands left <> commands right
 commands (ELet _ bound body) = commands bound <> commands body
 commands (ERecord fields) = concatMap (commands . snd) fields
+commands (EList items) = concatMap commands items
 commands (ESelect record _) = commands record
 commands _ = []
 
@@ -357,7 +404,9 @@ inferRunIn env expr = evalStateT go (nextUnknown env)
   go = do
     (s1, t) <- infer env expr
     case apply s1 t of
-      TStream _ _ _ result -> finish env s1 result
+      TStream _ input _ result -> do
+        s2 <- unifying (unify input TBytes)
+        finish env (s2 `compose` s1) result
       TComp _ result -> finish env s1 result
       ty -> do
         result <- fresh

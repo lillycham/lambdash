@@ -78,7 +78,10 @@ provesClosedRow equations row = closeEffects equations row == expected
 
 tests :: [(String, Bool)]
 tests =
-  [ ("constraints: SAT agrees with exhaustive finite models", all (\cs -> satisfiableEffects cs == any (`holds` cs) models) constraintCases)
+  [ ("lists: element qualifications survive generalisation", case inferSource ("[" <> bounded <> "]") of
+        Right ty@(TQualified cs (TList _)) -> not (null cs) && not (null (fst (unqualify (case generalise Map.empty ty of Forall _ t -> t))))
+        _ -> False)
+  , ("constraints: SAT agrees with exhaustive finite models", all (\cs -> satisfiableEffects cs == any (`holds` cs) models) constraintCases)
   , ("constraints: substitutions preserve all finite models", all preservesModels constraintCases)
   , ("constraints: closed-row proofs agree with finite models", all (\cs -> all (provesClosedRow cs) [effectVar v0, unionEffects echo (effectVar v0), unionEffects (effectVar v0) (effectVar v1), echo]) constraintCases)
   , ("constraints: bounds do not guess a value", case solveConstraints emptySubst {effectConstraints = [EffEqual (unionEffects echo (effectVar v0)) echo]} of

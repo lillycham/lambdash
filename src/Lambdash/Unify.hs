@@ -79,6 +79,10 @@ data Ty
     TStream EffRow Ty Ty Ty
   | -- | Equalities that must hold when the type is instantiated.
     TQualified [EffConstraint] Ty
+  | TList Ty
+  | -- | Pure adapters and collectors. Neither runs until connected.
+    TStage Ty Ty
+  | TCollector Ty Ty
   deriving (Eq, Show)
 
 data Effect = Exec String | Console deriving (Eq, Ord, Show)
@@ -105,6 +109,9 @@ unqualify :: Ty -> ([EffConstraint], Ty)
 unqualify (TQualified constraints ty) = let (more, bare) = unqualify ty in (constraints <> more, bare)
 unqualify (TFun a b) = let (ca, a') = unqualify a; (cb, b') = unqualify b in (ca <> cb, TFun a' b')
 unqualify (TComp eff ty) = let (cs, bare) = unqualify ty in (cs, TComp eff bare)
+unqualify (TList ty) = let (cs, bare) = unqualify ty in (cs, TList bare)
+unqualify (TStage i o) = let (ci, i') = unqualify i; (co, o') = unqualify o in (ci <> co, TStage i' o')
+unqualify (TCollector i o) = let (ci, i') = unqualify i; (co, o') = unqualify o in (ci <> co, TCollector i' o')
 unqualify (TStream eff i o r) =
   let (ci, i') = unqualify i; (co, o') = unqualify o; (cr, r') = unqualify r
   in (ci <> co <> cr, TStream eff i' o' r')
@@ -207,6 +214,9 @@ apply s (TRecord r) = TRecord (applyRow s r)
 apply s (TComp eff t) = TComp (applyEffects s eff) (apply s t)
 apply s (TStream eff i o r) = TStream (applyEffects s eff) (apply s i) (apply s o) (apply s r)
 apply s (TQualified cs ty) = qualify (map (applyConstraint s) cs) (apply s ty)
+apply s (TList t) = TList (apply s t)
+apply s (TStage i o) = TStage (apply s i) (apply s o)
+apply s (TCollector i o) = TCollector (apply s i) (apply s o)
 apply _ t = t
 
 -- | Replace each solved unknown in a row, in the tail and in the field types.
@@ -241,6 +251,9 @@ occurs v (TRecord r) = occursRow v r
 occurs v (TComp (EffRow _ vars) t) = Set.member v vars || occurs v t
 occurs v (TStream (EffRow _ vars) i o r) = Set.member v vars || any (occurs v) [i, o, r]
 occurs v (TQualified cs ty) = any (Set.member v . constraintVars) cs || occurs v ty
+occurs v (TList t) = occurs v t
+occurs v (TStage i o) = occurs v i || occurs v o
+occurs v (TCollector i o) = occurs v i || occurs v o
 occurs _ _ = False
 
 -- | Does this unknown appear anywhere in this row?
@@ -303,6 +316,9 @@ unifyBare (TFun l1 r1) (TFun l2 r2) = do
   s2 <- unify (apply s1 r1) (apply s1 r2)
   pure (s2 `compose` s1)
 unifyBare (TRecord r1) (TRecord r2) = unifyRow r1 r2
+unifyBare (TList a) (TList b) = unify a b
+unifyBare (TStage i o) (TStage i' o') = unify (TFun i o) (TFun i' o')
+unifyBare (TCollector i o) (TCollector i' o') = unify (TFun i o) (TFun i' o')
 unifyBare (TComp eff a) (TComp eff' b) = do
   s1 <- unify a b
   s2 <- unifyEffects (applyEffects s1 eff) (applyEffects s1 eff')

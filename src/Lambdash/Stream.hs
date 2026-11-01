@@ -1,7 +1,7 @@
 -- | Bounded streams. Adjacent external stages share an OS pipe. A pure stage
 -- uses a worker and one item of buffering between two pure stages. Closing a
 -- downstream reader releases blocked writers and propagates cancellation.
-module Lambdash.Stream (Stage (..), runStages) where
+module Lambdash.Stream (Stage (..), StreamError (..), runStages) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently, mapConcurrently_)
@@ -25,6 +25,12 @@ data Stage a
   = External String [String]
   | MapStage (a -> a)
   | SourceStage (IO a)
+  | SourceListStage [a]
+  | TransformStage (IO (Maybe a) -> (a -> IO ()) -> IO ())
+
+-- Expected data errors cross the worker boundary after resource cleanup.
+data StreamError = StreamError String deriving (Eq, Show)
+instance Exception StreamError
 
 data Input a = RawInput Fd (IO ()) | Input (IO (Maybe a)) (IO ())
 data Output a = RawOutput Fd (IO ()) | Output (a -> IO ()) (IO ())
@@ -136,6 +142,8 @@ worker stage (Input receive closeIn) (Output emit closeOut) =
  where
   work = case stage of
     SourceStage action -> action >>= emit
+    SourceListStage values -> mapM_ emit values
+    TransformStage transform -> transform receive emit
     MapStage f -> loop f
     External _ _ -> error "worker: external stage"
   loop f = receive >>= maybe (pure ()) (\value -> emit (f value) >> loop f)
@@ -195,14 +203,14 @@ runStages fromBytes toBytes sink stages@(firstStage : restStages) = do
   -- before the first spawn, so a missing downstream program runs nothing.
   missing <- firstMissing [name | External name _ <- stages]
   case missing of
-    Just name -> hPutStrLn stderr ("command not found: " <> name) >> pure (ExitedWith 127)
+    Just name -> throwIO (StreamError ("command not found: " <> name))
     Nothing -> do
       outcome <- try $ do
         when (any (any (elem '\0')) [name : args | External name args <- stages]) $
           ioError (userError "a command or argument contains NUL")
         execute
       case outcome of
-        Left err -> hPutStrLn stderr ("pipeline failed: " <> show (err :: IOException)) >> pure (ExitedWith 127)
+        Left err -> throwIO (StreamError ("pipeline failed: " <> show (err :: IOException)))
         Right status -> hFlush stdout >> pure status
  where
   firstMissing [] = pure Nothing

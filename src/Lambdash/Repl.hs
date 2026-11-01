@@ -21,6 +21,8 @@ import Data.Char (chr, ord)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.List (intercalate)
+import Control.Exception (catch)
+import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
@@ -88,6 +90,9 @@ renderEffectsType ty = evalState (renderTy ty) Map.empty
 hideEffects :: Ty -> Ty
 hideEffects (TFun a b) = TFun (hideEffects a) (hideEffects b)
 hideEffects (TQualified _ ty) = hideEffects ty
+hideEffects (TList ty) = TList (hideEffects ty)
+hideEffects (TStage i o) = TStage (hideEffects i) (hideEffects o)
+hideEffects (TCollector i o) = TCollector (hideEffects i) (hideEffects o)
 hideEffects (TComp _ t) = TComp noEffects (hideEffects t)
 hideEffects (TStream _ i o r) = TStream noEffects (hideEffects i) (hideEffects o) (hideEffects r)
 hideEffects (TRecord row) = TRecord (hideRow row)
@@ -113,6 +118,11 @@ renderVar var = do
 renderTy :: Ty -> State TypeNames String
 renderTy (TVar var) = renderVar var
 renderTy (TCon name) = pure name
+renderTy (TList ty) = do
+  text <- renderTy ty
+  pure ("[" <> text <> "]")
+renderTy (TStage i o) = renderAdapter "Stage" i o
+renderTy (TCollector i o) = renderAdapter "Collector" i o
 renderTy (TQualified constraints ty) = do
   conditions <- mapM renderConstraint constraints
   text <- renderTy ty
@@ -131,6 +141,8 @@ renderTy (TComp eff result) = do
     TFun _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     TComp _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     TStream _ _ _ _ -> "Comp" <> effects <> " (" <> text <> ")"
+    TStage _ _ -> "Comp" <> effects <> " (" <> text <> ")"
+    TCollector _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     _ -> "Comp" <> effects <> " " <> text
 renderTy (TStream eff input output result) = do
   effects <- renderEffects eff
@@ -139,11 +151,25 @@ renderTy (TStream eff input output result) = do
         TFun _ _ -> "(" <> text <> ")"
         TComp _ _ -> "(" <> text <> ")"
         TStream _ _ _ _ -> "(" <> text <> ")"
+        TStage _ _ -> "(" <> text <> ")"
+        TCollector _ _ -> "(" <> text <> ")"
         _ -> text
   pure ("Stream" <> effects <> " " <> unwords (zipWith argument [input, output, result] parts))
 renderTy (TRecord row) = do
   fields <- renderRow row
   pure ("{" <> fields <> "}")
+
+renderAdapter :: String -> Ty -> Ty -> State TypeNames String
+renderAdapter name input output = do
+  parts <- mapM renderTy [input, output]
+  let argument ty text = case ty of
+        TFun _ _ -> "(" <> text <> ")"
+        TComp _ _ -> "(" <> text <> ")"
+        TStream _ _ _ _ -> "(" <> text <> ")"
+        TStage _ _ -> "(" <> text <> ")"
+        TCollector _ _ -> "(" <> text <> ")"
+        _ -> text
+  pure (name <> " " <> unwords (zipWith argument [input, output] parts))
 
 renderEffects :: EffRow -> State TypeNames String
 renderEffects row@(EffRow labels vars)
@@ -217,7 +243,10 @@ data Step
 --
 -- A unit result shows nothing, so that @print 1@ shows only @1@.
 step :: Session -> String -> IO Step
-step session input =
+step session input = stepLine session input `catch` \(StreamError message) -> pure (Continue session message)
+
+stepLine :: Session -> String -> IO Step
+stepLine session input =
   case parseCommand (BoundNames (Map.keysSet types)) input of
     Left err -> pure (Continue session err)
     Right Blank -> pure (Continue session "")
@@ -229,9 +258,10 @@ step session input =
         TComp _ _ -> preflight ty $ do
           result <- runComp (eval values expression)
           pure (Continue session (showResult result))
-        TStream _ _ _ _ -> preflight ty $ do
-          result <- runComp (eval values expression)
-          pure (Continue session (showResult result))
+        TStream _ _ _ _ -> checked (inferRunIn types expression) $ \_ ->
+          preflight ty $ do
+            result <- runComp (eval values expression)
+            pure (Continue session (showResult result))
         _ -> pure (Continue session (render (eval values expression)))
     Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
       pure (bound name ty (eval values expression))

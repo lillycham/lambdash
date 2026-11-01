@@ -37,7 +37,8 @@ Use an external such as `wc -c` for a total until stream folds exist.
 
 The prompt writes byte output unchanged and shows other output items one per line.
 There is no implicit conversion from a record, integer or string into external input.
-Incremental text decoders, line parsers, folds and output collection are future work.
+`lines` frames UTF-8 text across byte chunks. `filter` selects items, and `collect` returns items with the source status.
+See [structured streams](streams.md). General folds remain future work.
 
 ## Effects and status
 
@@ -51,8 +52,9 @@ s <- sh -c "exit 7" | cat
 s
 ```
 
-The last external command supplies the pipeline status. In this example, `s` is `exit 0`.
-A pure stage preserves that status. There is no `pipefail` option yet.
+The right stream supplies the return value. An external command returns its status.
+In this example, `s` is `exit 0`. A pure adapter preserves that status.
+An `each` source returns `()` instead. There is no `pipefail` option yet.
 An upstream `SIGPIPE` after a downstream exit is normal cancellation.
 
 Inference checks the whole expression before any stage runs.
@@ -60,7 +62,7 @@ The REPL preflight reads the outer action's inferred effect row.
 It resolves external names through bindings and higher-order functions before any action runs.
 Latent actions in records, functions and return values keep their own requirements.
 The runtime also checks the concrete stream plan before the first spawn.
-A runtime spawn failure returns status 127 and cancels the stages that did start.
+A runtime spawn failure reports an error and cancels the stages that did start.
 The executable can still change after preflight; that race cannot be eliminated here.
 
 Pure stages run concurrently with external stages and use bounded buffers.

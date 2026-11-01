@@ -36,10 +36,11 @@ accessor    = "." IDENT { "." IDENT } ;
 Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
-atom        = literal | record | accessor | IDENT | "(" expr ")" ;
+atom        = literal | record | list | accessor | IDENT | "(" expr ")" ;
 literal     = INT | STRING | "true" | "false" | "(" ")" ;
 record      = "{" [ field { "," field } ] "}" ;
 field       = IDENT "=" expr ;
+list        = "[" [ expr { "," expr } ] "]" ;
 ```
 
 ## Tokens
@@ -53,7 +54,7 @@ COMMENT     = "--" { any character except newline } ;
 
 HEAD        = WORD ;     (* a path, or a word that starts with an unbound name *)
 ARG         = "$" IDENT | STRING | WORD ;
-WORD        = { any character except space and ) } | " $ } ;
+WORD        = { any character except space and ) } ] | " $ } ;
 ```
 
 A reserved word ends where a character that can continue an `IDENT` does not
@@ -78,6 +79,9 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
   session names, lambda parameters and let names. The parser never reads `PATH`.
 - Inside `external`, only spaces separate words, and `--` is an ordinary word.
   A line, a pipe or a closing bracket ends it. A quoted pipe stays in its word.
+- In a list element or record field, a comma also ends an external argument.
+  Parentheses reset that rule: `[(echo a,b), echo c]` has two elements.
+  Outside these containers, `echo a,b` keeps the comma in its argument.
 
 ## REPL lines
 
@@ -93,6 +97,7 @@ line        = [ ":q" | ":t" expr | IDENT "=" expr | IDENT "<-" expr | expr ] EOF
 - `e` runs if its type is `Comp a` or `Stream i o r`. Otherwise it shows the value.
 
 See [pipelines](pipelines.md) for stream types, byte chunks and exit status.
+See [structured streams](streams.md) for lists, line framing, filters and collection.
 
 ## Known sharp edges
 

@@ -62,6 +62,29 @@ expect {
   eof { fail "preflight (shell died)" }
 }
 prompt
+send "r <- printf \"owl\\ncat\\n\" | lines | filter (contains \"owl\") | collect\r"
+see {r : \{items : \[String\], status : Status\}} "a collection binds its typed result"
+prompt
+send "r.items\r"
+see {\["owl"\]\r\n} "filtered lines survive collection"
+prompt
+
+send "r <- printf \"\\\\377\\n\" | lines | collect\r"
+see {lines: invalid or incomplete UTF-8} "a decode error returns to the prompt"
+prompt
+send "r.items\r"
+see {\["owl"\]\r\n} "a failed collection preserves the old binding"
+prompt
+
+send "r <- sleep 100 | lines | collect\r"
+after 500
+send "\003"
+see {r : \{items : \[String\], status : Status\}} "Ctrl-C ends collection without killing the shell"
+prompt
+send "r.status\r"
+see {signal 2} "collection retains the interrupted command status"
+prompt
+
 send ":q\r"
 expect eof
 puts "\nALL PASSED"

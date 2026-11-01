@@ -11,7 +11,7 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Stream, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Stream, Lambdash.Unify
   c-sources:       cbits/spawn.c
   build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, stm, text, transformers, unix
 
@@ -80,3 +80,10 @@ test-suite effect-tests
   hs-source-dirs: test
   main-is:        EffectTests.hs
   build-depends:  base, containers, lambdash, transformers
+
+test-suite lines-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        LinesTests.hs
+  build-depends:  base, bytestring, lambdash, text
