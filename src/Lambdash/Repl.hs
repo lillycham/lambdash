@@ -107,7 +107,16 @@ renderTy (TComp result) = do
   pure $ case result of
     TFun _ _ -> "Comp (" <> text <> ")"
     TComp _ -> "Comp (" <> text <> ")"
+    TStream _ _ _ -> "Comp (" <> text <> ")"
     _ -> "Comp " <> text
+renderTy (TStream input output result) = do
+  parts <- mapM renderTy [input, output, result]
+  let argument ty text = case ty of
+        TFun _ _ -> "(" <> text <> ")"
+        TComp _ -> "(" <> text <> ")"
+        TStream _ _ _ -> "(" <> text <> ")"
+        _ -> text
+  pure ("Stream " <> unwords (zipWith argument [input, output, result] parts))
 renderTy (TRecord row) = do
   fields <- renderRow row
   pure ("{" <> fields <> "}")
@@ -164,6 +173,9 @@ step session input =
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
       case ty of
         TComp _ -> preflight expression $ do
+          result <- runComp (eval values expression)
+          pure (Continue session (showResult result))
+        TStream _ _ _ -> preflight expression $ do
           result <- runComp (eval values expression)
           pure (Continue session (showResult result))
         _ -> pure (Continue session (render (eval values expression)))

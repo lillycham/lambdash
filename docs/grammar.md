@@ -13,10 +13,12 @@ Whitespace and comments can appear between any two items in a syntax rule.
 ```ebnf
 program     = expr EOF ;
 
-expr        = let | lambda | external | application ;
+expr        = let | lambda | pipeline ;
 
 let         = "let" IDENT "=" expr "in" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
+pipeline    = stage { "|" stage } ;
+stage       = lambda | external | application ;
 application = postfix { postfix } ;
 external    = HEAD { ARG } ;
 ```
@@ -67,13 +69,15 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
 - The body of a `lambda` or a `let` goes as far right as it can. A lambda
   argument needs parentheses: `f (x -> x)`.
 - `application` goes to the left: `f x y` is `(f x) y`.
+- `pipeline` goes to the left: `a | b | c` is `(a | b) | c`.
+- Application has higher precedence than `|`: `a | f x` is `a | (f x)`.
 - `postfix` goes to the left: `r.a.b` is `(r.a).b`.
 - `.a.b` means `r -> r.a.b`.
 - Inside `INT`, no space can follow the sign.
 - `external` applies only when nothing binds the head. Bound names are the
   session names, lambda parameters and let names. The parser never reads `PATH`.
 - Inside `external`, only spaces separate words, and `--` is an ordinary word.
-  A line or a closing bracket ends it.
+  A line, a pipe or a closing bracket ends it. A quoted pipe stays in its word.
 
 ## REPL lines
 
@@ -85,8 +89,10 @@ line        = [ ":q" | ":t" expr | IDENT "=" expr | IDENT "<-" expr | expr ] EOF
 ```
 
 - `x = e` names a value and runs nothing.
-- `x <- e` runs `e`, which must have a type `Comp a`, and binds the result.
-- `e` runs if its type is `Comp a`. Otherwise it shows the value.
+- `x <- e` runs a `Comp a` or `Stream i o r` and binds its return value (`a` or `r`).
+- `e` runs if its type is `Comp a` or `Stream i o r`. Otherwise it shows the value.
+
+See [pipelines](pipelines.md) for stream types, byte chunks and exit status.
 
 ## Known sharp edges
 

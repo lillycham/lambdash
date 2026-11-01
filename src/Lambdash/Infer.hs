@@ -59,6 +59,7 @@ data Expr
   | ELit Lit
   | ELam Name Expr
   | EApp Expr Expr
+  | EPipe Expr Expr
   | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
     -- in @bound@.
     ELet Name Expr Expr
@@ -113,6 +114,7 @@ ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
 ftv (TCon _) = Set.empty
 ftv (TRecord r) = ftvRow r
 ftv (TComp t) = ftv t
+ftv (TStream i o r) = Set.unions (map ftv [i, o, r])
 
 -- | The unknowns that appear in a row.
 ftvRow :: Row -> Set Var
@@ -186,7 +188,7 @@ infer _ (ELit (LStr _))  = pure (emptySubst, TString)
 -- For now, an argument must be a String. The checker has nothing to convert with.
 infer env (ECmd _ args) = do
   subs <- mapM check args
-  pure (foldr compose emptySubst subs, TComp TStatus)
+  pure (foldr compose emptySubst subs, TStream TBytes TBytes TStatus)
  where
   check (AWord _) = pure emptySubst
   check (AVar name) = do
@@ -207,6 +209,45 @@ infer env (EApp e1 e2) = do
   s3 <- unifying (unify t1' (TFun t2 tv))
   let s_final = s3 `compose` s2 `compose` s1
   pure (s_final, apply s3 tv)
+
+infer env (EPipe left right) = do
+  (s1, leftTy) <- infer env left
+  (s2, rightTy) <- infer (applyEnv s1 env) right
+  -- An unknown producer is a stream. Deferring this choice to evaluation
+  -- would let a polymorphic function change meaning after instantiation.
+  shape <- case apply s2 leftTy of
+    TVar _ -> do
+      input <- fresh
+      output <- fresh
+      result <- fresh
+      unifying (unify (apply s2 leftTy) (TStream input output result))
+    _ -> pure emptySubst
+  let known = shape `compose` s2 `compose` s1
+      left' = apply shape (apply s2 leftTy)
+      right' = apply shape rightTy
+  (s3, result) <- case (left', right') of
+    (TStream input output _, TStream input' output' result') -> do
+      s <- unifying (unify output input')
+      pure (s, TStream input output' result')
+    (TStream input output result', _) -> do
+      item <- fresh
+      s <- unifying (unify right' (TFun output item))
+      pure (s, TStream input item result')
+    (TComp value, TStream input output result') -> do
+      s <- unifying (unify value input)
+      pure (s, TStream TBytes output result')
+    (_, TStream input output result') -> do
+      s <- unifying (unify left' input)
+      pure (s, TStream TBytes output result')
+    (TComp value, _) -> do
+      item <- fresh
+      s <- unifying (unify right' (TFun value item))
+      pure (s, TComp item)
+    _ -> do
+      item <- fresh
+      s <- unifying (unify right' (TFun left' item))
+      pure (s, item)
+  pure (s3 `compose` known, apply s3 result)
 
 infer env (ELet x e1 e2) = do
   (s1, t1) <- infer env e1
@@ -239,6 +280,7 @@ commands :: Expr -> [Name]
 commands (ECmd name _) = [name]
 commands (ELam _ body) = commands body
 commands (EApp f x) = commands f <> commands x
+commands (EPipe left right) = commands left <> commands right
 commands (ELet _ bound body) = commands bound <> commands body
 commands (ERecord fields) = concatMap (commands . snd) fields
 commands (ESelect record _) = commands record
@@ -252,16 +294,19 @@ inferIn env expr = evalStateT (go env expr) 0
     (s, t) <- infer e x
     pure (apply s t)
 
--- | The type that running an expression gives. The expression has to be a
--- computation, so its type unifies with @TComp a@, and that @a@ is the answer.
+-- | The return type of a computation or stream. A stream's output items are
+-- separate from its return value. An unknown action defaults to @TComp a@.
 inferRunIn :: Env -> Expr -> Either InferError Ty
 inferRunIn env expr = evalStateT go 0
  where
   go = do
     (s1, t) <- infer env expr
-    result <- fresh
-    s2 <- unifying (unify (apply s1 t) (TComp result))
-    pure (apply s2 result)
+    case apply s1 t of
+      TStream _ _ result -> pure result
+      ty -> do
+        result <- fresh
+        s2 <- unifying (unify ty (TComp result))
+        pure (apply s2 result)
 
 -- | Infer with nothing in scope.
 inferType :: Expr -> Either InferError Ty

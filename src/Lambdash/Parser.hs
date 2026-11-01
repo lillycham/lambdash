@@ -8,6 +8,7 @@
 -- > .name  .a.b                 accessor: \r -> r.name
 -- > 1  "a"  true  false  ()  x  (e)  atoms
 -- > git log --oneline $x        external command, when nothing binds the head
+-- > source | stage | stage      pipeline, below application precedence
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
@@ -230,7 +231,12 @@ letIn = do
 
 -- | Any expression.
 expr :: Parser Expr
-expr = letIn <|> lambda <|> application
+expr = letIn <|> lambda <|> pipeline
+ where
+  pipeline = do
+    firstStage <- application
+    rest <- many (symbol "|" *> (lambda <|> application))
+    pure (foldl EPipe firstStage rest)
 
 -- | Parse one whole expression, or give a readable error.
 parseExpr :: String -> Either String Expr

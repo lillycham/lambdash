@@ -18,9 +18,14 @@ where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.ByteString qualified as BS
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
-import Lambdash.Process (Status (..), runExternal)
+import Lambdash.Process (Status (..))
+import Lambdash.Stream (Stage (..), runStages)
 import Lambdash.Unify
+import System.IO (stdout)
 
 -- | What an expression can evaluate to. Fields stay in written order, because
 -- that is the order to show them in. The checker says that a field exists, and
@@ -31,12 +36,14 @@ data Value
   | VUnit
   | VStr String
   | VStatus Status
+  | VBytes BS.ByteString
   | VRecord [(Label, Value)]
   | -- | The name identifies the builtin.
     VBuiltin Name (Value -> Value)
   | VClosure Name Expr Scope
   | -- | An action. Building one runs nothing: only 'runComp' does.
     VComp (IO Value)
+  | VStream [Stage Value]
 
 -- | What each name in scope has as its value.
 type Scope = Map Name Value
@@ -50,12 +57,14 @@ render VUnit = "()"
 render (VStr s) = show s
 render (VStatus (ExitedWith n)) = "exit " <> show n
 render (VStatus (KilledBy n)) = "signal " <> show n
+render (VBytes bytes) = "<" <> show (BS.length bytes) <> " bytes>"
 render (VRecord fields) = "{" <> commaSep (map renderField fields) <> "}"
   where
     renderField (label, value) = label <> " = " <> render value
 render (VBuiltin _ _) = "<function>"
 render (VClosure _ _ _) = "<function>"
 render (VComp _) = "<computation>"
+render (VStream _) = "<stream>"
 
 commaSep :: [String] -> String
 commaSep = foldr step ""
@@ -80,10 +89,25 @@ select label (VRecord fields) =
     Nothing -> error "select: the checker passed a missing field"
 select _ _ = error "select: the checker passed a non-record"
 
--- | Run a computation value. This is the only place where effects happen.
+-- | Run a computation or stream. Stream output goes to stdout, and the final
+-- external's status is the return value.
 runComp :: Value -> IO Value
 runComp (VComp action) = action
+runComp (VStream stages) = VStatus <$> runStages VBytes bytes output stages
+ where
+  bytes (VBytes value) = value
+  bytes _ = error "runComp: the checker passed non-Bytes to an external"
+  output (VBytes value) = BS.hPut stdout value
+  output value = putStrLn (render value)
 runComp _ = error "runComp: the checker passed a non-computation"
+
+pipeValue :: Value -> Value -> Value
+pipeValue (VStream left) (VStream right) = VStream (left <> right)
+pipeValue (VStream left) function = VStream (left <> [MapStage (applyValue function)])
+pipeValue (VComp action) (VStream right) = VStream (SourceStage action : right)
+pipeValue value (VStream right) = VStream (SourceStage (pure value) : right)
+pipeValue (VComp action) function = VComp (applyValue function <$> action)
+pipeValue value function = applyValue function value
 
 -- | Evaluate an expression that passed the checker.
 eval :: Scope -> Expr -> Value
@@ -95,11 +119,12 @@ eval env expression =
         Nothing -> error "eval: unbound name"
     ELit literal -> evalLit literal
     EApp function argument -> applyValue (eval env function) (eval env argument)
+    EPipe left right -> pipeValue (eval env left) (eval env right)
     ELam name body -> VClosure name body env
     ERecord fields -> VRecord [(label, eval env value) | (label, value) <- fields]
     ESelect record label -> select label (eval env record)
     ELet name value body -> eval (Map.insert name (eval env value) env) body
-    ECmd name args -> VComp (VStatus <$> runExternal name (map word args))
+    ECmd name args -> VStream [External name (map word args)]
   where
     evalLit (LInt n) = VInt n
     evalLit (LBool b) = VBool b
@@ -117,10 +142,16 @@ builtins =
   [ ("not", mono (TFun TBool TBool), VBuiltin "not" notV),
     ("add", mono (TFun TInt (TFun TInt TInt)), VBuiltin "add" add),
     ("print", Forall [t] (TFun (TVar t) (TComp TUnit)), VBuiltin "print" printV),
-    ("pure", Forall [t] (TFun (TVar t) (TComp (TVar t))), VBuiltin "pure" (VComp . pure))
+    ("pure", Forall [t] (TFun (TVar t) (TComp (TVar t))), VBuiltin "pure" (VComp . pure)),
+    ("encodeUtf8", mono (TFun TString TBytes), VBuiltin "encodeUtf8" encode),
+    ("byteLength", mono (TFun TBytes TInt), VBuiltin "byteLength" byteLength)
   ]
   where
     t = Var 0
+    encode (VStr value) = VBytes (Text.encodeUtf8 (Text.pack value))
+    encode _ = error "encodeUtf8: the checker passed a non-String"
+    byteLength (VBytes value) = VInt (BS.length value)
+    byteLength _ = error "byteLength: the checker passed non-Bytes"
     printV (VStr s) = VComp (VUnit <$ putStrLn s)
     printV value = VComp (VUnit <$ putStrLn (render value))
     notV (VBool b) = VBool (not b)

@@ -1,13 +1,10 @@
--- | Run external programs. This holds what the job-control spike proved: a child
--- gets its own process group and the terminal, and the shell takes both back.
---
--- There is no job table yet, so a stopped program gets a SIGCONT at once. Ctrl-Z
--- does nothing, and no program is left behind with nothing to resume it.
+-- | Process setup and spawn primitives. 'Lambdash.Stream' owns the lifetime
+-- of a foreground job, including a job with only one external stage.
 module Lambdash.Process
   ( Status (..)
   , setupTerminal
   , programExists
-  , runExternal
+  , spawnStage
   ) where
 
 import Control.Exception (IOException, try)
@@ -15,9 +12,8 @@ import Control.Monad (unless, void, when)
 import Foreign hiding (void)
 import Foreign.C
 import System.Directory (doesFileExist, findExecutable, getHomeDirectory)
-import System.Exit (ExitCode (..))
-import System.IO (hFlush, hPutStrLn, stderr, stdout)
-import System.Posix.IO (stdInput, stdOutput)
+import System.Posix.IO (stdInput)
+import System.Posix.Files (fileAccess)
 import System.Posix.Process
 import System.Posix.Signals
 import System.Posix.Terminal
@@ -60,59 +56,25 @@ expandHome path = pure path
 -- name is searched for on @PATH@.
 programExists :: String -> IO Bool
 programExists name
-  | '/' `elem` name = expandHome name >>= doesFileExist
+  | '/' `elem` name = do
+      file <- expandHome name
+      result <- try (do
+        exists <- doesFileExist file
+        if exists then fileAccess file False False True else pure False) :: IO (Either IOException Bool)
+      pure (either (const False) id result)
   | otherwise = maybe False (const True) <$> findExecutable name
 
-spawn :: String -> [String] -> IO ProcessID
-spawn file args =
+-- | Spawn a stage into a shared process group, with explicit pipe endpoints.
+spawnStage :: String -> [String] -> Fd -> Fd -> ProcessGroupID -> IO ProcessID
+spawnStage name args input output group = do
+  file <- expandHome name
+  when (any (elem '\0') (file : args)) $
+    ioError (userError "a command or argument contains NUL")
   withMany withCString (file : args) $ \cstrs ->
     withArray0 nullPtr cstrs $ \cargv ->
       withCString file $ \cfile ->
         alloca $ \pid -> do
-          err <- c_spawn cfile cargv stdInput stdOutput 0 pid
+          err <- c_spawn cfile cargv input output group pid
           unless (err == 0) $
             ioError (errnoToIOError "spawn" (Errno err) Nothing (Just file))
           peek pid
-
--- | Wait for a program to end. See the module header for stopped programs.
-wait :: ProcessID -> IO Status
-wait pid =
-  getProcessStatus True True pid >>= \status -> case status of
-    Nothing -> wait pid
-    Just (Stopped _) -> do
-      quietly (signalProcessGroup sigCONT pid)
-      wait pid
-    Just (Exited ExitSuccess) -> pure (ExitedWith 0)
-    Just (Exited (ExitFailure n)) -> pure (ExitedWith n)
-    Just (Terminated sig _) -> pure (KilledBy (fromIntegral sig))
-
--- | Give the program the terminal, wait, and take the terminal back. A program
--- can leave the terminal in any mode, so the shell restores its own.
-foreground :: ProcessID -> IO Status
-foreground pid = do
-  attrs <- getTerminalAttributes stdInput
-  group <- getProcessGroupID
-  -- Only the foreground group can call tcsetpgrp without this.
-  previous <- installHandler sigTTOU Ignore Nothing
-  quietly (setTerminalProcessGroupID stdInput pid)
-  quietly (signalProcessGroup sigCONT pid)
-  status <- wait pid
-  setTerminalProcessGroupID stdInput group
-  setTerminalAttributes stdInput attrs Immediately
-  void (installHandler sigTTOU previous Nothing)
-  pure status
-
--- | Run a program to its end. It inherits stdin, stdout, stderr and the
--- environment. A program that cannot start gets the usual status 127.
-runExternal :: String -> [String] -> IO Status
-runExternal name args = do
-  hFlush stdout
-  file <- expandHome name
-  started <- try (spawn file args) :: IO (Either IOException ProcessID)
-  case started of
-    Left _ -> do
-      hPutStrLn stderr ("command not found: " <> name)
-      pure (ExitedWith 127)
-    Right pid -> do
-      tty <- queryTerminal stdInput
-      if tty then foreground pid else wait pid

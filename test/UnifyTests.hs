@@ -75,7 +75,11 @@ solvesTo a b t expected = case solve a b of
 
 tests :: [(String, Bool)]
 tests =
-  [ ("apply: empty changes nothing", apply emptySubst (t0 ~> TInt) == t0 ~> TInt)
+  [ ("stream: constraints reach later positions", solve (TStream t0 t0 t1) (TStream TBytes TBytes TStatus) == Right (compose (singleton v1 TStatus) (singleton v0 TBytes)))
+  , ("stream: shared positions cannot disagree", case solve (TStream t0 t0 t1) (TStream TBytes TInt TStatus) of Left (Mismatch _ _) -> True; _ -> False)
+  , ("stream: rows unify in stream items", solves (TStream TBytes (TRecord (RVar v0)) TStatus) (TStream TBytes (TRecord (ext "size" TInt REmpty)) TStatus))
+  , ("stream: occurs checks the return value", solve t0 (TStream TBytes TBytes t0) == Left (Infinite v0 (TStream TBytes TBytes t0)))
+  , ("apply: empty changes nothing", apply emptySubst (t0 ~> TInt) == t0 ~> TInt)
   , ("apply: replaces an unknown", apply (singleton v0 TInt) t0 == TInt)
   , ("apply: leaves other unknowns", apply (singleton v0 TInt) t1 == t1)
   , ("apply: goes under TFun", apply (singleton v0 TInt) (t0 ~> t0) == TInt ~> TInt)

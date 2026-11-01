@@ -1,0 +1,67 @@
+#!/usr/bin/env expect
+# Usage: expect test/pipelines.exp path/to/lambdash
+set timeout 5
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {λ> $} "prompt" }
+
+spawn [lindex $argv 0]
+prompt
+send "printf \"a|b\" | cat\r"
+see {a\|bλ> $} "quoted bytes cross a pipeline"
+
+send "yes | head -1\r"
+see {y\r\n} "downstream demand ends an infinite source"
+prompt
+send "yes | (x -> x) | (x -> x) | head -1\r"
+see {y\r\n} "cancellation crosses pure stages"
+prompt
+
+send "sleep 100 | cat\r"
+after 500
+send "\003"
+see {signal 2} "Ctrl-C reaches the whole pipeline"
+prompt
+
+send "sleep 100 | (x -> x) | cat\r"
+after 500
+send "\032"
+after 500
+send "\003"
+see {signal 2} "Ctrl-Z resumes the whole group, including across pure stages"
+prompt
+
+send "cat | (x -> x) | cat\r"
+after 500
+send "from terminal\r"
+see {from terminal\r\nfrom terminal} "the first stage can read the terminal"
+send "\004"
+prompt
+
+send "sh -c \"stty -echo; echo modes-ready; sleep 100\" | cat\r"
+see {modes-ready\r\n} "the job disabled echo"
+send "\003"
+see {signal 2} "Ctrl-C ends a job with altered modes"
+prompt
+send "print 1\r"
+see {print 1\r+\n1\r\n} "the prompt restores echo"
+prompt
+
+send "echo should-not-run | nope-pipeline-xyz\r"
+expect {
+  -re {\r\nshould-not-run\r\n} { fail "preflight must run no stage" }
+  -re {command not found: nope-pipeline-xyz} { puts "\nPASS: preflight runs no stage" }
+  timeout { fail "preflight (timeout)" }
+  eof { fail "preflight (shell died)" }
+}
+prompt
+send ":q\r"
+expect eof
+puts "\nALL PASSED"

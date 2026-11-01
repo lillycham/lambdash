@@ -12,6 +12,7 @@ module Lambdash.Unify
     pattern TUnit,
     pattern TString,
     pattern TStatus,
+    pattern TBytes,
     Label,
     Row (..),
     Subst (..),
@@ -53,6 +54,8 @@ data Ty
   | -- | A computation that gives this type when it runs. It is a value until
     -- something runs it.
     TComp Ty
+  | -- | A stream with an input item, output item and return value.
+    TStream Ty Ty Ty
   deriving (Eq, Show)
 
 -- | The name of a record field.
@@ -67,12 +70,13 @@ data Row
   | RVar Var
   deriving (Eq, Show)
 
-pattern TInt, TBool, TUnit, TString, TStatus :: Ty
+pattern TInt, TBool, TUnit, TString, TStatus, TBytes :: Ty
 pattern TInt = TCon "Int"
 pattern TBool = TCon "Bool"
 pattern TUnit = TCon "()"
 pattern TString = TCon "String"
 pattern TStatus = TCon "Status"
+pattern TBytes = TCon "Bytes"
 
 -- | Unknowns that stand for types, and unknowns that stand for rows.
 data Subst = Subst {getSubst :: Map Var Ty, getRowSubst :: Map Var Row}
@@ -120,6 +124,7 @@ apply s (TVar v) = case Map.lookup v (getSubst s) of
 apply s (TFun t1 t2) = TFun (apply s t1) (apply s t2)
 apply s (TRecord r) = TRecord (applyRow s r)
 apply s (TComp t) = TComp (apply s t)
+apply s (TStream i o r) = TStream (apply s i) (apply s o) (apply s r)
 apply _ t = t
 
 -- | Replace each solved unknown in a row, in the tail and in the field types.
@@ -142,6 +147,7 @@ occurs v (TVar v') = v == v'
 occurs v (TFun t1 t2) = occurs v t1 || occurs v t2
 occurs v (TRecord r) = occursRow v r
 occurs v (TComp t) = occurs v t
+occurs v (TStream i o r) = any (occurs v) [i, o, r]
 occurs _ _ = False
 
 -- | Does this unknown appear anywhere in this row?
@@ -198,6 +204,12 @@ unify (TFun l1 r1) (TFun l2 r2) = do
   pure (s2 `compose` s1)
 unify (TRecord r1) (TRecord r2) = unifyRow r1 r2
 unify (TComp a) (TComp b) = unify a b
+unify (TStream i o r) (TStream i' o' r') = do
+  s1 <- unify i i'
+  s2 <- unify (apply s1 o) (apply s1 o')
+  let known = s2 `compose` s1
+  s3 <- unify (apply known r) (apply known r')
+  pure (s3 `compose` known)
 unify t1 t2 = lift (Left (Mismatch t1 t2))
 
 -- | Find the substitution that makes two rows equal, whatever the field order.

@@ -11,9 +11,9 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Stream, Lambdash.Unify
   c-sources:       cbits/spawn.c
-  build-depends:   base, containers, directory, megaparsec, mtl, transformers, unix
+  build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, stm, text, transformers, unix
 
 executable lambdash
   import:         shared
@@ -65,3 +65,11 @@ test-suite repl-tests
   hs-source-dirs: test
   main-is:        ReplTests.hs
   build-depends:  base, containers, directory, lambdash
+
+test-suite pipeline-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        PipelineTests.hs
+  build-depends:  base, async, bytestring, containers, directory, lambdash, unix
+  ghc-options:    -threaded
