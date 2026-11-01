@@ -63,4 +63,4 @@ test-suite repl-tests
   type:           exitcode-stdio-1.0
   hs-source-dirs: test
   main-is:        ReplTests.hs
-  build-depends:  base, lambdash
+  build-depends:  base, directory, lambdash

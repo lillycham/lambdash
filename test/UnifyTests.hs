@@ -154,6 +154,11 @@ tests =
   , ("rows: a solved row reaches the other side", solve (TFun (TRecord r) (TRecord r)) (TFun (TRecord (ext "a" TInt REmpty)) (TRecord (ext "a" TBool REmpty))) == Left (Mismatch TInt TBool))
   , ("rows: a row containing itself", infiniteRow (solve (TRecord r) (TRecord (ext "a" TInt r))))
   , ("rows: the same tail with other fields", infiniteRow (solve (TRecord (ext "a" TInt r)) (TRecord (ext "b" TBool r))))
+  , ("comp: apply goes inside", apply (singleton v0 TInt) (TComp t0) == TComp TInt)
+  , ("comp: occurs goes inside", occurs v0 (TComp t0))
+  , ("comp: unifies inside", solvesTo (TComp t0) (TComp TInt) t0 TInt)
+  , ("comp: an infinite computation", refusesInfinite (solve t0 (TComp t0)))
+  , ("comp: is not its result", solve (TComp TInt) TInt == Left (Mismatch (TComp TInt) TInt))
   , ("rows: a grown tail reaches the field", refusesInfinite (solve (TRecord (ext "a" (TRecord r) (ext "b" TBool REmpty))) (TRecord (ext "b" TBool r))))
   ]
 

@@ -147,6 +147,13 @@ tests =
   , ("error: the binding of a parameter stays one type", mismatch (lam ["x"] (ELet "y" (v "x") (first (app (v "add") [v "y", int 1]) (EApp (v "not") (v "y"))))))
   , ("error: the result of a parameter stays one type", mismatch (lam ["x"] (ELet "y" (EApp (v "x") (int 1)) (first (app (v "add") [v "y", int 1]) (EApp (v "not") (v "y"))))))
   , ("error: a kept unknown stays one type", mismatch (lam ["x"] (ELet "k" (lam ["y"] (v "x")) (first (app (v "add") [EApp (v "k") (int 1), int 1]) (EApp (v "not") (EApp (v "k") true))))))
+  , ("ftv: inside a computation", ftv (TComp t0) == Set.fromList [Var 0])
+  , ("lit: unit", typed (ELit LUnit) TUnit)
+  , ("inferRunIn: gives the result type", inferRunIn (Map.fromList [("c", mono (TComp TInt))]) (v "c") == Right TInt)
+  , ("inferRunIn: refuses a non-computation", inferRunIn prelude (int 1) == Left (Unify (Mismatch TInt (TComp (TVar (Var 0))))))
+  , ("inferRunIn: refuses a function", case inferRunIn prelude (v "not") of
+        Left (Unify (Mismatch _ _)) -> True
+        _ -> False)
   , ("ftvRow: fields and tail", ftvRow (RExtend "a" t0 (RVar (Var 1))) == Set.fromList [Var 0, Var 1])
   , ("ftv: inside a record", ftv (TRecord (RVar (Var 1))) == Set.fromList [Var 1])
   , ("applyScheme: leaves a bound row unknown", applyScheme (singletonRow (Var 1) REmpty) (Forall [Var 1] (TRecord (RVar (Var 1)))) == Forall [Var 1] (TRecord (RVar (Var 1))))

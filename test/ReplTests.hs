@@ -8,18 +8,49 @@ import Data.List (isInfixOf)
 import Lambdash.Infer
 import Lambdash.Repl
 import Lambdash.Unify
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import System.Directory (removeFile)
 import System.Exit (exitFailure)
+import System.IO (hClose, hFlush, openTempFile, stdout)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
 
--- | Run lines in one session, and collect what each shows. Stop at 'Quit'.
-session :: [String] -> [String]
-session = go initial
- where
-  go _ [] = []
-  go s (l : ls) = case step s l of
-    Quit -> ["<quit>"]
-    Continue next out -> out : go next ls
 
+-- | Run lines in one session, and collect what each shows. Stop at 'Quit'.
+sessionIO :: [String] -> IO [String]
+sessionIO = go initial
+ where
+  go _ [] = pure []
+  go s (l : ls) = do
+    result <- step s l
+    case result of
+      Quit -> pure ["<quit>"]
+      Continue next out -> (out :) <$> go next ls
+
+-- | Tests are plain values, so this hides the 'IO'. Each call is one session.
+session :: [String] -> [String]
+session = unsafePerformIO . sessionIO
+
+-- | What a session sends to stdout, beside what its lines show.
+capture :: IO a -> IO (String, a)
+capture action = do
+  hFlush stdout
+  saved <- hDuplicate stdout
+  (path, handle) <- openTempFile "." "repl-test.out"
+  hDuplicateTo handle stdout
+  hClose handle
+  result <- action
+  hFlush stdout
+  hDuplicateTo saved stdout
+  hClose saved
+  text <- readFile path
+  _ <- evaluate (length text)
+  removeFile path
+  pure (text, result)
+
+-- | Both what a session prints, and what its lines show.
+prints :: [String] -> (String, [String])
+prints = unsafePerformIO . capture . sessionIO
 -- | What the last line shows.
 final :: [String] -> String
 final = last . session
@@ -85,6 +116,34 @@ tests =
   , ("step: a failed binding binds nothing", final ["x = not 1", "x"] == "unbound name: x")
   , ("step: a failed binding keeps the old value", final ["x = 1", "x = not 1", "x"] == "1")
   , ("step: errors do not end a session", final ["nope", "1"] == "1")
+  , ("command: a run binding", parseCommand "x <- y" == Right (BindRun "x" (EVar "y")))
+  , ("renderType: a computation", renderType (TComp TInt) == "Comp Int")
+  , ("renderType: unit", renderType (TComp TUnit) == "Comp ()")
+  , ("renderType: a computation of a function", renderType (TComp (TFun TInt TInt)) == "Comp (Int -> Int)")
+  , ("renderType: a computation of a computation", renderType (TComp (TComp TInt)) == "Comp (Comp Int)")
+  , ("renderType: a computation of a record", renderType (TComp (TRecord REmpty)) == "Comp {}")
+  , ("renderType: a function that gives a computation", renderType (TFun TInt (TComp TInt)) == "Int -> Comp Int")
+  , ("comp: print shows through stdout", prints ["print 1"] == ("1\n", [""]))
+  , ("comp: pure shows its result", prints ["pure 1"] == ("", ["1"]))
+  , ("comp: a unit result shows nothing", prints ["pure ()"] == ("", [""]))
+  , ("comp: unit as a value shows", prints ["()"] == ("", ["()"]))
+  , ("comp: = runs nothing", prints ["gs = print 1"] == ("", ["gs : Comp ()"]))
+  , ("comp: each bare line runs it", prints ["gs = print 1", "gs", "gs"] == ("1\n1\n", ["gs : Comp ()", "", ""]))
+  , ("comp: a type query runs nothing", prints [":t print 1"] == ("", ["Comp ()"]))
+  , ("comp: a function is not a computation", prints ["f = x -> print x"] == ("", ["f : a -> Comp ()"]))
+  , ("comp: applying a function runs nothing", prints ["f = x -> print x", "g = f 1"] == ("", ["f : a -> Comp ()", "g : Comp ()"]))
+  , ("comp: then a bare line runs it", fst (prints ["f = x -> print x", "g = f 1", "g"]) == "1\n")
+  , ("comp: <- runs it", prints ["x <- print 1"] == ("1\n", ["x : ()"]))
+  , ("comp: <- binds the result", final ["x <- pure 1", "add x 1"] == "2")
+  , ("comp: <- runs once", fst (prints ["x <- print 1", "x", "x"]) == "1\n")
+  , ("comp: <- refuses a value", final ["x <- 1"] == "type mismatch: Int and Comp a")
+  , ("comp: a refused <- binds nothing", final ["x <- 1", "x"] == "unbound name: x")
+  , ("comp: a failed <- runs nothing", prints ["x <- print (not 1)"] == ("", ["type mismatch: Bool and Int"]))
+  , ("comp: only the outer computation runs", prints ["pure (print 1)"] == ("", ["<computation>"]))
+  , ("comp: an inner computation can run later", fst (prints ["c <- pure (print 1)", "c"]) == "1\n")
+  , ("comp: a run result stays polymorphic", final ["i <- pure (x -> x)", "(a b -> a) (i 1) (i true)"] == "1")
+  , ("comp: a computation in a record runs by selection", fst (prints ["r = {a = print 1}", "r", "r.a"]) == "1\n")
+  , ("comp: a computation prints on each run", fst (prints ["gs = print (add 1 2)", "gs", "gs"]) == "3\n3\n")
   ]
 
 runTest :: (String, Bool) -> IO Bool

@@ -8,7 +8,6 @@ import Control.Monad (unless)
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
-import Lambdash.Unify
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
 
@@ -32,6 +31,9 @@ tests =
   , ("select: the first of two", render (select "a" (VRecord [("a", VInt 1), ("a", VInt 2)])) == "1")
   , ("applyValue: builtin", render (applyValue (VBuiltin "f" id) (VInt 1)) == "1")
   , ("eval: literals", "1" `gives` "1" && "true" `gives` "true")
+  , ("eval: unit", "()" `gives` "()")
+  , ("eval: building a computation runs nothing", "print 1" `gives` "<computation>")
+  , ("eval: a computation is a value in a record", "{a = print 1}" `gives` "{a = <computation>}")
   , ("eval: a variable from the builtins", "not" `gives` "<function>")
   , ("eval: builtin application", "not true" `gives` "false")
   , ("eval: partial application", "add 1" `gives` "<function>")

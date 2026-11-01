@@ -34,7 +34,7 @@ Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
 atom        = literal | record | accessor | IDENT | "(" expr ")" ;
-literal     = INT | "true" | "false" ;
+literal     = INT | "true" | "false" | "(" ")" ;
 record      = "{" [ field { "," field } ] "}" ;
 field       = IDENT "=" expr ;
 ```
@@ -64,6 +64,19 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
 - `postfix` goes to the left: `r.a.b` is `(r.a).b`.
 - `.a.b` means `r -> r.a.b`.
 - Inside `INT`, no space can follow the sign.
+
+## REPL lines
+
+The REPL parses one `line` at a time. `:t` and `:q` are reserved words in this
+rule only.
+
+```ebnf
+line        = [ ":q" | ":t" expr | IDENT "=" expr | IDENT "<-" expr | expr ] EOF ;
+```
+
+- `x = e` names a value and runs nothing.
+- `x <- e` runs `e`, which must have a type `Comp a`, and binds the result.
+- `e` runs if its type is `Comp a`. Otherwise it shows the value.
 
 ## Known sharp edges
 

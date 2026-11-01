@@ -59,6 +59,7 @@ tests =
   , ("atom: variable", run atom "x" == Just (v "x"))
   , ("atom: literal", run atom "1" == Just (int 1))
   , ("atom: parentheses", run atom "( x )" == Just (v "x"))
+  , ("atom: unit", run atom "()" == Just (ELit LUnit) && run atom "( )" == Just (ELit LUnit))
   , ("atom: record", run atom "{}" == Just (ERecord []))
   , ("atom: accessor", run atom ".a" == Just (ELam "r" (ESelect (v "r") "a")))
   , ("atom: leaves trailing space", run atom "x " == Nothing)

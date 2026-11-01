@@ -6,7 +6,7 @@
 -- > {name = 1, ok = true}       record
 -- > r.name                      select, with no space before the dot
 -- > .name  .a.b                 accessor: \r -> r.name
--- > 1  true  false  x  (e)      atoms
+-- > 1  true  false  ()  x  (e)  atoms
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
@@ -111,6 +111,7 @@ atom =
     <|> record
     <|> accessor
     <|> (EVar <$> identifier)
+    <|> (ELit LUnit <$ try (symbol "(" *> char ')'))
     <|> between (symbol "(") (char ')') expr
 
 -- | An atom, then any number of @.label@, then skip what follows.

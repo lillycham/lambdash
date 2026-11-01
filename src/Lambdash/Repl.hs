@@ -44,6 +44,8 @@ data Command
     TypeOf Expr
   | -- | @x = expr@.
     Bind Name Expr
+  | -- | @x <- expr@.
+    BindRun Name Expr
   | -- | @expr@.
     Run Expr
   deriving (Eq, Show)
@@ -58,6 +60,7 @@ command =
   <|> (Exit <$ lexeme (keyword ":q"))
   <|> (TypeOf <$> (lexeme (keyword ":t") *> expr))
   <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> expr)
+  <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> expr)
   <|> (Run <$> expr)
 
 -- | Parse one whole line, or give a readable error.
@@ -97,6 +100,12 @@ renderTy (TFun argument result) = do
         TFun _ _ -> "(" <> left <> ")"
         _ -> left
   pure (parameter <> " -> " <> right)
+renderTy (TComp result) = do
+  text <- renderTy result
+  pure $ case result of
+    TFun _ _ -> "Comp (" <> text <> ")"
+    TComp _ -> "Comp (" <> text <> ")"
+    _ -> "Comp " <> text
 renderTy (TRecord row) = do
   fields <- renderRow row
   pure ("{" <> fields <> "}")
@@ -138,29 +147,41 @@ data Step
     Continue Session String
   | Quit
 
--- | Run one line. A line that fails leaves the session as it was.
+-- | Run one line. A line that fails leaves the session as it was. Only a
+-- computation at the prompt, or on the right of @<-@, has any effect.
 --
--- Note: think about what a stored type needs, so that @i = x -> x@ still works
--- at two types on later lines.
-step :: Session -> String -> Step
+-- A unit result shows nothing, so that @print 1@ shows only @1@.
+step :: Session -> String -> IO Step
 step session input =
   case parseCommand input of
-    Left err -> Continue session err
-    Right Blank -> Continue session ""
-    Right Exit -> Quit
-    Right (TypeOf expression) -> checked expression $ \ty ->
-      Continue session (renderType ty)
-    Right (Run expression) -> checked expression $ \_ ->
-      Continue session (render (eval values expression))
-    Right (Bind name expression) -> checked expression $ \ty ->
-      let next = Session
-            { sessionTypes = Map.insert name (generalise types ty) types
-            , sessionValues = Map.insert name (eval values expression) values
-            }
-      in Continue next (name <> " : " <> renderType ty)
+    Left err -> pure (Continue session err)
+    Right Blank -> pure (Continue session "")
+    Right Exit -> pure Quit
+    Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
+      pure (Continue session (renderType ty))
+    Right (Run expression) -> checked (inferIn types expression) $ \ty ->
+      case ty of
+        TComp _ -> do
+          result <- runComp (eval values expression)
+          pure (Continue session (showResult result))
+        _ -> pure (Continue session (render (eval values expression)))
+    Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
+      pure (bound name ty (eval values expression))
+    Right (BindRun name expression) -> checked (inferRunIn types expression) $ \ty ->
+      bound name ty <$> runComp (eval values expression)
   where
     types = sessionTypes session
     values = sessionValues session
-    checked expression onSuccess = case inferIn types expression of
-      Left err -> Continue session (renderError err)
+    checked result onSuccess = case result of
+      Left err -> pure (Continue session (renderError err))
       Right ty -> onSuccess ty
+    -- Generalising after a run is sound while no value can be mutable. A
+    -- mutable reference would need a value restriction here.
+    bound name ty value =
+      let next = Session
+            { sessionTypes = Map.insert name (generalise types ty) types
+            , sessionValues = Map.insert name value values
+            }
+      in Continue next (name <> " : " <> renderType ty)
+    showResult VUnit = ""
+    showResult value = render value

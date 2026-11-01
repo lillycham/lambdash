@@ -1,12 +1,14 @@
 -- | The evaluator: what an expression means, once the checker has passed it.
 --
--- This is pure for now. Computations arrive with the value and computation split.
+-- This is pure. A computation is a value that holds an action, and evaluating it
+-- does not run it.
 module Lambdash.Eval
   ( Value (..),
     Scope,
     render,
     applyValue,
     select,
+    runComp,
     eval,
     builtins,
     typeEnv,
@@ -16,7 +18,7 @@ where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Lambdash.Infer (Env, Expr (..), Lit (..), Name, Scheme, mono)
+import Lambdash.Infer (Env, Expr (..), Lit (..), Name, Scheme (..), mono)
 import Lambdash.Unify
 
 -- | What an expression can evaluate to. Fields stay in written order, because
@@ -25,10 +27,13 @@ import Lambdash.Unify
 data Value
   = VInt Int
   | VBool Bool
+  | VUnit
   | VRecord [(Label, Value)]
   | -- | The name identifies the builtin.
     VBuiltin Name (Value -> Value)
   | VClosure Name Expr Scope
+  | -- | An action. Building one runs nothing: only 'runComp' does.
+    VComp (IO Value)
 
 -- | What each name in scope has as its value.
 type Scope = Map Name Value
@@ -38,11 +43,13 @@ type Scope = Map Name Value
 render :: Value -> String
 render (VInt n) = show n
 render (VBool b) = if b then "true" else "false"
+render VUnit = "()"
 render (VRecord fields) = "{" <> commaSep (map renderField fields) <> "}"
   where
     renderField (label, value) = label <> " = " <> render value
 render (VBuiltin _ _) = "<function>"
 render (VClosure _ _ _) = "<function>"
+render (VComp _) = "<computation>"
 
 commaSep :: [String] -> String
 commaSep = foldr step ""
@@ -67,6 +74,11 @@ select label (VRecord fields) =
     Nothing -> error "select: the checker passed a missing field"
 select _ _ = error "select: the checker passed a non-record"
 
+-- | Run a computation value. This is the only place where effects happen.
+runComp :: Value -> IO Value
+runComp (VComp action) = action
+runComp _ = error "runComp: the checker passed a non-computation"
+
 -- | Evaluate an expression that passed the checker.
 eval :: Scope -> Expr -> Value
 eval env expression =
@@ -84,15 +96,20 @@ eval env expression =
   where
     evalLit (LInt n) = VInt n
     evalLit (LBool b) = VBool b
+    evalLit LUnit = VUnit
 
 -- | The names that exist before any input, with a type and a value together, so
 -- that the two cannot drift apart.
 builtins :: [(Name, Scheme, Value)]
 builtins =
   [ ("not", mono (TFun TBool TBool), VBuiltin "not" notV),
-    ("add", mono (TFun TInt (TFun TInt TInt)), VBuiltin "add" add)
+    ("add", mono (TFun TInt (TFun TInt TInt)), VBuiltin "add" add),
+    ("print", Forall [t] (TFun (TVar t) (TComp TUnit)), VBuiltin "print" printV),
+    ("pure", Forall [t] (TFun (TVar t) (TComp (TVar t))), VBuiltin "pure" (VComp . pure))
   ]
   where
+    t = Var 0
+    printV value = VComp (VUnit <$ putStrLn (render value))
     notV (VBool b) = VBool (not b)
     notV _ = error "not: the checker passed a non-Bool"
     add (VInt a) = VBuiltin "add" (addTo a)

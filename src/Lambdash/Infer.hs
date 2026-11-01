@@ -23,6 +23,7 @@ module Lambdash.Infer
   , instantiate
   , infer
   , inferIn
+  , inferRunIn
   , inferType
   ) where
 
@@ -39,6 +40,7 @@ type Name = String
 data Lit
   = LInt Int
   | LBool Bool
+  | LUnit
   deriving (Eq, Show)
 
 data Expr
@@ -97,6 +99,7 @@ ftv (TVar v) = Set.singleton v
 ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
 ftv (TCon _) = Set.empty
 ftv (TRecord r) = ftvRow r
+ftv (TComp t) = ftv t
 
 -- | The unknowns that appear in a row.
 ftvRow :: Row -> Set Var
@@ -164,6 +167,7 @@ infer env (EVar name) =
 
 infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
 infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
+infer _ (ELit LUnit)     = pure (emptySubst, TUnit)
 
 infer env (ELam name body) = do
   tv <- fresh
@@ -213,6 +217,17 @@ inferIn env expr = evalStateT (go env expr) 0
   go e x = do
     (s, t) <- infer e x
     pure (apply s t)
+
+-- | The type that running an expression gives. The expression has to be a
+-- computation, so its type unifies with @TComp a@, and that @a@ is the answer.
+inferRunIn :: Env -> Expr -> Either InferError Ty
+inferRunIn env expr = evalStateT go 0
+ where
+  go = do
+    (s1, t) <- infer env expr
+    result <- fresh
+    s2 <- unifying (unify (apply s1 t) (TComp result))
+    pure (apply s2 result)
 
 -- | Infer with nothing in scope.
 inferType :: Expr -> Either InferError Ty
