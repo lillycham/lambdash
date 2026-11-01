@@ -30,6 +30,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Lambdash.Unify
+import qualified Data.Set as Set
 
 type Name = String
 
@@ -80,21 +81,27 @@ fresh = do
 
 -- | The unknowns that appear in a type.
 ftv :: Ty -> Set Var
-ftv = undefined
+ftv (TVar v) = Set.singleton v
+ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
+ftv TInt = Set.empty
+ftv TBool = Set.empty
 
 -- | The unknowns that a scheme does not bind.
 ftvScheme :: Scheme -> Set Var
-ftvScheme = undefined
+ftvScheme (Forall bound ty) = ftv ty `Set.difference` Set.fromList bound
 
 -- | The unknowns free in any scheme in the environment. These are the unknowns
 -- that something outside a @let@ can still constrain.
 ftvEnv :: Env -> Set Var
-ftvEnv = undefined
+ftvEnv = Set.unions . map ftvScheme . Map.elems
 
 -- | Apply a substitution to the free unknowns of a scheme. A bound unknown only
 -- marks a place to fill in, so the substitution must not touch it.
 applyScheme :: Subst -> Scheme -> Scheme
-applyScheme = undefined
+applyScheme sub (Forall bound ty) =
+  Forall bound (apply (Subst sub') ty)
+ where
+  sub' = foldr Map.delete (getSubst sub) bound
 
 -- | Apply a substitution to every scheme in the environment.
 applyEnv :: Subst -> Env -> Env
@@ -105,12 +112,16 @@ applyEnv s e = Map.map (applyScheme s) e
 --
 -- Note: the caller has to apply what it learned to the environment first.
 generalise :: Env -> Ty -> Scheme
-generalise = undefined
+generalise env t = Forall as t
+  where as = Set.toList $ ftv t `Set.difference` ftvEnv env
 
 -- | Replace each bound unknown with a fresh one, so that each use of a name is
 -- its own copy.
 instantiate :: Scheme -> Infer Ty
-instantiate = undefined
+instantiate (Forall as t) = do
+  as' <- mapM (const fresh) as
+  let s = Subst $ Map.fromList $ zip as as'
+  pure $ apply s t
 
 -- | Find the type of an expression, and what that taught us.
 --
@@ -145,7 +156,12 @@ infer env (EApp e1 e2) = do
   let s_final = s3 `compose` s2 `compose` s1
   pure (s_final, apply s3 tv)
 
-infer _ (ELet _ _ _) = undefined
+infer env (ELet x e1 e2) = do
+  (s1, t1) <- infer env e1
+  let env' = applyEnv s1 env
+      sc = generalise env' (apply s1 t1)
+  (s2, t2) <- infer (Map.insert x sc env') e2
+  pure (s2 `compose` s1, apply s2 t2)
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty

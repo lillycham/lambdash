@@ -5,7 +5,7 @@
 module Lambdash.Unify
   ( Var (..),
     Ty (..),
-    Subst,
+    Subst(..),
     TypeError (..),
     emptySubst,
     singleton,
