@@ -3,6 +3,8 @@
 # Usage: expect spike/test.exp path/to/spike-jobs
 
 set timeout 5
+# The shell saves its initial modes. Do not inherit the caller's echo setting.
+set stty_init "sane"
 proc fail {what} { puts "\nFAIL: $what"; exit 1 }
 proc pass {what} { puts "\nPASS: $what" }
 proc see {pattern what} {
@@ -71,7 +73,8 @@ prompt
 # Terminal modes belong to the job: the shell restores its own at the prompt,
 # and fg restores the job's.
 send "sh spike/noecho.sh\r"
-after 500
+# Wait for stty to finish before the test stops the process group.
+see {noecho-ready\r\n} "the job has disabled echo"
 send "\032"
 see {\[stopped\]} "Ctrl-Z stops a job with echo off"
 prompt
