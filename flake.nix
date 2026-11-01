@@ -11,7 +11,8 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
-            ghc
+            # From nixpkgs, so cabal never fetches from Hackage.
+            (haskellPackages.ghcWithPackages (p: [ p.megaparsec ]))
             cabal-install
             haskell-language-server
           ];
