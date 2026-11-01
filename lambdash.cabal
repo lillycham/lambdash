@@ -11,7 +11,7 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Infer, Lambdash.Parser, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Parser, Lambdash.Unify
   build-depends:   base, containers, megaparsec, transformers
 
 executable lambdash
@@ -50,3 +50,10 @@ test-suite parser-tests
   hs-source-dirs: test
   main-is:        ParserTests.hs
   build-depends:  base, containers, lambdash, megaparsec
+
+test-suite eval-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        EvalTests.hs
+  build-depends:  base, containers, lambdash
