@@ -114,13 +114,17 @@ apply _ t = t
 
 -- | Replace each solved unknown in a row, in the tail and in the field types.
 applyRow :: Subst -> Row -> Row
-applyRow = undefined
+applyRow _ REmpty = REmpty
+applyRow s (RVar v) = Map.findWithDefault (RVar v) v (getRowSubst s)
+applyRow s (RExtend l t r) = RExtend l (apply s t) (applyRow s r)
 
 -- | Compose like functions: @apply (compose s1 s2) = apply s1 . apply s2@.
 -- So @s2@ happens first. Both maps need this, and each can mention the other.
 compose :: Subst -> Subst -> Subst
-compose s1@(Subst m1 _) (Subst m2 _) =
-  Subst ((Map.map (apply s1) m2) `Map.union` m1) undefined
+compose s1 s2 = Subst
+  { getSubst = Map.map (apply s1) (getSubst s2) `Map.union` getSubst s1
+  , getRowSubst = Map.map (applyRow s1) (getRowSubst s2) `Map.union` getRowSubst s1
+  }
 
 -- | Does this unknown appear anywhere in this type?
 occurs :: Var -> Ty -> Bool
@@ -131,7 +135,9 @@ occurs _ _ = False
 
 -- | Does this unknown appear anywhere in this row?
 occursRow :: Var -> Row -> Bool
-occursRow = undefined
+occursRow _ REmpty = False
+occursRow v (RVar v') = v == v'
+occursRow v (RExtend _ t r) = occurs v t || occursRow v r
 
 -- | Solve one unknown, or refuse.
 bind :: Var -> Ty -> Either TypeError Subst
@@ -142,15 +148,31 @@ bind v t
 
 -- | Solve one row unknown, or refuse.
 bindRow :: Var -> Row -> Either TypeError Subst
-bindRow = undefined
+bindRow v r
+  | r == RVar v = Right emptySubst
+  | occursRow v r = Left (InfiniteRow v r)
+  | otherwise = Right (singletonRow v r)
 
 -- | Pull a field to the front. The result is the field's type, the row without
 -- that field in its old order, and what that taught us.
 --
 -- If the tail is an unknown, grow it: the tail becomes the field, with a fresh
 -- type, and a fresh rest.
+--
+-- The returned field type and remainder already include the returned
+-- substitution. Callers must still apply it to types from outside this row.
 rewriteRow :: Label -> Row -> Unifier (Ty, Row, Subst)
-rewriteRow = undefined
+rewriteRow label REmpty = lift (Left (MissingField label REmpty))
+rewriteRow label (RVar v) = do
+  fieldTy <- TVar <$> freshVar
+  tailRow <- RVar <$> freshVar
+  sub <- lift (bindRow v (RExtend label fieldTy tailRow))
+  pure (fieldTy, tailRow, sub)
+rewriteRow label (RExtend otherLabel otherTy rest)
+  | label == otherLabel = pure (otherTy, rest, emptySubst)
+  | otherwise = do
+      (fieldTy, restRow, sub) <- rewriteRow label rest
+      pure (fieldTy, RExtend otherLabel (apply sub otherTy) restRow, sub)
 
 -- | Find the substitution that makes two types equal.
 --
@@ -171,4 +193,24 @@ unify t1 t2 = lift (Left (Mismatch t1 t2))
 -- Note: if pulling a field out of the right row grew a tail, and the left row
 -- has that same tail, then the rest can never finish. Refuse with 'InfiniteRow'.
 unifyRow :: Row -> Row -> Unifier Subst
-unifyRow = undefined
+unifyRow REmpty REmpty = pure emptySubst
+unifyRow (RVar v) r = lift (bindRow v r)
+unifyRow r (RVar v) = lift (bindRow v r)
+unifyRow REmpty (RExtend l _ _) = lift (Left (MissingField l REmpty))
+unifyRow (RExtend label fieldTy leftRest) right = do
+  (otherTy, rightRest, rewriteSub) <- rewriteRow label right
+  checkSharedTail rewriteSub leftRest
+  fieldSub <- unify (apply rewriteSub fieldTy) otherTy
+  let known = fieldSub `compose` rewriteSub
+  -- rewriteRow already applied rewriteSub to rightRest, but not to leftRest.
+  restSub <- unifyRow (applyRow known leftRest) (applyRow fieldSub rightRest)
+  pure (restSub `compose` known)
+ where
+  -- If rewriting grew the left tail too, recursion would grow it forever.
+  checkSharedTail :: Subst -> Row -> Unifier ()
+  checkSharedTail _ REmpty = pure ()
+  checkSharedTail sub (RExtend _ _ rest) = checkSharedTail sub rest
+  checkSharedTail sub (RVar v)
+    | Map.member v (getRowSubst sub) =
+        lift (Left (InfiniteRow v (applyRow sub leftRest)))
+    | otherwise = pure ()

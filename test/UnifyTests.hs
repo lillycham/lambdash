@@ -129,6 +129,19 @@ tests =
   , ("rows: your first example", agrees (ext "name" TInt r) (ext "age" TBool (ext "name" t0 REmpty)))
   , ("rows: your first example solves t0", solvesTo (TRecord (ext "name" TInt r)) (TRecord (ext "age" TBool (ext "name" t0 REmpty))) t0 TInt)
   , ("rows: your second example", agrees (ext "name" TInt r) (ext "age" t0 s))
+  , ("rows: distinct open fields share a fresh tail", case run (unifyRow (ext "a" TInt r) (ext "b" TBool s)) of
+        Right sub -> case (applyRow sub r, applyRow sub s) of
+          (RExtend "b" TBool (RVar leftTail), RExtend "a" TInt (RVar rightTail)) ->
+            leftTail == rightTail && leftTail /= v5 && leftTail /= v6
+          _ -> False
+        Left _ -> False)
+  , ("rewriteRow: tail growth reaches skipped field types", case run (rewriteRow "a" (ext "b" (TRecord r) r)) of
+        Right (fieldTy, rest, sub) -> case applyRow sub r of
+          grown@(RExtend "a" _ tailRow) ->
+            rest == ext "b" (TRecord grown) tailRow
+              && canon (applyRow sub (ext "b" (TRecord r) r)) == canon (ext "a" fieldTy rest)
+          _ -> False
+        Left _ -> False)
   , ("rows: an unknown row on the left", agrees r (ext "a" TInt REmpty))
   , ("rows: an unknown row on the right", agrees (ext "a" TInt REmpty) r)
   , ("rows: the same tail, reordered", agrees (ext "a" TInt (ext "b" TBool r)) (ext "b" TBool (ext "a" TInt r)))

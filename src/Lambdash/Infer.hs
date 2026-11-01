@@ -100,7 +100,9 @@ ftv (TRecord r) = ftvRow r
 
 -- | The unknowns that appear in a row.
 ftvRow :: Row -> Set Var
-ftvRow = undefined
+ftvRow REmpty = Set.empty
+ftvRow (RVar v) = Set.singleton v
+ftvRow (RExtend _ t r) = ftv t `Set.union` ftvRow r
 
 -- | The unknowns that a scheme does not bind.
 ftvScheme :: Scheme -> Set Var
@@ -115,9 +117,13 @@ ftvEnv = Set.unions . map ftvScheme . Map.elems
 -- marks a place to fill in, so the substitution must not touch it.
 applyScheme :: Subst -> Scheme -> Scheme
 applyScheme sub (Forall bound ty) =
-  Forall bound (apply sub { getSubst = sub' } ty)
+  Forall bound (apply freeSubst ty)
  where
-  sub' = foldr Map.delete (getSubst sub) bound
+  boundVars = Set.fromList bound
+  freeSubst = Subst
+    { getSubst = Map.withoutKeys (getSubst sub) boundVars
+    , getRowSubst = Map.withoutKeys (getRowSubst sub) boundVars
+    }
 
 -- | Apply a substitution to every scheme in the environment.
 applyEnv :: Subst -> Env -> Env
@@ -134,10 +140,14 @@ generalise env t = Forall as t
 -- | Replace each bound unknown with a fresh one, so that each use of a name is
 -- its own copy.
 instantiate :: Scheme -> Infer Ty
-instantiate (Forall as t) = do
-  as' <- mapM (const fresh) as
-  let s = Subst (Map.fromList (zip as as')) Map.empty
-  pure $ apply s t
+instantiate (Forall bound ty) = do
+  freshVars <- mapM (const (unifying freshVar)) bound
+  let renaming = Map.fromList (zip bound freshVars)
+      sub = Subst
+        { getSubst = TVar <$> renaming
+        , getRowSubst = RVar <$> renaming
+        }
+  pure (apply sub ty)
 
 -- | Find the type of an expression, and what that taught us.
 --
@@ -177,9 +187,24 @@ infer env (ELet x e1 e2) = do
   (s2, t2) <- infer (Map.insert x sc env') e2
   pure (s2 `compose` s1, apply s2 t2)
 
-infer _ (ERecord _) = undefined
+infer env (ERecord fields) = do
+  (sub, row) <- inferFields env fields
+  pure (sub, TRecord row)
+ where
+  inferFields :: Env -> [(Label, Expr)] -> Infer (Subst, Row)
+  inferFields _ [] = pure (emptySubst, REmpty)
+  inferFields fieldEnv ((label, expr) : rest) = do
+    (fieldSub, fieldTy) <- infer fieldEnv expr
+    (restSub, restRow) <- inferFields (applyEnv fieldSub fieldEnv) rest
+    pure (restSub `compose` fieldSub, RExtend label (apply restSub fieldTy) restRow)
 
-infer _ (ESelect _ _) = undefined
+infer env (ESelect expr label) = do
+  (exprSub, recordTy) <- infer env expr
+  fieldTy <- fresh
+  tailRow <- unifying (RVar <$> freshVar)
+  let requiredTy = TRecord (RExtend label fieldTy tailRow)
+  fieldSub <- unifying (unify recordTy requiredTy)
+  pure (fieldSub `compose` exprSub, apply fieldSub fieldTy)
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty

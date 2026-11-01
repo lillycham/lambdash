@@ -167,6 +167,14 @@ tests =
   , ("error: a parameter's field stays one type", mismatch (lam ["r"] (first (app (v "add") [ESelect (v "r") "a", int 1]) (EApp (v "not") (ESelect (v "r") "a")))))
   , ("error: a row in the environment stays one row", mismatch (lam ["r"] (ELet "s" (v "r") (first (app (v "add") [ESelect (v "s") "a", int 1]) (EApp (v "not") (ESelect (v "s") "a"))))))
   , ("error: a field's learning reaches the next field", mismatch (lam ["x"] (ERecord [("a", EApp (v "not") (v "x")), ("b", app (v "add") [v "x", int 1])])))
+  , ("record: later constraints reach earlier fields", typed (lam ["x"] (ERecord [("a", v "x"), ("b", EApp (v "not") (v "x"))])) (TBool ~> TRecord (RExtend "a" TBool (RExtend "b" TBool REmpty))))
+  , ("select: nested records", typed (ESelect (ESelect (ERecord [("outer", ERecord [("inner", int 1)])]) "outer") "inner") TInt)
+  , ("select: a concrete value is not a record", mismatch (ESelect (int 1) "a"))
+  , ("let: a record's function field is polymorphic", typed (ELet "r" (ERecord [("id", idE)]) (first (EApp (ESelect (v "r") "id") (int 1)) (EApp (ESelect (v "r") "id") true))) TInt)
+  , ("instantiate: type and row copies stay linked", case scheme 5 (Forall [Var 0, Var 1] (TRecord (RExtend "a" t0 (RVar (Var 1))) ~> t0)) of
+        Right (TFun (TRecord (RExtend "a" a (RVar ra))) b, TFun (TRecord (RExtend "a" c (RVar rc))) d) ->
+          a == b && c == d && a /= c && ra /= rc && a /= TVar ra && c /= TVar rc
+        _ -> False)
   ]
 
 runTest :: (String, Bool) -> IO Bool
