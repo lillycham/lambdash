@@ -11,8 +11,9 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Parser, Lambdash.Repl, Lambdash.Unify
-  build-depends:   base, containers, megaparsec, transformers
+  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Unify
+  c-sources:       cbits/spawn.c
+  build-depends:   base, containers, directory, megaparsec, mtl, transformers, unix
 
 executable lambdash
   import:         shared
@@ -26,7 +27,7 @@ executable spike-jobs
   import:         shared
   hs-source-dirs: spike
   main-is:        Main.hs
-  c-sources:      spike/spawn.c
+  c-sources:      cbits/spawn.c
   build-depends:  base, unix
   ghc-options:    -threaded
 
@@ -63,4 +64,4 @@ test-suite repl-tests
   type:           exitcode-stdio-1.0
   hs-source-dirs: test
   main-is:        ReplTests.hs
-  build-depends:  base, directory, lambdash
+  build-depends:  base, containers, directory, lambdash

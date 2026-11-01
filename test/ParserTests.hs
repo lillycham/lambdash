@@ -10,10 +10,10 @@ import Lambdash.Parser
 import Lambdash.Unify
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
-import Text.Megaparsec (eof, parse)
+import Text.Megaparsec (eof)
 
 run :: Parser a -> String -> Maybe a
-run p s = either (const Nothing) Just (parse (p <* eof) "" s)
+run p s = either (const Nothing) Just (runIn AllBound (p <* eof) s)
 
 v :: Name -> Expr
 v = EVar
@@ -50,6 +50,9 @@ tests =
   , ("literal: true", run literal "true" == Just (LBool True))
   , ("literal: false", run literal "false" == Just (LBool False))
   , ("literal: not a name", run literal "trueish" == Nothing)
+  , ("literal: a string", run literal "\"a b\"" == Just (LStr "a b"))
+  , ("literal: an escape", run literal "\"a\\n\"" == Just (LStr "a\n"))
+  , ("expr: AllBound has no external commands", is "ls x" (EApp (v "ls") (v "x")))
   , ("record: empty", run record "{}" == Just (ERecord []))
   , ("record: fields in order", run record "{ a = 1, b = true }" == Just (ERecord [("a", int 1), ("b", ELit (LBool True))]))
   , ("record: fields hold any expression", run record "{f = x -> x}" == Just (ERecord [("f", ELam "x" (v "x"))]))

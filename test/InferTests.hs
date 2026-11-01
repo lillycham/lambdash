@@ -149,6 +149,11 @@ tests =
   , ("error: a kept unknown stays one type", mismatch (lam ["x"] (ELet "k" (lam ["y"] (v "x")) (first (app (v "add") [EApp (v "k") (int 1), int 1]) (EApp (v "not") (EApp (v "k") true))))))
   , ("ftv: inside a computation", ftv (TComp t0) == Set.fromList [Var 0])
   , ("lit: unit", typed (ELit LUnit) TUnit)
+  , ("lit: string", typed (ELit (LStr "a")) TString)
+  , ("external: a computation", typed (ECmd "ls" []) (TComp TStatus))
+  , ("external: a parameter becomes a String", typed (lam ["x"] (ECmd "ls" [AVar "x"])) (TString ~> TComp TStatus))
+  , ("commands: under a lambda", commands (lam ["x"] (ECmd "ls" [])) == ["ls"])
+  , ("commands: in every part", commands (ERecord [("a", ECmd "a" []), ("b", EApp (ECmd "b" []) (ELet "x" (ECmd "c" []) (ECmd "d" [])))]) == ["a", "b", "c", "d"])
   , ("inferRunIn: gives the result type", inferRunIn (Map.fromList [("c", mono (TComp TInt))]) (v "c") == Right TInt)
   , ("inferRunIn: refuses a non-computation", inferRunIn prelude (int 1) == Left (Unify (Mismatch TInt (TComp (TVar (Var 0))))))
   , ("inferRunIn: refuses a function", case inferRunIn prelude (v "not") of

@@ -1,0 +1,78 @@
+#!/usr/bin/env expect
+# Drives the REPL through a real pty, because job control needs a terminal.
+# Usage: expect test/externals.exp path/to/lambdash
+
+set timeout 5
+# The modes of a pty otherwise depend on what started expect.
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc pass {what} { puts "\nPASS: $what" }
+proc see {pattern what} {
+  expect {
+    -re $pattern { pass $what }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {λ> $} "prompt" }
+
+spawn [lindex $argv 0]
+prompt
+
+send "echo hello\r"
+see {hello\r\n} "a program writes to the terminal"
+prompt
+
+send "sh -c \"exit 1\"\r"
+see {exit 1} "a status shows"
+prompt
+
+send "sleep 100\r"
+after 500
+send "\003"
+see {signal 2} "Ctrl-C reaches the program, not the shell"
+prompt
+
+send "sleep 100\r"
+after 500
+send "\032"
+after 500
+send "\003"
+see {signal 2} "Ctrl-Z leaves the program running, so Ctrl-C still ends it"
+prompt
+
+send "cat\r"
+after 500
+send "from the terminal\r"
+see {from the terminal\r\nfrom the terminal} "a program can read the terminal"
+send "\004"
+prompt
+
+send "sh -c \"stty -echo; sleep 100\"\r"
+after 500
+send "\003"
+see {signal 2} "a program ends with echo off"
+prompt
+send "print 1\r"
+see {print 1\r+\n1\r\n} "the shell restores the terminal"
+prompt
+
+send "nope-xyz\r"
+see {command not found: nope-xyz} "a missing program is reported"
+prompt
+
+send "x = \"via a variable\"\r"
+prompt
+send "echo \$x\r"
+see {via a variable\r\n} "a variable reaches a program"
+prompt
+
+send "\003"
+after 200
+send "print 2\r"
+see {2\r\n} "Ctrl-C at the prompt leaves the shell alive"
+prompt
+
+send ":q\r"
+expect eof
+puts "\nALL PASSED"

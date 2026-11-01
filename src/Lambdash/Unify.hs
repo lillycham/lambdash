@@ -10,6 +10,8 @@ module Lambdash.Unify
     pattern TInt,
     pattern TBool,
     pattern TUnit,
+    pattern TString,
+    pattern TStatus,
     Label,
     Row (..),
     Subst (..),
@@ -65,10 +67,12 @@ data Row
   | RVar Var
   deriving (Eq, Show)
 
-pattern TInt, TBool, TUnit :: Ty
+pattern TInt, TBool, TUnit, TString, TStatus :: Ty
 pattern TInt = TCon "Int"
 pattern TBool = TCon "Bool"
 pattern TUnit = TCon "()"
+pattern TString = TCon "String"
+pattern TStatus = TCon "Status"
 
 -- | Unknowns that stand for types, and unknowns that stand for rows.
 data Subst = Subst {getSubst :: Map Var Ty, getRowSubst :: Map Var Row}

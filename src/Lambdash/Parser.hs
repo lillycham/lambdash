@@ -6,10 +6,15 @@
 -- > {name = 1, ok = true}       record
 -- > r.name                      select, with no space before the dot
 -- > .name  .a.b                 accessor: \r -> r.name
--- > 1  true  false  ()  x  (e)  atoms
+-- > 1  "a"  true  false  ()  x  (e)  atoms
+-- > git log --oneline $x        external command, when nothing binds the head
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
+    Bound (..),
+    runIn,
+    parseExprIn,
+    binding,
     sc,
     lexeme,
     symbol,
@@ -28,14 +33,41 @@ module Lambdash.Parser
   )
 where
 
+import Control.Monad (when)
+import Control.Monad.Reader (Reader, asks, local, runReader)
 import Data.Bifunctor (first)
+import Data.Char (isSpace)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Void (Void)
-import Lambdash.Infer (Expr (..), Lit (..), Name)
+import Lambdash.Infer (Arg (..), Expr (..), Lit (..), Name)
 import Text.Megaparsec
-import Text.Megaparsec.Char (alphaNumChar, char, letterChar, space1, string)
+import Text.Megaparsec.Char (alphaNumChar, char, hspace, letterChar, space1, string)
 import Text.Megaparsec.Char.Lexer qualified as L
 
-type Parser = Parsec Void String
+-- | The names that an unbound head is told apart from. Parsing never reads
+-- `PATH`, so nothing outside the session can change how a line parses.
+data Bound
+  = -- | Every name is bound, so nothing is an external command.
+    AllBound
+  | BoundNames (Set Name)
+
+isBound :: Name -> Bound -> Bool
+isBound _ AllBound = True
+isBound name (BoundNames names) = Set.member name names
+
+-- | Add names for the length of a parser.
+binding :: [Name] -> Parser a -> Parser a
+binding names = local add
+ where
+  add AllBound = AllBound
+  add (BoundNames bound) = BoundNames (Set.union (Set.fromList names) bound)
+
+type Parser = ParsecT Void String (Reader Bound)
+
+-- | Run a parser, given what is bound.
+runIn :: Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
+runIn bound p input = runReader (runParserT p "<input>" input) bound
 
 -- | Skip spaces and comments.
 sc :: Parser ()
@@ -85,7 +117,8 @@ signedInteger = L.signed (pure ()) integer
 -- | An integer, @true@ or @false@.
 literal :: Parser Lit
 literal =
-  LInt <$> signedInteger
+  LStr <$> stringLiteral
+    <|> LInt <$> signedInteger
     <|> LBool True <$ keyword "true"
     <|> LBool False <$ keyword "false"
 
@@ -127,8 +160,49 @@ postfix = do
   pure (foldl ESelect e labels)
 
 -- | One or more 'postfix', applied to the left: @f x y@ is @(f x) y@.
+-- | A string in double quotes, with the escapes of Haskell.
+stringLiteral :: Parser String
+stringLiteral = char '"' *> manyTill L.charLiteral (char '"')
+
+-- | One character of a bareword. These end a word because the line needs them.
+wordChar :: Parser Char
+wordChar = satisfy (\c -> not (isSpace c) && c `notElem` (")}|\"$" :: String))
+
+-- | The head of an external command: a path, or a word that starts with a name
+-- that nothing binds. A bound name is left for 'application'.
+commandHead :: Parser Name
+commandHead = do
+  isPath <- option False (True <$ lookAhead (choice (map string ["/", "./", "../", "~/"])))
+  if isPath
+    then do
+      -- The empty name is bound only under 'AllBound'.
+      everything <- asks (isBound "")
+      when everything (fail "no external commands here")
+    else do
+      name <- lookAhead identifier
+      bound <- asks (isBound name)
+      when bound (fail "a bound name is not a command")
+  some wordChar
+
+-- | One argument of an external command.
+argument :: Parser Arg
+argument =
+  AVar <$> (char '$' *> identifier)
+    <|> AWord <$> stringLiteral
+    <|> AWord <$> some wordChar
+
+-- | @git log --oneline $x@. Words end a line or a bracket, and @--@ is an
+-- ordinary word here, not a comment.
+external :: Parser Expr
+external = do
+  name <- try commandHead
+  hspace
+  args <- many (argument <* hspace)
+  sc
+  pure (ECmd name args)
+
 application :: Parser Expr
-application = do
+application = external <|> do
   fun <- postfix
   args <- many postfix
   pure (foldl EApp fun args)
@@ -140,7 +214,7 @@ application = do
 lambda :: Parser Expr
 lambda = do
   names <- try (some (lexeme identifier) <* symbol "->")
-  body <- expr
+  body <- binding names expr
   pure (foldr ELam body names)
 
 -- | @let x = bound in body@.
@@ -151,7 +225,7 @@ letIn = do
   _ <- symbol "="
   bound <- expr
   lexeme (keyword "in")
-  body <- expr
+  body <- binding [name] expr
   pure (ELet name bound body)
 
 -- | Any expression.
@@ -160,4 +234,8 @@ expr = letIn <|> lambda <|> application
 
 -- | Parse one whole expression, or give a readable error.
 parseExpr :: String -> Either String Expr
-parseExpr = first errorBundlePretty . parse (sc *> expr <* eof) "<input>"
+parseExpr = parseExprIn AllBound
+
+-- | The same, given what is bound.
+parseExprIn :: Bound -> String -> Either String Expr
+parseExprIn bound = first errorBundlePretty . runIn bound (sc *> expr <* eof)

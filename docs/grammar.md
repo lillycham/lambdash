@@ -13,11 +13,12 @@ Whitespace and comments can appear between any two items in a syntax rule.
 ```ebnf
 program     = expr EOF ;
 
-expr        = let | lambda | application ;
+expr        = let | lambda | external | application ;
 
 let         = "let" IDENT "=" expr "in" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
 application = postfix { postfix } ;
+external    = HEAD { ARG } ;
 ```
 
 ## Tight rules
@@ -34,7 +35,7 @@ Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
 atom        = literal | record | accessor | IDENT | "(" expr ")" ;
-literal     = INT | "true" | "false" | "(" ")" ;
+literal     = INT | STRING | "true" | "false" | "(" ")" ;
 record      = "{" [ field { "," field } ] "}" ;
 field       = IDENT "=" expr ;
 ```
@@ -45,7 +46,12 @@ field       = IDENT "=" expr ;
 IDENT       = LETTER { LETTER | DIGIT | "_" | "'" } - RESERVED ;
 RESERVED    = "let" | "in" | "true" | "false" ;
 INT         = [ "+" | "-" ] DIGIT { DIGIT } ;
+STRING      = a Haskell string literal ;
 COMMENT     = "--" { any character except newline } ;
+
+HEAD        = WORD ;     (* a path, or a word that starts with an unbound name *)
+ARG         = "$" IDENT | STRING | WORD ;
+WORD        = { any character except space and ) } | " $ } ;
 ```
 
 A reserved word ends where a character that can continue an `IDENT` does not
@@ -64,6 +70,10 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
 - `postfix` goes to the left: `r.a.b` is `(r.a).b`.
 - `.a.b` means `r -> r.a.b`.
 - Inside `INT`, no space can follow the sign.
+- `external` applies only when nothing binds the head. Bound names are the
+  session names, lambda parameters and let names. The parser never reads `PATH`.
+- Inside `external`, only spaces separate words, and `--` is an ordinary word.
+  A line or a closing bracket ends it.
 
 ## REPL lines
 
@@ -82,3 +92,6 @@ line        = [ ":q" | ":t" expr | IDENT "=" expr | IDENT "<-" expr | expr ] EOF
 
 - There is no infix `-` yet, so `x-1` is `x (-1)`, an application.
 - `INT` accepts a `+` sign.
+- `true` and `false` are values, so `true` at the prompt does not run a program.
+- `lambda` wins over `external`, so `echo a -> b` is a lambda.
+- A `"` ends a word, so `a"b"` is two arguments.

@@ -5,7 +5,9 @@
 module Lambdash.Infer
   ( Name
   , Lit (..)
+  , Arg (..)
   , Expr (..)
+  , commands
   , Scheme (..)
   , mono
   , Env
@@ -41,6 +43,15 @@ data Lit
   = LInt Int
   | LBool Bool
   | LUnit
+  | LStr String
+  deriving (Eq, Show)
+
+-- | One argument of an external command.
+data Arg
+  = -- | A bareword or a string literal.
+    AWord String
+  | -- | @$x@.
+    AVar Name
   deriving (Eq, Show)
 
 data Expr
@@ -51,6 +62,8 @@ data Expr
   | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
     -- in @bound@.
     ELet Name Expr Expr
+  | -- | @git status@: a head that nothing binds, and its arguments.
+    ECmd Name [Arg]
   | -- | @{name = 1, ok = true}@.
     ERecord [(Label, Expr)]
   | -- | @r.name@.
@@ -168,6 +181,17 @@ infer env (EVar name) =
 infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
 infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
 infer _ (ELit LUnit)     = pure (emptySubst, TUnit)
+infer _ (ELit (LStr _))  = pure (emptySubst, TString)
+
+-- For now, an argument must be a String. The checker has nothing to convert with.
+infer env (ECmd _ args) = do
+  subs <- mapM check args
+  pure (foldr compose emptySubst subs, TComp TStatus)
+ where
+  check (AWord _) = pure emptySubst
+  check (AVar name) = do
+    (s, t) <- infer env (EVar name)
+    unifying (unify (apply s t) TString)
 
 infer env (ELam name body) = do
   tv <- fresh
@@ -209,6 +233,16 @@ infer env (ESelect expr label) = do
   let requiredTy = TRecord (RExtend label fieldTy tailRow)
   fieldSub <- unifying (unify recordTy requiredTy)
   pure (fieldSub `compose` exprSub, apply fieldSub fieldTy)
+
+-- | The external commands that an expression names, also under lambdas.
+commands :: Expr -> [Name]
+commands (ECmd name _) = [name]
+commands (ELam _ body) = commands body
+commands (EApp f x) = commands f <> commands x
+commands (ELet _ bound body) = commands bound <> commands body
+commands (ERecord fields) = concatMap (commands . snd) fields
+commands (ESelect record _) = commands record
+commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty

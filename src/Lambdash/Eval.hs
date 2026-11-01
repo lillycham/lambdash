@@ -18,7 +18,8 @@ where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Lambdash.Infer (Env, Expr (..), Lit (..), Name, Scheme (..), mono)
+import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
+import Lambdash.Process (Status (..), runExternal)
 import Lambdash.Unify
 
 -- | What an expression can evaluate to. Fields stay in written order, because
@@ -28,6 +29,8 @@ data Value
   = VInt Int
   | VBool Bool
   | VUnit
+  | VStr String
+  | VStatus Status
   | VRecord [(Label, Value)]
   | -- | The name identifies the builtin.
     VBuiltin Name (Value -> Value)
@@ -44,6 +47,9 @@ render :: Value -> String
 render (VInt n) = show n
 render (VBool b) = if b then "true" else "false"
 render VUnit = "()"
+render (VStr s) = show s
+render (VStatus (ExitedWith n)) = "exit " <> show n
+render (VStatus (KilledBy n)) = "signal " <> show n
 render (VRecord fields) = "{" <> commaSep (map renderField fields) <> "}"
   where
     renderField (label, value) = label <> " = " <> render value
@@ -93,10 +99,16 @@ eval env expression =
     ERecord fields -> VRecord [(label, eval env value) | (label, value) <- fields]
     ESelect record label -> select label (eval env record)
     ELet name value body -> eval (Map.insert name (eval env value) env) body
+    ECmd name args -> VComp (VStatus <$> runExternal name (map word args))
   where
     evalLit (LInt n) = VInt n
     evalLit (LBool b) = VBool b
     evalLit LUnit = VUnit
+    evalLit (LStr s) = VStr s
+    word (AWord s) = s
+    word (AVar name) = case Map.lookup name env of
+      Just (VStr s) -> s
+      _ -> error "eval: the checker passed a non-String argument"
 
 -- | The names that exist before any input, with a type and a value together, so
 -- that the two cannot drift apart.
@@ -109,6 +121,7 @@ builtins =
   ]
   where
     t = Var 0
+    printV (VStr s) = VComp (VUnit <$ putStrLn s)
     printV value = VComp (VUnit <$ putStrLn (render value))
     notV (VBool b) = VBool (not b)
     notV _ = error "not: the checker passed a non-Bool"

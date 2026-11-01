@@ -13,6 +13,7 @@ module Lambdash.Repl
   , step
   ) where
 
+import Control.Monad (filterM)
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.Bifunctor (first)
 import Data.Char (chr, ord)
@@ -20,8 +21,9 @@ import Data.Map.Strict qualified as Map
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
+import Lambdash.Process (Status (..), programExists)
 import Lambdash.Unify
-import Text.Megaparsec ((<|>), eof, errorBundlePretty, parse, try)
+import Text.Megaparsec ((<|>), eof, errorBundlePretty, try)
 
 -- | What persists between lines. A name has its type in one and its value in
 -- the other, so an update has to change both.
@@ -64,8 +66,8 @@ command =
   <|> (Run <$> expr)
 
 -- | Parse one whole line, or give a readable error.
-parseCommand :: String -> Either String Command
-parseCommand = first errorBundlePretty . parse (sc *> command <* eof) "<input>"
+parseCommand :: Bound -> String -> Either String Command
+parseCommand bound = first errorBundlePretty . runIn bound (sc *> command <* eof)
 
 -- | Show a type. Unknowns get letters in first-seen order, so the numbers from
 -- the checker never reach the user: @a -> a@, @(a -> b) -> a -> b@,
@@ -153,7 +155,7 @@ data Step
 -- A unit result shows nothing, so that @print 1@ shows only @1@.
 step :: Session -> String -> IO Step
 step session input =
-  case parseCommand input of
+  case parseCommand (BoundNames (Map.keysSet types)) input of
     Left err -> pure (Continue session err)
     Right Blank -> pure (Continue session "")
     Right Exit -> pure Quit
@@ -161,14 +163,14 @@ step session input =
       pure (Continue session (renderType ty))
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
       case ty of
-        TComp _ -> do
+        TComp _ -> preflight expression $ do
           result <- runComp (eval values expression)
           pure (Continue session (showResult result))
         _ -> pure (Continue session (render (eval values expression)))
     Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
       pure (bound name ty (eval values expression))
     Right (BindRun name expression) -> checked (inferRunIn types expression) $ \ty ->
-      bound name ty <$> runComp (eval values expression)
+      preflight expression (bound name ty <$> runComp (eval values expression))
   where
     types = sessionTypes session
     values = sessionValues session
@@ -183,5 +185,13 @@ step session input =
             , sessionValues = Map.insert name value values
             }
       in Continue next (name <> " : " <> renderType ty)
+    -- This sees only the commands that the line names. The commands inside a
+    -- bound name wait for effect rows.
+    preflight expression action = do
+      missing <- filterM (fmap not . programExists) (commands expression)
+      case missing of
+        [] -> action
+        name : _ -> pure (Continue session ("command not found: " <> name))
     showResult VUnit = ""
+    showResult (VStatus (ExitedWith 0)) = ""
     showResult value = render value
