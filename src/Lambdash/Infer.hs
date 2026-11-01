@@ -12,7 +12,9 @@ module Lambdash.Infer
   , InferError (..)
   , Infer
   , fresh
+  , unifying
   , ftv
+  , ftvRow
   , ftvScheme
   , ftvEnv
   , applyScheme
@@ -24,7 +26,7 @@ module Lambdash.Infer
   , inferType
   ) where
 
-import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put)
 import Control.Monad.Trans.Class (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -47,6 +49,10 @@ data Expr
   | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
     -- in @bound@.
     ELet Name Expr Expr
+  | -- | @{name = 1, ok = true}@.
+    ERecord [(Label, Expr)]
+  | -- | @r.name@.
+    ESelect Expr Label
   deriving (Eq, Show)
 
 -- | A type that holds for every choice of the listed unknowns.
@@ -79,11 +85,22 @@ fresh = do
   put (n + 1)
   pure (TVar (Var n))
 
+-- | Run unification in here.
+unifying :: Unifier a -> Infer a
+unifying = mapStateT (either (Left . Unify) Right)
+
 -- | The unknowns that appear in a type.
+--
+-- Note: this has to see row unknowns as well, or @generalise@ misses them.
 ftv :: Ty -> Set Var
 ftv (TVar v) = Set.singleton v
 ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
 ftv (TCon _) = Set.empty
+ftv (TRecord r) = ftvRow r
+
+-- | The unknowns that appear in a row.
+ftvRow :: Row -> Set Var
+ftvRow = undefined
 
 -- | The unknowns that a scheme does not bind.
 ftvScheme :: Scheme -> Set Var
@@ -98,7 +115,7 @@ ftvEnv = Set.unions . map ftvScheme . Map.elems
 -- marks a place to fill in, so the substitution must not touch it.
 applyScheme :: Subst -> Scheme -> Scheme
 applyScheme sub (Forall bound ty) =
-  Forall bound (apply (Subst sub') ty)
+  Forall bound (apply sub { getSubst = sub' } ty)
  where
   sub' = foldr Map.delete (getSubst sub) bound
 
@@ -119,7 +136,7 @@ generalise env t = Forall as t
 instantiate :: Scheme -> Infer Ty
 instantiate (Forall as t) = do
   as' <- mapM (const fresh) as
-  let s = Subst $ Map.fromList $ zip as as'
+  let s = Subst (Map.fromList (zip as as')) Map.empty
   pure $ apply s t
 
 -- | Find the type of an expression, and what that taught us.
@@ -149,9 +166,7 @@ infer env (EApp e1 e2) = do
   (s2, t2) <- infer (applyEnv s1 env) e2
   tv <- fresh
   let t1' = apply s2 t1
-  s3 <- case unify t1' (TFun t2 tv) of
-    Left err -> lift (Left (Unify err))
-    Right s  -> pure s
+  s3 <- unifying (unify t1' (TFun t2 tv))
   let s_final = s3 `compose` s2 `compose` s1
   pure (s_final, apply s3 tv)
 
@@ -161,6 +176,10 @@ infer env (ELet x e1 e2) = do
       sc = generalise env' (apply s1 t1)
   (s2, t2) <- infer (Map.insert x sc env') e2
   pure (s2 `compose` s1, apply s2 t2)
+
+infer _ (ERecord _) = undefined
+
+infer _ (ESelect _ _) = undefined
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty

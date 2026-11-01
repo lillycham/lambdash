@@ -35,7 +35,7 @@ test-suite unify-tests
   type:           exitcode-stdio-1.0
   hs-source-dirs: test
   main-is:        UnifyTests.hs
-  build-depends:  base, lambdash
+  build-depends:  base, lambdash, transformers
 
 test-suite infer-tests
   import:         shared

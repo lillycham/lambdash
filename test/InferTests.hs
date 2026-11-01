@@ -12,6 +12,7 @@ import Data.Set qualified as Set
 import Lambdash.Infer
 import Lambdash.Unify
 import System.Exit (exitFailure)
+import System.Timeout (timeout)
 
 (~>) :: Ty -> Ty -> Ty
 (~>) = TFun
@@ -25,7 +26,13 @@ t2 = TVar (Var 2)
 vars :: Ty -> [Var]
 vars (TVar v) = [v]
 vars (TFun a b) = vars a <> vars b
+vars (TRecord r) = varsRow r
 vars _ = []
+
+varsRow :: Row -> [Var]
+varsRow REmpty = []
+varsRow (RVar x) = [x]
+varsRow (RExtend _ t r) = vars t <> varsRow r
 
 normalise :: Ty -> Ty
 normalise t = go t
@@ -33,7 +40,11 @@ normalise t = go t
   names = zip (nub (vars t)) (map Var [0 ..])
   go (TVar v) = TVar (fromJust (lookup v names))
   go (TFun a b) = TFun (go a) (go b)
+  go (TRecord r) = TRecord (goRow r)
   go other = other
+  goRow REmpty = REmpty
+  goRow (RVar x) = RVar (fromJust (lookup x names))
+  goRow (RExtend l a r) = RExtend l (go a) (goRow r)
 
 lam :: [Name] -> Expr -> Expr
 lam names body = foldr ELam body names
@@ -136,15 +147,37 @@ tests =
   , ("error: the binding of a parameter stays one type", mismatch (lam ["x"] (ELet "y" (v "x") (first (app (v "add") [v "y", int 1]) (EApp (v "not") (v "y"))))))
   , ("error: the result of a parameter stays one type", mismatch (lam ["x"] (ELet "y" (EApp (v "x") (int 1)) (first (app (v "add") [v "y", int 1]) (EApp (v "not") (v "y"))))))
   , ("error: a kept unknown stays one type", mismatch (lam ["x"] (ELet "k" (lam ["y"] (v "x")) (first (app (v "add") [EApp (v "k") (int 1), int 1]) (EApp (v "not") (EApp (v "k") true))))))
+  , ("ftvRow: fields and tail", ftvRow (RExtend "a" t0 (RVar (Var 1))) == Set.fromList [Var 0, Var 1])
+  , ("ftv: inside a record", ftv (TRecord (RVar (Var 1))) == Set.fromList [Var 1])
+  , ("applyScheme: leaves a bound row unknown", applyScheme (singletonRow (Var 1) REmpty) (Forall [Var 1] (TRecord (RVar (Var 1)))) == Forall [Var 1] (TRecord (RVar (Var 1))))
+  , ("generalise: binds a row unknown", generalise Map.empty (TRecord (RVar (Var 1))) == Forall [Var 1] (TRecord (RVar (Var 1))))
+  , ("instantiate: a row unknown is its own copy", case scheme 5 (Forall [Var 1] (TRecord (RVar (Var 1)))) of
+        Right (TRecord (RVar a), TRecord (RVar b)) -> a /= b && a /= Var 1 && b /= Var 1
+        _ -> False)
+  , ("record: empty", typed (ERecord []) (TRecord REmpty))
+  , ("record: fields", typed (ERecord [("n", int 1), ("ok", true)]) (TRecord (RExtend "n" TInt (RExtend "ok" TBool REmpty))))
+  , ("record: a field's learning reaches the next field", typed (lam ["x"] (ERecord [("a", EApp (v "not") (v "x")), ("b", v "x")])) (TBool ~> TRecord (RExtend "a" TBool (RExtend "b" TBool REmpty))))
+  , ("select: from a record", typed (ESelect (ERecord [("n", int 1), ("ok", true)]) "ok") TBool)
+  , ("select: any record with the field", typed (lam ["r"] (ESelect (v "r") "name")) (TRecord (RExtend "name" t0 (RVar (Var 1))) ~> t0))
+  , ("select: two fields of one parameter", typed (EApp (lam ["r"] (first (ESelect (v "r") "a") (ESelect (v "r") "b"))) (ERecord [("b", true), ("a", int 1)])) TInt)
+  , ("select: let makes a selector polymorphic", typed (ELet "name" (lam ["r"] (ESelect (v "r") "name")) (first (EApp (v "name") (ERecord [("name", int 1)])) (EApp (v "name") (ERecord [("x", int 2), ("name", true)])))) TInt)
+  , ("error: no such field", case inferIn prelude (ESelect (ERecord [("name", int 1)]) "nmae") of
+        Left (Unify (MissingField "nmae" _)) -> True
+        _ -> False)
+  , ("error: a parameter's field stays one type", mismatch (lam ["r"] (first (app (v "add") [ESelect (v "r") "a", int 1]) (EApp (v "not") (ESelect (v "r") "a")))))
+  , ("error: a row in the environment stays one row", mismatch (lam ["r"] (ELet "s" (v "r") (first (app (v "add") [ESelect (v "s") "a", int 1]) (EApp (v "not") (ESelect (v "s") "a"))))))
+  , ("error: a field's learning reaches the next field", mismatch (lam ["x"] (ERecord [("a", EApp (v "not") (v "x")), ("b", app (v "add") [v "x", int 1])])))
   ]
 
 runTest :: (String, Bool) -> IO Bool
 runTest (name, result) = do
-  outcome <- try (evaluate result) :: IO (Either SomeException Bool)
+  -- The time limit is for row unification, which can loop forever.
+  outcome <- try (timeout 2000000 (evaluate result)) :: IO (Either SomeException (Maybe Bool))
   let (passed, label) = case outcome of
-        Right True -> (True, "pass")
-        Right False -> (False, "FAIL")
+        Right (Just True) -> (True, "pass")
+        Right (Just False) -> (False, "FAIL")
         Left _ -> (False, "TODO")
+        Right Nothing -> (False, "HANG")
   putStrLn (label <> "  " <> name)
   pure passed
 
