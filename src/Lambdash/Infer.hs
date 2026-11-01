@@ -1,16 +1,24 @@
--- | Type inference for a small core: variables, lambdas, application.
+-- | Type inference for a small core: variables, lambdas, application, @let@.
 --
--- This is Algorithm W without @let@. Each step returns what it learned as a
+-- This is Algorithm W. Each step returns what it learned as a
 -- substitution, together with the type it found.
 module Lambdash.Infer
   ( Name
   , Lit (..)
   , Expr (..)
+  , Scheme (..)
+  , mono
   , Env
   , InferError (..)
   , Infer
   , fresh
+  , ftv
+  , ftvScheme
+  , ftvEnv
+  , applyScheme
   , applyEnv
+  , generalise
+  , instantiate
   , infer
   , inferIn
   , inferType
@@ -20,6 +28,7 @@ import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
 import Control.Monad.Trans.Class (lift)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
 import Lambdash.Unify
 
 type Name = String
@@ -34,10 +43,22 @@ data Expr
   | ELit Lit
   | ELam Name Expr
   | EApp Expr Expr
+  | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
+    -- in @bound@.
+    ELet Name Expr Expr
   deriving (Eq, Show)
 
+-- | A type that holds for every choice of the listed unknowns.
+-- @Forall [a] (a -> a)@ is @forall a. a -> a@. The other unknowns are free.
+data Scheme = Forall [Var] Ty
+  deriving (Eq, Show)
+
+-- | A type with nothing to choose. Lambda parameters have this.
+mono :: Ty -> Scheme
+mono = Forall []
+
 -- | What each name in scope has as its type.
-type Env = Map Name Ty
+type Env = Map Name Scheme
 
 data InferError
   = -- | Two types did not unify.
@@ -57,9 +78,39 @@ fresh = do
   put (n + 1)
   pure (TVar (Var n))
 
--- | Apply a substitution to every type in the environment.
+-- | The unknowns that appear in a type.
+ftv :: Ty -> Set Var
+ftv = undefined
+
+-- | The unknowns that a scheme does not bind.
+ftvScheme :: Scheme -> Set Var
+ftvScheme = undefined
+
+-- | The unknowns free in any scheme in the environment. These are the unknowns
+-- that something outside a @let@ can still constrain.
+ftvEnv :: Env -> Set Var
+ftvEnv = undefined
+
+-- | Apply a substitution to the free unknowns of a scheme. A bound unknown only
+-- marks a place to fill in, so the substitution must not touch it.
+applyScheme :: Subst -> Scheme -> Scheme
+applyScheme = undefined
+
+-- | Apply a substitution to every scheme in the environment.
 applyEnv :: Subst -> Env -> Env
-applyEnv s e = Map.map (apply s) e
+applyEnv s e = Map.map (applyScheme s) e
+
+-- | Bind each unknown of the type that the environment does not mention, in
+-- ascending order.
+--
+-- Note: the caller has to apply what it learned to the environment first.
+generalise :: Env -> Ty -> Scheme
+generalise = undefined
+
+-- | Replace each bound unknown with a fresh one, so that each use of a name is
+-- its own copy.
+instantiate :: Scheme -> Infer Ty
+instantiate = undefined
 
 -- | Find the type of an expression, and what that taught us.
 --
@@ -70,14 +121,16 @@ infer :: Env -> Expr -> Infer (Subst, Ty)
 infer env (EVar name) =
   case Map.lookup name env of
     Nothing -> lift (Left (Unbound name))
-    Just t  -> pure (emptySubst, t)
+    Just sc -> do
+      t <- instantiate sc
+      pure (emptySubst, t)
 
 infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
 infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
 
 infer env (ELam name body) = do
   tv <- fresh
-  let env' = Map.insert name tv env
+  let env' = Map.insert name (mono tv) env
   (s, t) <- infer env' body
   pure (s, apply s (TFun tv t))
 
@@ -91,6 +144,8 @@ infer env (EApp e1 e2) = do
     Right s  -> pure s
   let s_final = s3 `compose` s2 `compose` s1
   pure (s_final, apply s3 tv)
+
+infer _ (ELet _ _ _) = undefined
 
 -- | Infer in a starting environment, with the final solution applied.
 inferIn :: Env -> Expr -> Either InferError Ty
