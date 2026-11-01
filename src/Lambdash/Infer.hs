@@ -83,8 +83,7 @@ fresh = do
 ftv :: Ty -> Set Var
 ftv (TVar v) = Set.singleton v
 ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
-ftv TInt = Set.empty
-ftv TBool = Set.empty
+ftv (TCon _) = Set.empty
 
 -- | The unknowns that a scheme does not bind.
 ftvScheme :: Scheme -> Set Var

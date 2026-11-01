@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- | Types, substitutions and unification: the first piece of the checker.
 --
 -- A substitution is a solution so far: what each unknown has turned out to be.
@@ -5,6 +7,8 @@
 module Lambdash.Unify
   ( Var (..),
     Ty (..),
+    pattern TInt,
+    pattern TBool,
     Subst(..),
     TypeError (..),
     emptySubst,
@@ -27,9 +31,13 @@ newtype Var = Var Int
 data Ty
   = TVar Var
   | TFun Ty Ty
-  | TInt
-  | TBool
+  | -- | A type with a name and no parts.
+    TCon String
   deriving (Eq, Show)
+
+pattern TInt, TBool :: Ty
+pattern TInt = TCon "Int"
+pattern TBool = TCon "Bool"
 
 newtype Subst = Subst {getSubst :: Map Var Ty}
   deriving (Eq, Show)
