@@ -87,6 +87,7 @@ renderEffectsType ty = evalState (renderTy ty) Map.empty
 
 hideEffects :: Ty -> Ty
 hideEffects (TFun a b) = TFun (hideEffects a) (hideEffects b)
+hideEffects (TQualified _ ty) = hideEffects ty
 hideEffects (TComp _ t) = TComp noEffects (hideEffects t)
 hideEffects (TStream _ i o r) = TStream noEffects (hideEffects i) (hideEffects o) (hideEffects r)
 hideEffects (TRecord row) = TRecord (hideRow row)
@@ -112,6 +113,10 @@ renderVar var = do
 renderTy :: Ty -> State TypeNames String
 renderTy (TVar var) = renderVar var
 renderTy (TCon name) = pure name
+renderTy (TQualified constraints ty) = do
+  conditions <- mapM renderConstraint constraints
+  text <- renderTy ty
+  pure ("(" <> intercalate ", " conditions <> ") => " <> text)
 renderTy (TFun argument result) = do
   left <- renderTy argument
   right <- renderTy result
@@ -151,6 +156,15 @@ renderEffects row@(EffRow labels vars)
           open = if null tails then "" else " | " <> intercalate " + " tails
       pure (" {" <> fixed <> open <> "}")
 
+renderConstraint :: EffConstraint -> State TypeNames String
+renderConstraint (EffEqual left right) = do
+  a <- renderEffects left
+  b <- renderEffects right
+  let row "" = "{}"
+      row (' ' : rest) = rest
+      row text = text
+  pure (row a <> " = " <> row b)
+
 renderRow :: Row -> State TypeNames String
 renderRow REmpty = pure ""
 renderRow (RVar var) = (" | " <>) <$> renderVar var
@@ -176,7 +190,9 @@ renderError (Unify err) = case err of
     renderPair "infinite row: " (TRecord (RVar var)) (TRecord row)
   MissingField label _ -> "no field: " <> label
   EffectMismatch left right -> renderEffectError "effect mismatch:" left right
-  UnresolvedEffects left right -> renderEffectError "cannot solve effect-row equality:" left right
+  InconsistentEffects constraints -> flip evalState Map.empty $ do
+    text <- mapM renderConstraint constraints
+    pure ("inconsistent effect requirements: " <> intercalate ", " text)
 
 renderEffectError :: String -> EffRow -> EffRow -> String
 renderEffectError message left right = flip evalState Map.empty $ do
@@ -209,7 +225,7 @@ step session input =
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
-      case ty of
+      case snd (unqualify ty) of
         TComp _ _ -> preflight ty $ do
           result <- runComp (eval values expression)
           pure (Continue session (showResult result))
@@ -237,10 +253,10 @@ step session input =
             }
       in Continue next (name <> " : " <> renderType ty)
     preflight ty action = do
-      let EffRow labels tails = actionEffects ty
-      if not (Set.null tails)
-        then pure (Continue session "cannot run an action with an unresolved effect row")
-        else do
+      let (constraints, _) = unqualify ty
+      case closeEffects constraints (actionEffects ty) of
+        Nothing -> pure (Continue session "cannot run an action with an unresolved effect row")
+        Just (EffRow labels _) -> do
           missing <- filterM (fmap not . programExists) [name | Exec name <- Set.toList labels]
           case missing of
             [] -> action

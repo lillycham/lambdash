@@ -51,14 +51,28 @@ Rows are sets. Pipeline composition unions their labels and open tails.
 A repeated requirement occurs once. Independent tails remain independent.
 Generalisation and instantiation include effect unknowns, as they include type and record-row unknowns.
 An open union appears as `{exec cat | a + b}`.
-The REPL refuses to run an action whose outer row still has an unresolved tail.
+The checker retains an equality that does not determine a row uniquely.
+For example, `{exec cat | e} = {exec cat}` permits `e` to be empty or contain `exec cat`.
+It does not permit any other effect.
 
-This first slice solves closed equality, bare row unknowns and single shared-tail absorption.
-Some equalities need qualified set constraints, such as `{exec cat | e} = {exec cat}`.
-That equation bounds `e` but does not determine it.
-The checker reports `cannot solve effect-row equality` instead of a guessed substitution.
-Exact equality can also reject a monomorphic function that accepts actions with different effects.
-Effect subtyping and general qualified constraints remain future work.
+`:t` shows these conditions before the type:
+
+```text
+({exec cat | a} = {exec cat}) => Stream { | a} Bytes Bytes b -> Stream {exec cat | a} Bytes Bytes Status
+```
+
+The conditions follow the type through functions, records, local definitions and `<-` results.
+Each use of a polymorphic value gets fresh unknowns and conditions.
+A later argument can resolve a condition. A contradiction stops inference before any action runs.
+An unused local definition still constrains any enclosing monomorphic unknown that it mentions.
+
+Preflight can run an action when its conditions prove one exact closed outer row.
+The row may have a tail internally: `{exec cat | e}` above always equals `{exec cat}`.
+If the outer requirements remain ambiguous, the REPL reports an unresolved effect row.
+The checker does not choose an arbitrary permitted set or assume that unnamed effects are absent.
+
+Exact equality can still reject a monomorphic function that accepts actions with different effects.
+Effect subtyping remains future work.
 
 Computed command heads and `{exec *}` have no syntax yet.
 Environment handlers and row discharge belong to the later environment slices.

@@ -8,8 +8,9 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.List (isInfixOf)
 import Data.Set qualified as Set
+import Data.Map.Strict qualified as Map
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import Lambdash.Eval (typeEnv)
+import Lambdash.Eval (Value (..), typeEnv)
 import Lambdash.Infer
 import Lambdash.Parser
 import Lambdash.Process (Status (..))
@@ -93,7 +94,41 @@ awaitFile path = do
 
 tests :: [(String, IO Bool)]
 tests =
-  [ ("effects: latent function needs no command", gives ["f = x -> missing-effects-xyz", "pure 1"] "" ["f : a -> Stream Bytes Bytes Status", "1"])
+  [ ("constraints: preflight proves a closed outer row", do
+      let row = unionEffects (effect (Exec "cat")) (effectVar (Var 0))
+          qualified = qualify [EffEqual row (effect (Exec "cat"))] (TStream row TBytes TBytes TStatus)
+          session = Session (Map.singleton "job" (Forall [Var 0] qualified))
+            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]]))
+      (output, result) <- capture (step session "job")
+      pure $ BS.null output && case result of Continue _ "" -> True; _ -> False)
+  , ("constraints: proved requirements still get preflight", do
+      let missing = effect (Exec "missing-constraint-command-xyz")
+          row = unionEffects missing (effectVar (Var 0))
+          qualified = qualify [EffEqual row missing] (TStream row TBytes TBytes TStatus)
+          session = Session (Map.singleton "job" (Forall [Var 0] qualified))
+            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []]))
+      (output, result) <- capture (step session "job")
+      pure $ BS.null output && case result of Continue _ "command not found: missing-constraint-command-xyz" -> True; _ -> False)
+  , ("constraints: a binding retains and resolves its bound", gives
+      ["bounded = " <> bounded, "bounded (cat /dev/null)"] "" [boundType, ""])
+  , ("constraints: an invalid instance runs no command", gives
+      ["bounded = " <> bounded, "bounded (printf side-effect)", "bounded (cat /dev/null)"] ""
+      [boundType, "effect mismatch: {exec cat, exec printf} and {exec cat}", ""])
+  , ("constraints: a run result keeps its qualification", gives
+      ["bounded = " <> bounded, "f <- pure bounded", "f (printf side-effect)"] ""
+      [boundType, "f : Stream Bytes Bytes a -> Stream Bytes Bytes Status", "effect mismatch: {exec cat, exec printf} and {exec cat}"])
+  , ("constraints: record selection keeps a function's qualification", gives
+      ["bounded = " <> bounded, "r = {f = bounded, n = 1}", "r.f (printf side-effect)", "r.n"] ""
+      [boundType, "r : {f : Stream Bytes Bytes a -> Stream Bytes Bytes Status, n : Int}", "effect mismatch: {exec cat, exec printf} and {exec cat}", "1"])
+  , ("constraints: unused locals still constrain enclosing inputs", gives
+      ["local = s -> let unused = ((" <> bounded <> ") s) in pure 1", "local (printf side-effect)"] ""
+      ["local : Stream Bytes Bytes a -> Comp Int", "effect mismatch: {exec cat, exec printf} and {exec cat}"])
+  , ("constraints: type query shows the deferred equality", gives
+      [":t " <> bounded] ""
+      ["({exec cat | a} = {exec cat}) => Stream { | a} Bytes Bytes b -> Stream {exec cat | a} Bytes Bytes Status"])
+  , ("constraints: pure record pipeline type query is unchanged", gives
+      ["pure {size = 3} | .size | add 2", ":t pure {size = 3} | .size | add 2"] "" ["5", "Comp Int"])
+  , ("effects: latent function needs no command", gives ["f = x -> missing-effects-xyz", "pure 1"] "" ["f : a -> Stream Bytes Bytes Status", "1"])
   , ("effects: higher-order missing command gets a preflight error", gives ["f = x -> missing-effects-xyz", "(g x -> g x) f 1"] "" ["f : a -> Stream Bytes Bytes Status", "command not found: missing-effects-xyz"])
   , ("effects: latent record field needs no command", gives ["pure {job = missing-effects-xyz}"] "" ["{job = <stream>}"])
   , ("effects: selecting a command checks its row", gives ["r = {job = missing-effects-xyz}", "r.job"] "" ["r : {job : Stream Bytes Bytes Status}", "command not found: missing-effects-xyz"])
@@ -172,6 +207,9 @@ tests =
       children <- try (getAnyProcessStatus False False) :: IO (Either IOException (Maybe (ProcessID, ProcessStatus)))
       pure (statuses == replicate 3 (ExitedWith 127) && either isDoesNotExistError (const False) children))
   ]
+ where
+  bounded = "s -> ((f -> {a = f (s | cat), b = f (cat)}) (x -> x)).a"
+  boundType = "bounded : Stream Bytes Bytes a -> Stream Bytes Bytes Status"
 
 runTest :: (String, IO Bool) -> IO Bool
 runTest (name, action) = do

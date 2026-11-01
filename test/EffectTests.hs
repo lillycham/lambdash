@@ -5,6 +5,7 @@ import Control.Monad (unless)
 import Control.Monad.Trans.State.Strict (evalStateT)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.List (nub, subsequences)
 import Lambdash.Eval (typeEnv)
 import Lambdash.Infer
 import Lambdash.Parser
@@ -37,9 +38,80 @@ inferSource source = do
 typed :: String -> String -> Bool
 typed source expected = fmap renderEffectsType (inferSource source) == Right expected
 
+bounded :: String
+bounded = "s -> ((f -> {a = f (s | cat), b = f (cat)}) (x -> x)).a"
+
+-- Independent finite-model oracle. The extra label represents effects not
+-- mentioned in a constraint, so accidental closed-world reasoning fails.
+models :: [Subst]
+models = [emptySubst {getEffectSubst = Map.fromList [(v0, closed a), (v1, closed b)]}
+  | a <- subsets, b <- subsets]
+ where
+  subsets = subsequences [Exec "echo", Exec "cat", Exec "other"]
+  closed labels = EffRow (Set.fromList labels) Set.empty
+
+holds :: Subst -> [EffConstraint] -> Bool
+holds model = all (\(EffEqual a b) -> applyEffects model a == applyEffects model b)
+
+constraintCases :: [[EffConstraint]]
+constraintCases = [[a, b] | a <- pool, b <- pool]
+ where
+  x = effectVar v0
+  y = effectVar v1
+  pool = [EffEqual (unionEffects echo x) echo, EffEqual (unionEffects cat x) x,
+    EffEqual x y, EffEqual (unionEffects x y) echo, EffEqual (unionEffects x y) noEffects,
+    EffEqual (unionEffects echo x) (unionEffects cat y), EffEqual echo cat,
+    EffEqual x (unionEffects echo y), EffEqual (unionEffects echo x) (unionEffects echo y)]
+
+preservesModels :: [EffConstraint] -> Bool
+preservesModels equations = case solveConstraints emptySubst {effectConstraints = equations} of
+  Left _ -> not (any (`holds` equations) models)
+  Right sub -> let solved = effectConstraints sub <>
+                    [EffEqual (effectVar var) row | (var, row) <- Map.toList (getEffectSubst sub)]
+               in all (\model -> holds model equations == holds model solved) models
+
+provesClosedRow :: [EffConstraint] -> EffRow -> Bool
+provesClosedRow equations row = closeEffects equations row == expected
+ where
+  alternatives = nub [applyEffects model row | model <- models, holds model equations]
+  expected = case alternatives of [one] -> Just one; _ -> Nothing
+
 tests :: [(String, Bool)]
 tests =
-  [ ("rows: union is idempotent", unionEffects echo echo == echo)
+  [ ("constraints: SAT agrees with exhaustive finite models", all (\cs -> satisfiableEffects cs == any (`holds` cs) models) constraintCases)
+  , ("constraints: substitutions preserve all finite models", all preservesModels constraintCases)
+  , ("constraints: closed-row proofs agree with finite models", all (\cs -> all (provesClosedRow cs) [effectVar v0, unionEffects echo (effectVar v0), unionEffects (effectVar v0) (effectVar v1), echo]) constraintCases)
+  , ("constraints: bounds do not guess a value", case solveConstraints emptySubst {effectConstraints = [EffEqual (unionEffects echo (effectVar v0)) echo]} of
+        Right sub -> Map.null (getEffectSubst sub) && not (null (effectConstraints sub))
+        _ -> False)
+  , ("constraints: contradictory bounds fail jointly", not (satisfiableEffects [EffEqual (unionEffects echo (effectVar v0)) echo, EffEqual (unionEffects cat (effectVar v0)) (effectVar v0)]))
+  , ("constraints: generalisation retains qualifications", case inferSource bounded of
+        Right ty@(TQualified cs _) -> not (null cs) && case generalise Map.empty ty of
+          Forall boundVars qualified -> not (null boundVars) && not (null (fst (unqualify qualified)))
+        _ -> False)
+  , ("constraints: a later application resolves a bound", typed ("(" <> bounded <> ") (cat /dev/null)") "Stream {exec cat} Bytes Bytes Status")
+  , ("constraints: a later application rejects a contradiction", case inferSource ("(" <> bounded <> ") (printf side-effect)") of
+        Left _ -> True
+        _ -> False)
+  , ("constraints: scheme instances have separate constraints", case inferSource bounded of
+        Right ty -> case evalStateT ((,) <$> instantiate (generalise Map.empty ty) <*> instantiate (generalise Map.empty ty)) 100 of
+          Right (a, b) -> Set.null (Set.intersection (ftv a) (ftv b)) && not (null (fst (unqualify a))) && not (null (fst (unqualify b)))
+          _ -> False
+        _ -> False)
+  , ("schemes: substitution ranges cannot capture quantified names", case inferIn captureEnv captureExpr of
+        Right (TFun (TVar a) (TFun (TVar b) (TVar c))) -> a == c && a /= b
+        _ -> False)
+  , ("constraints: argument checks preserve qualifications", case inferIn
+      (Map.singleton "x" (Forall [] (qualify [EffEqual (unionEffects echo (effectVar v0)) echo] TString)))
+      (ECmd "cat" [AVar "x"]) of
+        Right (TQualified cs _) -> not (null cs)
+        _ -> False)
+  , ("constraints: structural equality does not erase nested obligations", let
+        impossible = TRecord (RExtend "f" (qualify [EffEqual echo cat] (TFun TInt TInt)) REmpty)
+        in case run (unify impossible impossible) >>= solveConstraints of
+          Left _ -> True
+          _ -> False)
+  , ("rows: union is idempotent", unionEffects echo echo == echo)
   , ("rows: union is commutative", unionEffects echo cat == unionEffects cat echo)
   , ("rows: distinct tails survive union", ftvEffects (unionEffects (effectVar v0) (effectVar v1)) == Set.fromList [v0, v1])
   , ("rows: a bare unknown takes a closed row", agrees (effectVar v0) echo)
@@ -48,8 +120,8 @@ tests =
   , ("rows: self absorption terminates", agrees (effectVar v0) (unionEffects echo (effectVar v0)))
   , ("rows: a shared tail absorbs distinct labels", agrees (unionEffects echo (effectVar v0)) (unionEffects cat (effectVar v0)))
   , ("rows: closed effects do not silently widen", run (unifyEffects echo cat) == Left (EffectMismatch echo cat))
-  , ("rows: ambiguous equality is diagnosed", case run (unifyEffects (unionEffects echo (effectVar v0)) echo) of
-        Left (UnresolvedEffects _ _) -> True
+  , ("rows: ambiguous equality is retained", case run (unifyEffects (unionEffects echo (effectVar v0)) echo) of
+        Right sub -> not (null (effectConstraints sub)) && Map.null (getEffectSubst sub)
         _ -> False)
   , ("substitution: effect rows compose", applyEffects (compose (singletonEffect v1 echo) (singletonEffect v0 (effectVar v1))) (effectVar v0) == echo)
   , ("substitution: computation effects substitute", apply (singletonEffect v0 echo) (TComp (effectVar v0) TInt) == TComp echo TInt)
@@ -88,6 +160,9 @@ tests =
   ]
  where
   scheme = Forall [v0] (TComp (effectVar v0) TInt)
+  captureEnv = Map.fromList
+    [("g", Forall [v1] (TFun (TVar v1) (TVar v0))), ("u", mono (TFun (TVar v0) TUnit))]
+  captureExpr = ELam "x" (EApp (ELam "ignored" (EVar "g")) (EApp (EVar "u") (EVar "x")))
 
 main :: IO ()
 main = do

@@ -33,6 +33,7 @@ module Lambdash.Infer
 
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put)
 import Control.Monad.Trans.Class (lift)
+import Control.Monad (foldM)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -117,6 +118,7 @@ ftv (TCon _) = Set.empty
 ftv (TRecord r) = ftvRow r
 ftv (TComp eff t) = ftvEffects eff `Set.union` ftv t
 ftv (TStream eff i o r) = Set.unions (ftvEffects eff : map ftv [i, o, r])
+ftv (TQualified cs ty) = Set.unions (ftv ty : map constraintVars cs)
 
 ftvEffects :: EffRow -> Set Var
 ftvEffects (EffRow _ vars) = vars
@@ -126,6 +128,7 @@ ftvEffects (EffRow _ vars) = vars
 actionEffects :: Ty -> EffRow
 actionEffects (TComp eff _) = eff
 actionEffects (TStream eff _ _ _) = eff
+actionEffects (TQualified _ ty) = actionEffects ty
 actionEffects _ = noEffects
 
 -- | The unknowns that appear in a row.
@@ -154,6 +157,7 @@ applyScheme sub (Forall bound ty) =
     { getSubst = Map.withoutKeys (getSubst sub) boundVars
     , getRowSubst = Map.withoutKeys (getRowSubst sub) boundVars
     , getEffectSubst = Map.withoutKeys (getEffectSubst sub) boundVars
+    , effectConstraints = []
     }
 
 -- | Apply a substitution to every scheme in the environment.
@@ -165,8 +169,24 @@ applyEnv s e = Map.map (applyScheme s) e
 --
 -- Note: the caller has to apply what it learned to the environment first.
 generalise :: Env -> Ty -> Scheme
-generalise env t = Forall as t
-  where as = Set.toList $ ftv t `Set.difference` ftvEnv env
+generalise env t = Forall as qualified
+ where
+  (constraints, bare) = unqualify t
+  relevant = connectedConstraints (ftv bare `Set.union` ftvEnv env) constraints
+  fixed = constraintClosure (ftvEnv env) relevant
+  qualified = qualify relevant bare
+  as = Set.toList (ftv qualified `Set.difference` fixed)
+
+constraintClosure :: Set Var -> [EffConstraint] -> Set Var
+constraintClosure seed constraints =
+  let next = Set.unions (seed : [constraintVars c | c <- constraints,
+        not (Set.null (Set.intersection seed (constraintVars c)))])
+  in if next == seed then seed else constraintClosure next constraints
+
+connectedConstraints :: Set Var -> [EffConstraint] -> [EffConstraint]
+connectedConstraints seed constraints =
+  let connected = constraintClosure seed constraints
+  in [c | c <- constraints, not (Set.null (Set.intersection connected (constraintVars c)))]
 
 -- | Replace each bound unknown with a fresh one, so that each use of a name is
 -- its own copy.
@@ -178,6 +198,7 @@ instantiate (Forall bound ty) = do
         { getSubst = TVar <$> renaming
         , getRowSubst = RVar <$> renaming
         , getEffectSubst = effectVar <$> renaming
+        , effectConstraints = []
         }
   pure (apply sub ty)
 
@@ -192,7 +213,8 @@ infer env (EVar name) =
     Nothing -> lift (Left (Unbound name))
     Just sc -> do
       t <- instantiate sc
-      pure (emptySubst, t)
+      let (constraints, bare) = unqualify t
+      pure (emptySubst {effectConstraints = constraints}, bare)
 
 infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
 infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
@@ -201,13 +223,14 @@ infer _ (ELit (LStr _))  = pure (emptySubst, TString)
 
 -- For now, an argument must be a String. The checker has nothing to convert with.
 infer env (ECmd command args) = do
-  subs <- mapM check args
-  pure (foldr compose emptySubst subs, TStream (effect (Exec command)) TBytes TBytes TStatus)
+  sub <- foldM check emptySubst args
+  pure (sub, TStream (effect (Exec command)) TBytes TBytes TStatus)
  where
-  check (AWord _) = pure emptySubst
-  check (AVar name) = do
-    (s, t) <- infer env (EVar name)
-    unifying (unify (apply s t) TString)
+  check known (AWord _) = pure known
+  check known (AVar name) = do
+    (s, t) <- infer (applyEnv known env) (EVar name)
+    checked <- unifying (unify (apply s t) TString)
+    pure (checked `compose` s `compose` known)
 
 infer env (ELam name body) = do
   tv <- fresh
@@ -265,11 +288,16 @@ infer env (EPipe left right) = do
   pure (s3 `compose` known, apply s3 result)
 
 infer env (ELet x e1 e2) = do
-  (s1, t1) <- infer env e1
+  (raw, t1) <- infer env e1
+  s1 <- checkedConstraints raw
   let env' = applyEnv s1 env
-      sc = generalise env' (apply s1 t1)
+      sc = generalise env' (qualify (effectConstraints s1) (apply s1 t1))
+      -- Constraints involving an enclosing monomorphic variable must escape
+      -- even when the local binding is unused. Independent quantified rows
+      -- belong to the scheme and must not leak between its instances.
+      escaped = connectedConstraints (ftvEnv env') (effectConstraints s1)
   (s2, t2) <- infer (Map.insert x sc env') e2
-  pure (s2 `compose` s1, apply s2 t2)
+  pure (s2 `compose` s1 {effectConstraints = escaped}, apply s2 t2)
 
 infer env (ERecord fields) = do
   (sub, row) <- inferFields env fields
@@ -307,7 +335,19 @@ inferIn env expr = evalStateT (go env expr) (nextUnknown env)
  where
   go e x = do
     (s, t) <- infer e x
-    pure (apply s t)
+    finish e s t
+
+checkedConstraints :: Subst -> Infer Subst
+checkedConstraints = lift . either (Left . Unify) Right . solveConstraints
+
+finish :: Env -> Subst -> Ty -> Infer Ty
+finish env raw ty = do
+  let (nested, bare) = unqualify ty
+  solved <- checkedConstraints raw {effectConstraints = effectConstraints raw <> nested}
+  let result = apply solved bare
+      fixed = ftvEnv (applyEnv solved env)
+      relevant = connectedConstraints (ftv result `Set.union` fixed) (effectConstraints solved)
+  pure (qualify relevant result)
 
 -- | The return type of a computation or stream. A stream's output items are
 -- separate from its return value. An unknown action defaults to @TComp a@.
@@ -317,20 +357,21 @@ inferRunIn env expr = evalStateT go (nextUnknown env)
   go = do
     (s1, t) <- infer env expr
     case apply s1 t of
-      TStream _ _ _ result -> pure result
-      TComp _ result -> pure result
+      TStream _ _ _ result -> finish env s1 result
+      TComp _ result -> finish env s1 result
       ty -> do
         result <- fresh
         eff <- case ty of
           TVar _ -> unifying (effectVar <$> freshVar)
           _ -> pure noEffects
         s2 <- unifying (unify ty (TComp eff result))
-        pure (apply s2 result)
+        finish env (s2 `compose` s1) result
 
--- Free unknowns in a supplied environment must not collide with fresh type,
--- record-row or effect-row unknowns. Bound scheme variables are renamed.
+-- Include bound names too: a fresh substitution range must not capture a
+-- quantified variable when that substitution reaches another scheme.
 nextUnknown :: Env -> Int
-nextUnknown env = 1 + maximum (-1 : [number | Var number <- Set.toList (ftvEnv env)])
+nextUnknown env = 1 + maximum (-1 : [number | Forall bound ty <- Map.elems env,
+  Var number <- Set.toList (Set.union (Set.fromList bound) (ftv ty))])
 
 -- | Infer with nothing in scope.
 inferType :: Expr -> Either InferError Ty
