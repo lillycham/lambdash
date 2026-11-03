@@ -30,7 +30,7 @@ import Control.Exception (IOException, SomeException, bracket, displayException,
 import Control.Monad (forM_, void)
 import System.Posix.Signals (Handler (..), installHandler, sigINT)
 import Data.List (sort, sortBy)
-import Lambdash.Classes (instanceName, superField)
+import Lambdash.Classes (extendFields, instanceName, recordFields, superField)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
@@ -508,9 +508,21 @@ dictionaries =
   [(instanceName "Eq" key, eqDictionary structuralEq) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [(instanceName "Ord" key, ordDictionary (eqDictionary structuralEq) structuralLt) | key <- ["Int", "Bool", "String", "()"]]
     <> [ (instanceName "Eq" "List", VBuiltin "Eq List" listEq)
-       , (instanceName "Ord" "List", VBuiltin "Ord List" listOrd) ]
+       , (instanceName "Ord" "List", VBuiltin "Ord List" listOrd)
+       , (instanceName "Eq" "Record", VBuiltin "Eq Record" recordEq)
+       , (extendFields, fn2 extendFields extend) ]
  where
   listEq d = eqDictionary (listEquals d)
+  -- A record's dictionary keeps its field dictionaries, so that a function
+  -- over an open row can extend them with the fields it knows.
+  recordEq fields@(VRecord dictionaries') = case eqDictionary (recordEquals dictionaries') of
+    VRecord methods' -> VRecord ((recordFields, fields) : methods')
+    other -> other
+  recordEq _ = error "Eq Record: the elaborator passed a non-record"
+  recordEquals dictionaries' a b =
+    and [truth (call2 (select "eq" d) (select label a) (select label b)) | (label, d) <- dictionaries']
+  extend (VRecord new) (VRecord old) = VRecord (new <> old)
+  extend _ _ = error "extendFields: the elaborator passed a non-record"
   listOrd d = ordDictionary (listEq (select (superField "Eq") d)) (listLess d)
   listEquals d (VList xs) (VList ys) =
     length xs == length ys && and (zipWith (\x y -> truth (call2 (select "eq" d) x y)) xs ys)

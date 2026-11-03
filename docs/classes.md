@@ -37,12 +37,38 @@ come with the operator table, as sugar for these.
 
 | Class | Instances |
 | --- | --- |
-| `Eq` | `Int`, `Bool`, `String`, `()`, `Status`, `Bytes`, `Patch`, `Overlay`, and `[a]` when `Eq a` |
+| `Eq` | `Int`, `Bool`, `String`, `()`, `Status`, `Bytes`, `Patch`, `Overlay`, `[a]` when `Eq a`, and records when every field is `Eq` |
 | `Ord` | `Int`, `Bool`, `String`, `()`, and `[a]` when `Ord a`, lexicographic |
 
 `Ord a` provides `Eq a`, so a function that uses both shows only `Ord a`.
 Functions, computations, streams, stages, collectors and jobs have no `Eq`.
-Records get `Eq` and `Ord` in the next slice, through a row constraint.
+Records have no `Ord`, because a row's fields have no order.
+
+## Records
+
+Two records are equal when they have the same fields and every field is
+equal, whatever order the fields were written in.
+
+A function over an open record needs `Eq` for the fields it does not know.
+That is `Eq { | r}`: `Eq` on a record whose fields are exactly the row `r`.
+
+```text
+λ> f = r -> {x = r.name, y = eq r r}
+f : (Eq a, Eq { | b}) => {name : a | b} -> {x : a, y : Bool}
+λ> f {name = "n", size = 3}
+{x = "n", y = true}
+```
+
+A record's dictionary holds its fields' dictionaries. The function takes the
+dictionary for the tail, which its caller knows, and extends its fields with
+the ones it knows itself:
+
+```text
+λ> :elab f = r -> {x = r.name, y = eq r r}
+f = %d14 %d15 -> let %d11 = (%instance Eq Record) (%extendFields {name = %d14} %d15.%fields) in …
+```
+
+An ambiguous row defaults to the empty row.
 
 ## Types and defaulting
 

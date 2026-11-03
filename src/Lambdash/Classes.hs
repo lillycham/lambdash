@@ -14,6 +14,8 @@ module Lambdash.Classes
   , instanceName
   , tyKey
   , superField
+  , recordFields
+  , extendFields
   ) where
 
 import Data.List (find, nub)
@@ -44,6 +46,8 @@ instances :: [Instance]
 instances =
   [Instance "Eq" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [Instance "Eq" "List" [["Eq"]]]
+    -- Structural: a record is Eq when every field is. See 'recordFields'.
+    <> [Instance "Eq" "Record" []]
     <> [Instance "Ord" ty [] | ty <- ["Int", "Bool", "String", "()"]]
     <> [Instance "Ord" "List" [["Ord"]]]
 
@@ -67,3 +71,14 @@ instanceName cls key = "%instance " <> cls <> " " <> key
 -- | The field of a dictionary that holds the dictionary of a superclass.
 superField :: String -> String
 superField cls = '%' : cls
+
+-- | The field of a record's dictionary that holds the dictionaries of its
+-- fields, by label. A function that is Eq over an open row, @Eq { | r}@,
+-- takes the dictionary for the tail and extends its fields with the ones it
+-- knows.
+recordFields :: String
+recordFields = "%fields"
+
+-- | The builtin that extends a record of field dictionaries with more.
+extendFields :: String
+extendFields = "%extendFields"

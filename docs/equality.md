@@ -1,7 +1,7 @@
 # Classes, equality and operators: design
 
 This records the design decided with Lilly on 2026-11-04, so that it can be
-built in slices. Slices 1 and 2a are built: see [classes](classes.md).
+built in slices. Slices 1, 2a and 2b are built: see [classes](classes.md).
 
 ## Decisions
 
@@ -90,8 +90,9 @@ Proposed, not yet confirmed:
 2. Class and instance core, dictionary-passing elaboration, the prelude's
    `Eq` and `Ord` for built-in types, with functions such as `eq` before any
    operator syntax. Split: **2a, done**: base types and lists, superclasses,
-   defaulting ambiguous unknowns to `()`, one context in `:t`. **2b**: records,
-   through `EqRow r` and row evidence.
+   defaulting ambiguous unknowns to `()`, one context in `:t`. **2b, done**:
+   records, with `EqRow r` written `Eq { | r}`, and row evidence: a record's
+   dictionary carries its fields' dictionaries.
 3. The operator table, minus by spacing, sections and accessor sections,
    user operators and fixity lines.
 4. `Num` and literal defaulting, `Show`, `Semigroup`, and class and

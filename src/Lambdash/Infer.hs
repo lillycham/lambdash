@@ -486,6 +486,24 @@ simplify ((evidence, IsIn cls ty) : rest) = do
   (bindings, residual) <- simplify rest
   case ty of
     TVar _ -> pure (bindings, (evidence, IsIn cls ty) : residual)
+    -- A record is an instance when every field is, and an open tail is a
+    -- predicate on the tail: Eq {a : Int | r} needs Eq Int and Eq { | r}.
+    TRecord row -> case lookupInstance cls "Record" of
+      Nothing -> lift (Left (NoInstance (IsIn cls ty)))
+      Just _ -> case flatten row of
+        ([], RVar _) -> pure (bindings, (evidence, IsIn cls ty) : residual)
+        (fields, tailRow) -> do
+          fieldEvidence <- mapM (\(label, fieldTy) -> (\n -> (label, n, IsIn cls fieldTy)) <$> freshEvidence) fields
+          tailEvidence <- case tailRow of
+            RVar v -> (\n -> [(n, IsIn cls (TRecord (RVar v)))]) <$> freshEvidence
+            _ -> pure []
+          (inner, innerResidual) <- simplify ([(n, p) | (_, n, p) <- fieldEvidence] <> tailEvidence)
+          let known = ERecord [(label, EVar n) | (label, n, _) <- fieldEvidence]
+              base = case tailEvidence of
+                [(n, _)] -> ESelect (EVar n) recordFields
+                _ -> ERecord []
+              dictionary = EApp (EVar (instanceName cls "Record")) (EApp (EApp (EVar extendFields) known) base)
+          pure (inner <> [(evidence, dictionary)] <> bindings, innerResidual <> residual)
     _ -> case tyKey ty of
       Nothing -> lift (Left (NoInstance (IsIn cls ty)))
       Just (key, args) -> case lookupInstance cls key of
@@ -516,6 +534,11 @@ reduceContext preds = go [] [] preds
     | otherwise = case [s | ClassInfo name supers <- classes, name == from, s <- supers, s == to || to `elem` superclassesOf s] of
         next : _ -> superPath next to (ESelect dictionary (superField next))
         [] -> dictionary
+
+-- | A row's fields, in order, and its tail.
+flatten :: Row -> ([(Label, Ty)], Row)
+flatten (RExtend label ty rest) = let (fields, tailRow) = flatten rest in ((label, ty) : fields, tailRow)
+flatten tailRow = ([], tailRow)
 
 wrapLets :: [(Name, Expr)] -> Expr -> Expr
 wrapLets bindings e = foldr (\(n, d) body -> ELet n d body) e bindings
@@ -548,10 +571,14 @@ resolveClasses mode solved ty code = do
       shown = if null context then ty else TClass (map snd context) ty
   pure (shown, foldr ELam lets (map fst context))
 
--- | Default each unknown to @()@, and resolve again.
+-- | Default each unknown to @()@, and each unknown row to the empty row,
+-- and resolve again.
 defaultPreds :: [(Name, Pred)] -> Infer [(Name, Expr)]
 defaultPreds preds = do
-  let toUnit (IsIn cls ty) = IsIn cls (apply (Subst (Map.fromList [(v, TUnit) | v <- Set.toList (ftv ty)]) Map.empty Map.empty [] []) ty)
+  let toUnit (IsIn cls ty) =
+        let vs = Set.toList (ftv ty)
+            fill = Subst (Map.fromList [(v, TUnit) | v <- vs]) (Map.fromList [(v, REmpty) | v <- vs]) Map.empty [] []
+        in IsIn cls (apply fill ty)
       defaulted = [(n, toUnit p) | (n, p) <- preds]
   (bindings, residual) <- simplify defaulted
   case residual of
