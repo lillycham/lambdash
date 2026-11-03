@@ -725,14 +725,14 @@ stepLine session input =
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
     Right (SetFixity fixity names) ->
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
-    Right (Declare declaration) -> case declare classes types values declaration of
+    Right (Declare written) -> case declare classes types values written of
       Left err -> pure (Continue session (renderError err))
       Right done -> pure (Continue session
         { sessionClasses = declaredClasses done
         , sessionTypes = foldr (uncurry Map.insert) types (declaredTypes done)
         , sessionValues = foldr (uncurry Map.Lazy.insert) values (declaredValues done)
         } (declaredMessage done))
-    Right (ShowElabDeclaration declaration) -> case declare classes types values declaration of
+    Right (ShowElabDeclaration written) -> case declare classes types values written of
       Left err -> pure (Continue session (renderError err))
       Right done -> pure (Continue session (maybe (declaredMessage done) (\(name, code) -> "(" <> name <> ") = " <> renderCore code) (declaredCode done)))
     Right (ShowCore expression) -> pure (Continue session (renderCore expression))
