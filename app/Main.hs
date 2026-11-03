@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Lambdash.Nix (withRootDirectory)
-import Lambdash.Process (setupTerminal)
+import Lambdash.Process (saveShellTerminal, setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, sessionPrompt, step)
 import System.Console.Haskeline
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
@@ -25,12 +25,13 @@ main = do
   -- Computations print straight to stdout, beside the output of haskeline.
   hSetBuffering stdout LineBuffering
   setupTerminal
+  restoreTerminal <- saveShellTerminal
   withRootDirectory $ \roots -> do
     -- Starting in a directory is arriving in it.
     cwd <- getCurrentDirectory
     (start, messages) <- arrive cwd initial {sessionRoots = roots}
     mapM_ putStrLn messages
-    runInputT defaultSettings (loop start)
+    runInputT defaultSettings (loop restoreTerminal start)
 
 -- | Read continuation lines while a @do@ block is open. End of input stops
 -- reading, and the parser reports the unclosed block.
@@ -42,8 +43,8 @@ more input
   | otherwise = pure input
 
 -- | All of the meaning is in 'step'. This only moves text.
-loop :: Session -> InputT IO ()
-loop before = do
+loop :: IO () -> Session -> InputT IO ()
+loop restoreTerminal before = do
   -- Background jobs report at the next prompt, as in other shells.
   (session, messages) <- liftIO (notices before)
   mapM_ outputStrLn messages
@@ -53,8 +54,11 @@ loop before = do
     Nothing -> pure ()
     Just input -> do
       result <- liftIO (step session input)
+      -- Whatever the line did to the terminal, the shell owns it again, in
+      -- its own modes, before printing anything.
+      liftIO restoreTerminal
       case result of
         Quit -> pure ()
         Continue next output -> do
           unless (null output) (outputStrLn output)
-          loop next
+          loop restoreTerminal next

@@ -30,7 +30,7 @@ import Data.Set qualified as Set
 import Data.List (intercalate)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
-import Control.Exception (IOException, SomeException, catch, fromException, throwIO)
+import Control.Exception (SomeException, catch, fromException, throwIO)
 import Control.Exception qualified as Exception
 import Data.Char (isDigit)
 import Lambdash.Stream (StreamError (..))
@@ -38,18 +38,17 @@ import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Control.Monad (forM_, void, when)
+import Control.Monad (forM_, when)
 import System.Posix.IO (stdInput)
 import System.Posix.Process (getProcessGroupID)
-import System.Posix.Signals (sigCONT, signalProcessGroup)
-import System.Posix.Terminal (queryTerminal, setTerminalProcessGroupID)
+import System.Posix.Terminal (queryTerminal)
 import System.Posix.Types (ProcessGroupID)
 import Lambdash.Nix (resolveDev)
 import Lambdash.Overlay
 import Lambdash.Trust (autoName, flakeHash, isAllowed)
 import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
-import Lambdash.Process (Status (..), programExists)
+import Lambdash.Process (Status (..), continueGroup, giveTerminal, programExists)
 import Lambdash.Unify
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, satisfy, try)
 import System.Directory (getCurrentDirectory)
@@ -419,9 +418,7 @@ awaitJob session job = do
 reclaimTerminal :: IO ()
 reclaimTerminal = do
   tty <- queryTerminal stdInput
-  when tty $ do
-    group <- getProcessGroupID
-    void (Exception.try (setTerminalProcessGroupID stdInput group) :: IO (Either IOException ()))
+  when tty (getProcessGroupID >>= giveTerminal "REPL reclaims the terminal")
 
 describeJob :: Job -> String
 describeJob job = "[" <> show (jobNumber job) <> "] " <> (if jobRunning job then "running" else "stopped") <> "  " <> jobLine job
@@ -600,8 +597,8 @@ stepLine session input =
               group <- readIORef (jobGroup job)
               tty <- queryTerminal stdInput
               forM_ group $ \pgid -> do
-                when tty (void (Exception.try (setTerminalProcessGroupID stdInput pgid) :: IO (Either IOException ())))
-                void (Exception.try (signalProcessGroup sigCONT pgid) :: IO (Either IOException ()))
+                when tty (giveTerminal "fg hands a running job the terminal" pgid)
+                continueGroup "fg continues a running job" pgid
             else putMVar (jobResume job) True
           awaitJob rest {sessionWarned = False} job {jobRunning = False}
     Right (Background wanted) ->

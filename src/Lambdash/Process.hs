@@ -3,11 +3,18 @@
 module Lambdash.Process
   ( Status (..)
   , setupTerminal
+  , saveShellTerminal
+  , traceTerminal
+  , giveTerminal
+  , readModes
+  , writeModes
+  , continueGroup
   , programExists
   , resolveProgram
   , spawnStage
   ) where
 
+import Control.Concurrent (isCurrentThreadBound, myThreadId)
 import Control.Exception (IOException, try)
 import Control.Monad (unless, void, when)
 import Data.Map.Strict qualified as Map
@@ -21,6 +28,8 @@ import System.Posix.Process
 import System.Posix.Signals
 import System.Posix.Terminal
 import System.Posix.Types
+import System.Environment (lookupEnv)
+import System.IO (hPutStrLn, stderr)
 
 foreign import ccall safe "lsh_spawn_env"
   c_spawn :: CString -> Ptr CString -> Ptr CString -> Fd -> Fd -> ProcessGroupID -> Ptr ProcessID -> IO CInt
@@ -44,6 +53,52 @@ setupTerminal = do
     quietly (setProcessGroupIDOf 0 0)
     group <- getProcessGroupID
     quietly (setTerminalProcessGroupID stdInput group)
+
+-- | Remember the shell's own terminal modes, from before the line editor, and
+-- give back an action that makes the shell own the terminal with them again.
+-- The REPL runs it after every foreground wait, as bash does, so a job that
+-- left the terminal in a strange state, or a handover that failed, cannot
+-- outlive its line.
+saveShellTerminal :: IO (IO ())
+saveShellTerminal = do
+  tty <- queryTerminal stdInput
+  if not tty then pure (pure ()) else do
+    modes <- readModes "save shell modes"
+    group <- getProcessGroupID
+    pure $ do
+      giveTerminal "shell takes the terminal" group
+      mapM_ (writeModes "shell restores its modes") modes
+
+-- | With @LAMBDASH_TRACE_TTY@ set, each terminal and job-control call, its
+-- result and the thread that made it go to stderr.
+traceTerminal :: String -> Either IOException () -> IO ()
+traceTerminal label result = do
+  enabled <- lookupEnv "LAMBDASH_TRACE_TTY"
+  when (maybe False (not . null) enabled) $ do
+    thread <- myThreadId
+    bound <- isCurrentThreadBound
+    hPutStrLn stderr ("[tty] " <> show thread <> (if bound then " bound" else "") <> " " <> label
+      <> ": " <> either show (const "ok") result)
+
+traced :: String -> IO () -> IO ()
+traced label action = (try action :: IO (Either IOException ())) >>= traceTerminal label
+
+-- | tcsetpgrp. It never throws: a failure is traced, and the REPL takes the
+-- terminal back after every wait anyway.
+giveTerminal :: String -> ProcessGroupID -> IO ()
+giveTerminal label group = traced (label <> " (tcsetpgrp " <> show group <> ")") (setTerminalProcessGroupID stdInput group)
+
+readModes :: String -> IO (Maybe TerminalAttributes)
+readModes label = do
+  result <- try (getTerminalAttributes stdInput) :: IO (Either IOException TerminalAttributes)
+  traceTerminal (label <> " (tcgetattr)") (() <$ result)
+  pure (either (const Nothing) Just result)
+
+writeModes :: String -> TerminalAttributes -> IO ()
+writeModes label modes = traced (label <> " (tcsetattr)") (setTerminalAttributes stdInput modes Immediately)
+
+continueGroup :: String -> ProcessGroupID -> IO ()
+continueGroup label group = traced (label <> " (SIGCONT " <> show group <> ")") (signalProcessGroup sigCONT group)
 
 -- macOS refuses kill and tcsetpgrp for a group that holds only zombies, and a
 -- short command such as `true` can be one before the shell gets here.
