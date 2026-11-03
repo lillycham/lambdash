@@ -212,6 +212,7 @@ renderEffectsType ty = evalState (renderTy ty) Map.empty
 hideEffects :: Ty -> Ty
 hideEffects (TFun a b) = TFun (hideEffects a) (hideEffects b)
 hideEffects (TQualified _ ty) = hideEffects ty
+hideEffects (TClass ps ty) = TClass ps (hideEffects ty)
 hideEffects (TList ty) = TList (hideEffects ty)
 hideEffects (TStage i o) = TStage (hideEffects i) (hideEffects o)
 hideEffects (TCollector i o) = TCollector (hideEffects i) (hideEffects o)
@@ -246,10 +247,10 @@ renderTy (TList ty) = do
   pure ("[" <> text <> "]")
 renderTy (TStage i o) = renderAdapter "Stage" i o
 renderTy (TCollector i o) = renderAdapter "Collector" i o
-renderTy (TQualified constraints ty) = do
-  conditions <- mapM renderConstraint constraints
-  text <- renderTy ty
-  pure ("(" <> intercalate ", " conditions <> ") => " <> text)
+-- One context for both kinds of condition: class predicates first, then
+-- effect equalities. A lone predicate needs no parentheses: @Eq a => a -> a@.
+renderTy (TQualified constraints ty) = renderContext [] constraints ty
+renderTy (TClass preds ty) = renderContext preds [] ty
 renderTy (TFun argument result) = do
   left <- renderTy argument
   right <- renderTy result
@@ -292,6 +293,29 @@ renderTy (TStream eff input output result) = do
 renderTy (TRecord row) = do
   fields <- renderRow row
   pure ("{" <> fields <> "}")
+
+renderContext :: [Pred] -> [EffConstraint] -> Ty -> State TypeNames String
+renderContext preds constraints ty = case ty of
+  TClass more inner -> renderContext (preds <> more) constraints inner
+  TQualified more inner -> renderContext preds (constraints <> more) inner
+  _ -> do
+    classes' <- mapM renderPred preds
+    effects <- mapM renderConstraint constraints
+    text <- renderTy ty
+    pure $ case classes' <> effects of
+      [] -> text
+      [single] | null constraints -> single <> " => " <> text
+      conditions -> "(" <> intercalate ", " conditions <> ") => " <> text
+
+renderPred :: Pred -> State TypeNames String
+renderPred (IsIn cls ty) = do
+  text <- renderTy ty
+  pure $ cls <> " " <> case ty of
+    TVar _ -> text
+    TCon _ -> text
+    TList _ -> text
+    TRecord _ -> text
+    _ -> "(" <> text <> ")"
 
 renderAdapter :: String -> Ty -> Ty -> State TypeNames String
 renderAdapter name input output = do
@@ -347,6 +371,8 @@ renderRow (RExtend label ty rest) = do
 -- > no field: nmae
 renderError :: InferError -> String
 renderError (Unbound name) = "unbound name: " <> name
+renderError (NoInstance p) = "no instance: " <> evalState (renderPred p) Map.empty
+renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.empty
 renderError (Unify err) = case err of
   Mismatch left right -> renderPair "type mismatch: " left right
   Infinite var ty -> renderPair "infinite type: " (TVar var) ty
@@ -668,26 +694,28 @@ stepLine session input =
       base <- lookupEnv name
       cwd <- getCurrentDirectory
       pure (Continue session (describeVariable base name (inScope cwd (sessionShell session))))
-    Right (Run expression) -> checked (inferIn types expression) $ \ty ->
+    -- What runs is the elaborated line: each class method gets its
+    -- dictionary. A line that runs defaults its ambiguous unknowns to ().
+    Right (Run expression) -> checked (elaborateIn Defaulting types expression) $ \(ty, code) ->
       case snd (unqualify ty) of
         TComp _ _ -> preflight ty $ \runtime ->
-          foreground session input runtime (eval values expression) $ \done now result ->
+          foreground session input runtime (eval values code) $ \done now result ->
             committed done start now (showResult result)
         TStream _ _ _ _ -> checked (inferRunIn types expression) $ \_ ->
           preflight ty $ \runtime ->
-            foreground session input runtime (eval values expression) $ \done now result ->
+            foreground session input runtime (eval values code) $ \done now result ->
               committed done start now (showResult result)
-        _ -> pure (Continue session (render (eval values expression)))
-    Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
-      pure (bound session name ty (eval values expression))
-    Right (BindRun name expression) -> checked (inferIn types expression) $ \actionTy ->
-      checked (inferRunIn types expression) $ \ty ->
-        preflight actionTy $ \runtime ->
-          -- A job stopped here binds when fg finishes it, in the session then.
-          foreground session input runtime (eval values expression) $ \done now value ->
-            case bound now name ty value of
-              Continue next text -> committed done start next text
-              other -> pure other
+        _ -> pure (Continue session (render (eval values code)))
+    -- A binding abstracts over the dictionaries its type needs.
+    Right (Bind name expression) -> checked (elaborateIn Generalising types expression) $ \(ty, code) ->
+      pure (bound session name ty (eval values code))
+    Right (BindRun name expression) -> checked (elaborateRunIn types expression) $ \(actionTy, ty, code) ->
+      preflight actionTy $ \runtime ->
+        -- A job stopped here binds when fg finishes it, in the session then.
+        foreground session input runtime (eval values code) $ \done now value ->
+          case bound now name ty value of
+            Continue next text -> committed done start next text
+            other -> pure other
   where
     types = sessionTypes session
     values = sessionValues session

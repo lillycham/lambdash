@@ -40,4 +40,5 @@ fresh state directory. `--no-nix` skips the suite that builds a flake.
 | [directories](docs/directories.md) | path arguments, `cd`, `ls`, `useLocal`, `allow` |
 | [jobs](docs/jobs.md) | Ctrl-Z, `&` and job handles, `wait`, `jobs`, `fg`, `bg` |
 | [nix notes](docs/nix-notes.md) | Nix behaviour, checked against Nix 2.34 |
+| [classes](docs/classes.md) | `Eq`, `Ord`, `sort`, and how dictionary passing works |
 | [equality](docs/equality.md) | design: classes, `Eq`, `Ord`, operators |

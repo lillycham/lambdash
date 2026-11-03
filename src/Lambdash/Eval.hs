@@ -29,7 +29,8 @@ import Control.Concurrent.STM
 import Control.Exception (IOException, SomeException, bracket, displayException, fromException, throwIO, try)
 import Control.Monad (forM_, void)
 import System.Posix.Signals (Handler (..), installHandler, sigINT)
-import Data.List (sort)
+import Data.List (sort, sortBy)
+import Lambdash.Classes (instanceName, superField)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
@@ -463,11 +464,119 @@ builtins =
 
 -- | The builtins as the checker sees them.
 typeEnv :: Env
-typeEnv = Map.fromList [(n, t) | (n, t, _) <- builtins <> aliases]
+typeEnv = Map.fromList [(n, t) | (n, t, _) <- builtins <> aliases <> methods]
 
 -- | The builtins as the evaluator sees them.
 scope :: Scope
-scope = Map.fromList [(n, x) | (n, _, x) <- builtins <> aliases]
+scope = Map.fromList ([(n, x) | (n, _, x) <- builtins <> aliases <> methods] <> dictionaries)
+
+-- | The class methods. Each takes its class's dictionary first: the checker
+-- elaborates @eq x y@ to @eq d x y@, with @d@ chosen by type.
+methods :: [(Name, Scheme, Value)]
+methods =
+  [ method "eq" "Eq" (\a -> TFun a (TFun a TBool))
+  , method "ne" "Eq" (\a -> TFun a (TFun a TBool))
+  , method "lt" "Ord" (\a -> TFun a (TFun a TBool))
+  , method "le" "Ord" (\a -> TFun a (TFun a TBool))
+  , method "gt" "Ord" (\a -> TFun a (TFun a TBool))
+  , method "ge" "Ord" (\a -> TFun a (TFun a TBool))
+  , method "min" "Ord" (\a -> TFun a (TFun a a))
+  , method "max" "Ord" (\a -> TFun a (TFun a a))
+  , ( "sort"
+    , Forall [Var 0] (TClass [IsIn "Ord" (TVar (Var 0))] (TFun (TList (TVar (Var 0))) (TList (TVar (Var 0)))))
+    , VBuiltin "sort" (\d -> VBuiltin "sort" (\xs -> VList (sortWith d id (items xs)))) )
+  , ( "sortOn"
+    , Forall [Var 0, Var 1] (TClass [IsIn "Ord" (TVar (Var 1))]
+        (TFun (TFun (TVar (Var 0)) (TVar (Var 1))) (TFun (TList (TVar (Var 0))) (TList (TVar (Var 0))))))
+    , VBuiltin "sortOn" (\d -> VBuiltin "sortOn" (\key -> VBuiltin "sortOn" (\xs -> VList (sortWith d (applyValue key) (items xs))))) )
+  ]
+ where
+  method name cls shape =
+    (name, Forall [Var 0] (TClass [IsIn cls (TVar (Var 0))] (shape (TVar (Var 0)))), VBuiltin name (select name))
+  items (VList xs) = xs
+  items _ = error "sort: the checker passed a non-list"
+  -- A stable sort by the dictionary's lt.
+  sortWith d key = sortBy (\a b -> compareBy d (key a) (key b))
+  compareBy d a b
+    | truth (call2 (select "lt" d) a b) = LT
+    | truth (call2 (select "lt" d) b a) = GT
+    | otherwise = EQ
+
+-- | The prelude's instances, under the names the checker refers to.
+dictionaries :: [(Name, Value)]
+dictionaries =
+  [(instanceName "Eq" key, eqDictionary structuralEq) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
+    <> [(instanceName "Ord" key, ordDictionary (eqDictionary structuralEq) structuralLt) | key <- ["Int", "Bool", "String", "()"]]
+    <> [ (instanceName "Eq" "List", VBuiltin "Eq List" listEq)
+       , (instanceName "Ord" "List", VBuiltin "Ord List" listOrd) ]
+ where
+  listEq d = eqDictionary (listEquals d)
+  listOrd d = ordDictionary (listEq (select (superField "Eq") d)) (listLess d)
+  listEquals d (VList xs) (VList ys) =
+    length xs == length ys && and (zipWith (\x y -> truth (call2 (select "eq" d) x y)) xs ys)
+  listEquals _ _ _ = error "Eq List: the checker passed a non-list"
+  -- Lexicographic, as in Haskell.
+  listLess d (VList xs) (VList ys) = go xs ys
+   where
+    go [] [] = False
+    go [] _ = True
+    go _ [] = False
+    go (x : xt) (y : yt)
+      | truth (call2 (select "lt" d) x y) = True
+      | truth (call2 (select "lt" d) y x) = False
+      | otherwise = go xt yt
+  listLess _ _ _ = error "Ord List: the checker passed a non-list"
+
+-- | A dictionary for Eq from an equality.
+eqDictionary :: (Value -> Value -> Bool) -> Value
+eqDictionary equals = VRecord
+  [ ("eq", fn2 "eq" (\a b -> VBool (equals a b)))
+  , ("ne", fn2 "ne" (\a b -> VBool (not (equals a b))))
+  ]
+
+-- | A dictionary for Ord from its Eq dictionary and an order.
+ordDictionary :: Value -> (Value -> Value -> Bool) -> Value
+ordDictionary eqD less = VRecord
+  [ (superField "Eq", eqD)
+  , ("lt", fn2 "lt" (\a b -> VBool (less a b)))
+  , ("le", fn2 "le" (\a b -> VBool (not (less b a))))
+  , ("gt", fn2 "gt" (\a b -> VBool (less b a)))
+  , ("ge", fn2 "ge" (\a b -> VBool (not (less a b))))
+  , ("min", fn2 "min" (\a b -> if less b a then b else a))
+  , ("max", fn2 "max" (\a b -> if less a b then b else a))
+  ]
+
+fn2 :: Name -> (Value -> Value -> Value) -> Value
+fn2 name f = VBuiltin name (\a -> VBuiltin name (f a))
+
+call2 :: Value -> Value -> Value -> Value
+call2 f a b = applyValue (applyValue f a) b
+
+truth :: Value -> Bool
+truth (VBool b) = b
+truth _ = error "a method passed a non-Bool"
+
+-- | Equality on the values of the built-in Eq types.
+structuralEq :: Value -> Value -> Bool
+structuralEq a b = case (a, b) of
+  (VInt x, VInt y) -> x == y
+  (VBool x, VBool y) -> x == y
+  (VUnit, VUnit) -> True
+  (VStr x, VStr y) -> x == y
+  (VStatus x, VStatus y) -> x == y
+  (VBytes x, VBytes y) -> x == y
+  (VPatch x, VPatch y) -> x == y
+  (VOverlay x, VOverlay y) -> x == y
+  _ -> error "Eq: the checker passed values of different types"
+
+-- | The order on the values of the built-in Ord types.
+structuralLt :: Value -> Value -> Bool
+structuralLt a b = case (a, b) of
+  (VInt x, VInt y) -> x < y
+  (VBool x, VBool y) -> x < y
+  (VUnit, VUnit) -> False
+  (VStr x, VStr y) -> x < y
+  _ -> error "Ord: the checker passed values of different types"
 
 -- | The builtins that sugar refers to, under names that no identifier can
 -- spell, so that rebinding @use@ or @pkg@ does not change what @use REF@

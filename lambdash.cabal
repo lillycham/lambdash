@@ -11,7 +11,7 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Desugar, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Classes, Lambdash.Desugar, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.Unify
   c-sources:       cbits/spawn.c
   build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, process, stm, text, transformers, unix
 

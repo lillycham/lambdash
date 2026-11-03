@@ -30,6 +30,9 @@ module Lambdash.Infer
   , inferIn
   , inferRunIn
   , inferType
+  , Mode (..)
+  , elaborateIn
+  , elaborateRunIn
   ) where
 
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put)
@@ -38,6 +41,7 @@ import Control.Monad (foldM)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
+import Lambdash.Classes
 import Lambdash.Syntax (Arg (..), Lit (..), Name, Span (..))
 import Lambdash.Unify
 import qualified Data.Set as Set
@@ -90,6 +94,11 @@ data InferError
     Unify TypeError
   | -- | A name that nothing binds.
     Unbound Name
+  | -- | A class predicate that no instance satisfies.
+    NoInstance Pred
+  | -- | A class predicate on an unknown that nothing chooses, and that
+    -- @()@ does not satisfy either.
+    Ambiguous Pred
   deriving (Eq, Show)
 
 -- | The state is the next unused unknown. Failure is 'InferError'. Use @lift@
@@ -119,6 +128,7 @@ ftv (TComp eff t) = ftvEffects eff `Set.union` ftv t
 ftv (TJob eff t) = ftvEffects eff `Set.union` ftv t
 ftv (TStream eff i o r) = Set.unions (ftvEffects eff : map ftv [i, o, r])
 ftv (TQualified cs ty) = Set.unions (ftv ty : map constraintVars cs)
+ftv (TClass ps ty) = Set.unions (ftv ty : map predVars ps)
 ftv (TList ty) = ftv ty
 ftv (TStage i o) = ftv i `Set.union` ftv o
 ftv (TCollector i o) = ftv i `Set.union` ftv o
@@ -132,6 +142,7 @@ actionEffects :: Ty -> EffRow
 actionEffects (TComp eff _) = eff
 actionEffects (TStream eff _ _ _) = eff
 actionEffects (TQualified _ ty) = actionEffects ty
+actionEffects (TClass _ ty) = actionEffects ty
 actionEffects _ = noEffects
 
 -- | The unknowns that appear in a row.
@@ -161,6 +172,7 @@ applyScheme sub (Forall bound ty) =
     , getRowSubst = Map.withoutKeys (getRowSubst sub) boundVars
     , getEffectSubst = Map.withoutKeys (getEffectSubst sub) boundVars
     , effectConstraints = []
+    , classPreds = []
     }
 
 -- | Apply a substitution to every scheme in the environment.
@@ -202,58 +214,66 @@ instantiate (Forall bound ty) = do
         , getRowSubst = RVar <$> renaming
         , getEffectSubst = effectVar <$> renaming
         , effectConstraints = []
+        , classPreds = []
         }
   pure (apply sub ty)
 
--- | Find the type of an expression, and what that taught us.
+-- | Find the type of an expression, what that taught us, and the expression
+-- elaborated: each use of a name whose scheme has class predicates is applied
+-- to evidence variables, and each generalised @let@ abstracts over the
+-- dictionaries its scheme needs. The predicates still to resolve travel in the
+-- substitution, like deferred effect equalities.
 --
 -- Note: the 'Subst' from each step has to reach the steps after it, in the
 -- environment and in the types you already hold.
--- | Find the type of an expression, and what that taught us.
-infer :: Env -> Expr -> Infer (Subst, Ty)
+infer :: Env -> Expr -> Infer (Subst, Ty, Expr)
 infer env (EVar name) =
   case Map.lookup name env of
     Nothing -> lift (Left (Unbound name))
     Just sc -> do
       t <- instantiate sc
-      let (constraints, bare) = unqualify t
-      pure (emptySubst {effectConstraints = constraints}, bare)
+      let (constraints, qualified) = unqualify t
+          (preds, bare) = unclass qualified
+      evidence <- mapM (const freshEvidence) preds
+      pure ( emptySubst {effectConstraints = constraints, classPreds = zip evidence preds}
+           , bare
+           , foldl EApp (EVar name) (map EVar evidence) )
 
-infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
-infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
-infer _ (ELit LUnit)     = pure (emptySubst, TUnit)
-infer _ (ELit (LStr _))  = pure (emptySubst, TString)
-infer _ (ELit (LRef _))  = pure (emptySubst, TString)
+infer _ e@(ELit (LInt _))  = pure (emptySubst, TInt, e)
+infer _ e@(ELit (LBool _)) = pure (emptySubst, TBool, e)
+infer _ e@(ELit LUnit)     = pure (emptySubst, TUnit, e)
+infer _ e@(ELit (LStr _))  = pure (emptySubst, TString, e)
+infer _ e@(ELit (LRef _))  = pure (emptySubst, TString, e)
 
 -- For now, an argument must be a String. The checker has nothing to convert with.
-infer env (ECmd command args) = do
+infer env e@(ECmd command args) = do
   sub <- foldM check emptySubst args
-  pure (sub, TStream (effect (Exec command)) TBytes TBytes TStatus)
+  pure (sub, TStream (effect (Exec command)) TBytes TBytes TStatus, e)
  where
   check known (AWord _) = pure known
   check known (AVar name) = do
-    (s, t) <- infer (applyEnv known env) (EVar name)
+    (s, t, _) <- infer (applyEnv known env) (EVar name)
     checked <- unifying (unify (apply s t) TString)
     pure (checked `compose` s `compose` known)
 
 infer env (ELam name body) = do
   tv <- fresh
   let env' = Map.insert name (mono tv) env
-  (s, t) <- infer env' body
-  pure (s, apply s (TFun tv t))
+  (s, t, body') <- infer env' body
+  pure (s, apply s (TFun tv t), ELam name body')
 
 infer env (EApp e1 e2) = do
-  (s1, t1) <- infer env e1
-  (s2, t2) <- infer (applyEnv s1 env) e2
+  (s1, t1, e1') <- infer env e1
+  (s2, t2, e2') <- infer (applyEnv s1 env) e2
   tv <- fresh
   let t1' = apply s2 t1
   s3 <- unifying (unify t1' (TFun t2 tv))
   let s_final = s3 `compose` s2 `compose` s1
-  pure (s_final, apply s3 tv)
+  pure (s_final, apply s3 tv, EApp e1' e2')
 
 infer env (EPipe left right) = do
-  (s1, leftTy) <- infer env left
-  (s2, rightTy) <- infer (applyEnv s1 env) right
+  (s1, leftTy, left'') <- infer env left
+  (s2, rightTy, right'') <- infer (applyEnv s1 env) right
   -- An unknown producer is a stream. Deferring this choice to evaluation
   -- would let a polymorphic function change meaning after instantiation.
   shape <- case apply s2 leftTy of
@@ -318,89 +338,92 @@ infer env (EPipe left right) = do
       item <- fresh
       s <- unifying (unify right' (TFun left' item))
       pure (s, item)
-  pure (s3 `compose` known, apply s3 result)
+  pure (s3 `compose` known, apply s3 result, EPipe left'' right'')
  where
   collectedTy item result = TRecord (RExtend "items" (TList item) (RExtend "status" result (RExtend "statuses" (TList TStatus) REmpty)))
 
 infer env (EList items) = do
   itemTy <- fresh
-  sub <- foldM (check itemTy) emptySubst items
-  pure (sub, TList (apply sub itemTy))
+  (sub, items') <- foldM (check itemTy) (emptySubst, []) items
+  pure (sub, TList (apply sub itemTy), EList (reverse items'))
  where
-  check itemTy known item = do
-    (learned, ty) <- infer (applyEnv known env) item
+  check itemTy (known, done) item = do
+    (learned, ty, item') <- infer (applyEnv known env) item
     let combined = learned `compose` known
     equal <- unifying (unify (apply combined itemTy) ty)
-    pure (equal `compose` combined)
+    pure (equal `compose` combined, item' : done)
 
 infer env (ELet x e1 e2) = do
-  (raw, t1) <- infer env e1
+  (raw, t1, e1') <- infer env e1
   s1 <- checkedConstraints raw
   let env' = applyEnv s1 env
-      sc = generalise env' (qualify (effectConstraints s1) (apply s1 t1))
       -- Constraints involving an enclosing monomorphic variable must escape
       -- even when the local binding is unused. Independent quantified rows
       -- belong to the scheme and must not leak between its instances.
       escaped = connectedConstraints (ftvEnv env') (effectConstraints s1)
-  (s2, t2) <- infer (Map.insert x sc env') e2
-  pure (s2 `compose` s1 {effectConstraints = escaped}, apply s2 t2)
+  (sc, e1'', deferred) <- generaliseBinding env' s1 t1 e1'
+  (s2, t2, e2') <- infer (Map.insert x sc env') e2
+  pure (s2 `compose` s1 {effectConstraints = escaped, classPreds = deferred}, apply s2 t2, ELet x e1'' e2')
 
 infer env (ERecord fields) = do
-  (sub, row) <- inferFields env fields
-  pure (sub, TRecord row)
+  (sub, row, fields') <- inferFields env fields
+  pure (sub, TRecord row, ERecord fields')
  where
-  inferFields :: Env -> [(Label, Expr)] -> Infer (Subst, Row)
-  inferFields _ [] = pure (emptySubst, REmpty)
+  inferFields :: Env -> [(Label, Expr)] -> Infer (Subst, Row, [(Label, Expr)])
+  inferFields _ [] = pure (emptySubst, REmpty, [])
   inferFields fieldEnv ((label, expr) : rest) = do
-    (fieldSub, fieldTy) <- infer fieldEnv expr
-    (restSub, restRow) <- inferFields (applyEnv fieldSub fieldEnv) rest
-    pure (restSub `compose` fieldSub, RExtend label (apply restSub fieldTy) restRow)
+    (fieldSub, fieldTy, expr') <- infer fieldEnv expr
+    (restSub, restRow, rest') <- inferFields (applyEnv fieldSub fieldEnv) rest
+    pure (restSub `compose` fieldSub, RExtend label (apply restSub fieldTy) restRow, (label, expr') : rest')
 
 infer env (ESelect expr label) = do
-  (exprSub, recordTy) <- infer env expr
+  (exprSub, recordTy, expr') <- infer env expr
   fieldTy <- fresh
   tailRow <- unifying (RVar <$> freshVar)
   let requiredTy = TRecord (RExtend label fieldTy tailRow)
   fieldSub <- unifying (unify recordTy requiredTy)
-  pure (fieldSub `compose` exprSub, apply fieldSub fieldTy)
+  pure (fieldSub `compose` exprSub, apply fieldSub fieldTy, ESelect expr' label)
 
 -- A location changes nothing about the type.
-infer env (ELoc _ e) = infer env e
+infer env (ELoc location e) = do
+  (s, t, e') <- infer env e
+  pure (s, t, ELoc location e')
 
 -- Run the first, then the rest, with the union of their rows. Like a lambda
 -- parameter, a bound result has one type in what follows.
 infer env (EBind name e body) = do
-  (s1, eff, value) <- inferRun env e
+  (s1, eff, value, e') <- inferRun env e
   let env' = Map.insert name (mono value) (applyEnv s1 env)
-  (s2, bodyTy) <- infer env' body
+  (s2, bodyTy, body') <- infer env' body
   rest <- unifying (effectVar <$> freshVar)
   result <- fresh
   s3 <- unifying (unify bodyTy (TComp rest result))
   let sub = s3 `compose` s2 `compose` s1
-  pure (sub, TComp (unionEffects (applyEffects sub eff) (applyEffects sub rest)) (apply sub result))
+  pure (sub, TComp (unionEffects (applyEffects sub eff) (applyEffects sub rest)) (apply sub result), EBind name e' body')
 
 infer env (ERun e) = do
-  (s, eff, result) <- inferRun env e
-  pure (s, TComp eff result)
+  (s, eff, result, e') <- inferRun env e
+  pure (s, TComp eff result, ERun e')
 
 -- The checker drops the exec labels it can see in the body: the body runs
 -- with the overlay, so the session's PATH says nothing about them. Each
 -- pipeline still resolves its programs before it spawns anything. A label
 -- hidden in an unknown tail, such as a parameter's, stays.
 infer env (EWith overlay body) = do
-  (s1, overlayTy) <- infer env overlay
+  (s1, overlayTy, overlay') <- infer env overlay
   s2 <- unifying (unify overlayTy TOverlay)
   let known = s2 `compose` s1
-  (s3, bodyTy) <- infer (applyEnv known env) body
+  (s3, bodyTy, body') <- infer (applyEnv known env) body
   let sub = s3 `compose` known
+      code = EWith overlay' body'
   case apply sub bodyTy of
     TComp (EffRow labels tails) result ->
-      pure (sub, TComp (EffRow (Set.filter (not . isExec) labels) tails) result)
+      pure (sub, TComp (EffRow (Set.filter (not . isExec) labels) tails) result, code)
     other -> do
       eff <- unifying (effectVar <$> freshVar)
       result <- fresh
       s4 <- unifying (unify other (TComp eff result))
-      pure (s4 `compose` sub, apply s4 result)
+      pure (s4 `compose` sub, apply s4 result, code)
  where
   isExec (Exec _) = True
   isExec _ = False
@@ -409,25 +432,128 @@ infer env (EWith overlay body) = do
 -- preflight checks them before anything runs. The row also travels in the
 -- handle, for wait and fg.
 infer env (EBg e) = do
-  (s, eff, result) <- inferRun env e
-  pure (s, TComp eff (TJob eff result))
+  (s, eff, result, e') <- inferRun env e
+  pure (s, TComp eff (TJob eff result), EBg e')
 
 -- | What running an expression requires and gives. A computation gives its
 -- result. A stream reads the terminal, so its input is Bytes, and gives its
 -- return value, as at the prompt.
-inferRun :: Env -> Expr -> Infer (Subst, EffRow, Ty)
+inferRun :: Env -> Expr -> Infer (Subst, EffRow, Ty, Expr)
 inferRun env e = do
-  (s1, t) <- infer env e
+  (s1, t, e') <- infer env e
   case apply s1 t of
     TStream eff input _ result -> do
       s2 <- unifying (unify input TBytes)
-      pure (s2 `compose` s1, applyEffects s2 eff, apply s2 result)
-    TComp eff result -> pure (s1, eff, result)
+      pure (s2 `compose` s1, applyEffects s2 eff, apply s2 result, e')
+    TComp eff result -> pure (s1, eff, result, e')
     other -> do
       eff <- unifying (effectVar <$> freshVar)
       result <- fresh
       s2 <- unifying (unify other (TComp eff result))
-      pure (s2 `compose` s1, applyEffects s2 eff, apply s2 result)
+      pure (s2 `compose` s1, applyEffects s2 eff, apply s2 result, e')
+
+-- | A name for the dictionary of one predicate. No identifier can spell it.
+freshEvidence :: Infer Name
+freshEvidence = do
+  n <- get
+  put (n + 1)
+  pure ("%d" <> show n)
+
+-- | Generalise a @let@ binding over the unknowns the environment does not
+-- fix, and over the dictionaries its scheme needs. Predicates that mention
+-- an unknown of the environment stay pending, for an enclosing binding.
+generaliseBinding :: Env -> Subst -> Ty -> Expr -> Infer (Scheme, Expr, [(Name, Pred)])
+generaliseBinding env s1 t1 e1 = do
+  let Forall bound qualified = generalise env (qualify (effectConstraints s1) (apply s1 t1))
+      preds = [(n, applyPred s1 p) | (n, p) <- classPreds s1]
+  (bindings, residual) <- simplify preds
+  let generalised = Set.fromList bound
+      ownedBy (_, p) = let vs = predVars p in not (Set.null vs) && vs `Set.isSubsetOf` generalised
+      mine = filter ownedBy residual
+      deferred = filter (not . ownedBy) residual
+      (context, reduced) = reduceContext mine
+      scheme = Forall bound (if null context then qualified else TClass (map snd context) qualified)
+  pure (scheme, foldr ELam (wrapLets (bindings <> reduced) e1) (map fst context), deferred)
+
+-- | Resolve predicates on constructed types from instances, and keep the
+-- ones on unknowns. A resolved predicate's evidence is the instance's
+-- dictionary, applied to the evidence for what the instance requires.
+-- Bindings come in dependency order.
+simplify :: [(Name, Pred)] -> Infer ([(Name, Expr)], [(Name, Pred)])
+simplify [] = pure ([], [])
+simplify ((evidence, IsIn cls ty) : rest) = do
+  (bindings, residual) <- simplify rest
+  case ty of
+    TVar _ -> pure (bindings, (evidence, IsIn cls ty) : residual)
+    _ -> case tyKey ty of
+      Nothing -> lift (Left (NoInstance (IsIn cls ty)))
+      Just (key, args) -> case lookupInstance cls key of
+        Nothing -> lift (Left (NoInstance (IsIn cls ty)))
+        Just inst -> do
+          required <- sequence
+            [ (\n -> (n, IsIn c arg)) <$> freshEvidence
+            | (arg, needs) <- zip args (instRequires inst), c <- needs ]
+          (inner, innerResidual) <- simplify required
+          let dictionary = foldl EApp (EVar (instanceName cls key)) [EVar n | (n, _) <- required]
+          pure (inner <> [(evidence, dictionary)] <> bindings, innerResidual <> residual)
+
+-- | Drop a predicate that another one provides: a duplicate, or a
+-- superclass, whose dictionary is a field of its subclass's dictionary.
+reduceContext :: [(Name, Pred)] -> ([(Name, Pred)], [(Name, Expr)])
+reduceContext preds = go [] [] preds
+ where
+  go kept bindings [] = (reverse kept, bindings)
+  go kept bindings ((evidence, p@(IsIn cls ty)) : rest) =
+    case [n | (n, q) <- kept <> rest, q == p, n /= evidence, n `elem` map fst kept] of
+      same : _ -> go kept (bindings <> [(evidence, EVar same)]) rest
+      [] -> case [ (n, sub) | (n, IsIn sub ty') <- kept <> rest, ty' == ty, cls `elem` superclassesOf sub ] of
+        (n, sub) : _ -> go kept (bindings <> [(evidence, superPath sub cls (EVar n))]) rest
+        [] -> go ((evidence, p) : kept) bindings rest
+  -- The dictionary of a superclass, found through the fields of a subclass's.
+  superPath from to dictionary
+    | from == to = dictionary
+    | otherwise = case [s | ClassInfo name supers <- classes, name == from, s <- supers, s == to || to `elem` superclassesOf s] of
+        next : _ -> superPath next to (ESelect dictionary (superField next))
+        [] -> dictionary
+
+wrapLets :: [(Name, Expr)] -> Expr -> Expr
+wrapLets bindings e = foldr (\(n, d) body -> ELet n d body) e bindings
+
+-- | What to do with class predicates left at the top of a line.
+data Mode
+  = -- | For @:t@: show the ones the type mentions.
+    Showing
+  | -- | For @x = e@: abstract over the ones the type mentions.
+    Generalising
+  | -- | For a line that runs: default every unknown to @()@.
+    Defaulting
+  deriving (Eq, Show)
+
+-- | Resolve the class predicates of a whole line. An unknown that a
+-- predicate mentions and the type does not is ambiguous, and defaults to
+-- @()@, as GHCi's extended defaulting does: @eq [] []@ is @true@.
+resolveClasses :: Mode -> Subst -> Ty -> Expr -> Infer (Ty, Expr)
+resolveClasses mode solved ty code = do
+  let preds = [(n, applyPred solved p) | (n, p) <- classPreds solved]
+  (bindings, residual) <- simplify preds
+  let inType = ftv ty
+      keeps (_, p) = mode /= Defaulting && predVars p `Set.isSubsetOf` inType
+      (context, reduced) = reduceContext (filter keeps residual)
+      ambiguous = filter (not . keeps) residual
+  defaulted <- defaultPreds ambiguous
+  let lets = wrapLets (bindings <> defaulted <> reduced) code
+      shown = if null context then ty else TClass (map snd context) ty
+  pure (shown, foldr ELam lets (map fst context))
+
+-- | Default each unknown to @()@, and resolve again.
+defaultPreds :: [(Name, Pred)] -> Infer [(Name, Expr)]
+defaultPreds preds = do
+  let toUnit (IsIn cls ty) = IsIn cls (apply (Subst (Map.fromList [(v, TUnit) | v <- Set.toList (ftv ty)]) Map.empty Map.empty [] []) ty)
+      defaulted = [(n, toUnit p) | (n, p) <- preds]
+  (bindings, residual) <- simplify defaulted
+  case residual of
+    [] -> pure bindings
+    (_, p) : _ -> lift (Left (Ambiguous p))
 
 -- | The external commands that an expression names, also under lambdas.
 commands :: Expr -> [Name]
@@ -446,45 +572,60 @@ commands (EWith overlay body) = commands overlay <> commands body
 commands (EBg e) = commands e
 commands _ = []
 
--- | Infer in a starting environment, with the final solution applied.
+-- | Infer in a starting environment, with the final solution applied. Class
+-- predicates on unknowns that the type mentions appear as its context.
 inferIn :: Env -> Expr -> Either InferError Ty
-inferIn env expr = evalStateT (go env expr) (nextUnknown env)
+inferIn env expr = fst <$> elaborateIn Showing env expr
+
+-- | The type of a line, and the line elaborated with its dictionaries.
+elaborateIn :: Mode -> Env -> Expr -> Either InferError (Ty, Expr)
+elaborateIn mode env expr = evalStateT go (nextUnknown env)
  where
-  go e x = do
-    (s, t) <- infer e x
-    finish e s t
+  go = do
+    (s, t, code) <- infer env expr
+    (solved, ty) <- finish env s t
+    resolveClasses mode solved ty code
 
 checkedConstraints :: Subst -> Infer Subst
 checkedConstraints = lift . either (Left . Unify) Right . solveConstraints
 
-finish :: Env -> Subst -> Ty -> Infer Ty
+finish :: Env -> Subst -> Ty -> Infer (Subst, Ty)
 finish env raw ty = do
   let (nested, bare) = unqualify ty
   solved <- checkedConstraints raw {effectConstraints = effectConstraints raw <> nested}
   let result = apply solved bare
       fixed = ftvEnv (applyEnv solved env)
       relevant = connectedConstraints (ftv result `Set.union` fixed) (effectConstraints solved)
-  pure (qualify relevant result)
+  pure (solved, qualify relevant result)
 
 -- | The return type of a computation or stream. A stream's output items are
 -- separate from its return value. An unknown action defaults to @TComp a@.
 inferRunIn :: Env -> Expr -> Either InferError Ty
-inferRunIn env expr = evalStateT go (nextUnknown env)
+inferRunIn env expr = (\(_, result, _) -> result) <$> elaborateRunIn env expr
+
+-- | For @x <- e@: the type of the action, the type of what running it gives,
+-- and the action elaborated, with its class predicates defaulted.
+elaborateRunIn :: Env -> Expr -> Either InferError (Ty, Ty, Expr)
+elaborateRunIn env expr = evalStateT go (nextUnknown env)
  where
   go = do
-    (s1, t) <- infer env expr
-    case apply s1 t of
+    (s1, t, code) <- infer env expr
+    (s2, resultTy) <- case apply s1 t of
       TStream _ input _ result -> do
-        s2 <- unifying (unify input TBytes)
-        finish env (s2 `compose` s1) result
-      TComp _ result -> finish env s1 result
+        s <- unifying (unify input TBytes)
+        pure (s `compose` s1, result)
+      TComp _ result -> pure (s1, result)
       ty -> do
         result <- fresh
         eff <- case ty of
           TVar _ -> unifying (effectVar <$> freshVar)
           _ -> pure noEffects
-        s2 <- unifying (unify ty (TComp eff result))
-        finish env (s2 `compose` s1) result
+        s <- unifying (unify ty (TComp eff result))
+        pure (s `compose` s1, result)
+    (solved, actionTy) <- finish env s2 t
+    (_, result) <- finish env s2 resultTy
+    (_, code') <- resolveClasses Defaulting solved actionTy code
+    pure (actionTy, result, code')
 
 -- Include bound names too: a fresh substitution range must not capture a
 -- quantified variable when that substitution reaches another scheme.

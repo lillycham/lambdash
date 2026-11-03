@@ -1,8 +1,7 @@
 # Classes, equality and operators: design
 
-There is no `==` yet. This records the design decided with Lilly on
-2026-11-04, so that it can be built in slices. Nothing here is built, except
-the desugar pass it depends on.
+This records the design decided with Lilly on 2026-11-04, so that it can be
+built in slices. Slices 1 and 2a are built: see [classes](classes.md).
 
 ## Decisions
 
@@ -75,15 +74,13 @@ Proposed, not yet confirmed:
 
 ## Still to decide
 
-1. **Defaulting**: what an ambiguous `Num a` or `Eq a` becomes at the prompt,
-   as `[] == []` would be.
+1. **Defaulting for `Num`**: `Eq` and `Ord` default an ambiguous unknown to
+   `()`, as GHCi does. `Num` would default to `Int`.
 2. **Declaration syntax** for `class` and `instance`, at the prompt and in a
    startup file, and what redeclaring one in a session means.
 3. **Coherence**: overlapping instances, and instances that a later line
    adds after a binding already chose one.
-4. **Display**: how `:t` shows class constraints beside effect
-   qualifications, as in `(Eq a, {| r} = {exec ls}) => …`.
-5. **Instances for built-in types that users may want to replace**, such as
+4. **Instances for built-in types that users may want to replace**, such as
    `Show` for records.
 
 ## Slices
@@ -92,7 +89,9 @@ Proposed, not yet confirmed:
    `Lambdash.Desugar`.
 2. Class and instance core, dictionary-passing elaboration, the prelude's
    `Eq` and `Ord` for built-in types, with functions such as `eq` before any
-   operator syntax.
+   operator syntax. Split: **2a, done**: base types and lists, superclasses,
+   defaulting ambiguous unknowns to `()`, one context in `:t`. **2b**: records,
+   through `EqRow r` and row evidence.
 3. The operator table, minus by spacing, sections and accessor sections,
    user operators and fixity lines.
 4. `Num` and literal defaulting, `Show`, `Semigroup`, and class and

@@ -35,6 +35,10 @@ module Lambdash.Unify
     pattern TPatch,
     Label,
     Row (..),
+    Pred (..),
+    applyPred,
+    predVars,
+    unclass,
     Subst (..),
     Unifier,
     TypeError (..),
@@ -84,6 +88,10 @@ data Ty
     TJob EffRow Ty
   | -- | Equalities that must hold when the type is instantiated.
     TQualified [EffConstraint] Ty
+  | -- | Class predicates that must hold when the type is instantiated, as in
+    -- @Eq a => a -> a -> Bool@. Only schemes carry it: inference turns each
+    -- predicate into a dictionary parameter.
+    TClass [Pred] Ty
   | TList Ty
   | -- | Pure adapters and collectors. Neither runs until connected.
     TStage Ty Ty
@@ -102,6 +110,39 @@ data EffRow = EffRow (Set Effect) (Set Var) deriving (Eq, Ord, Show)
 
 data EffConstraint = EffEqual EffRow EffRow deriving (Eq, Ord, Show)
 
+-- | A class predicate: the type is an instance of the class.
+data Pred = IsIn String Ty deriving (Eq, Show)
+
+applyPred :: Subst -> Pred -> Pred
+applyPred s (IsIn name ty) = IsIn name (apply s ty)
+
+-- | The unknowns that a predicate mentions.
+predVars :: Pred -> Set Var
+predVars (IsIn _ ty) = tyVars ty
+ where
+  tyVars (TVar v) = Set.singleton v
+  tyVars (TFun a b) = Set.union (tyVars a) (tyVars b)
+  tyVars (TList t) = tyVars t
+  tyVars (TRecord row) = rowVars row
+  tyVars (TComp (EffRow _ vs) t) = Set.union vs (tyVars t)
+  tyVars (TJob (EffRow _ vs) t) = Set.union vs (tyVars t)
+  tyVars (TStream (EffRow _ vs) i o r) = Set.unions [vs, tyVars i, tyVars o, tyVars r]
+  tyVars (TStage i o) = Set.union (tyVars i) (tyVars o)
+  tyVars (TCollector i o) = Set.union (tyVars i) (tyVars o)
+  tyVars (TQualified _ t) = tyVars t
+  tyVars (TClass ps t) = Set.unions (tyVars t : map predVars ps)
+  tyVars (TCon _) = Set.empty
+  rowVars REmpty = Set.empty
+  rowVars (RVar v) = Set.singleton v
+  rowVars (RExtend _ t r) = Set.union (tyVars t) (rowVars r)
+
+-- | The class predicates of a scheme's type, and the type without them. They
+-- can sit under effect qualifications.
+unclass :: Ty -> ([Pred], Ty)
+unclass (TClass ps ty) = let (more, bare) = unclass ty in (ps <> more, bare)
+unclass (TQualified cs ty) = let (ps, bare) = unclass ty in (ps, TQualified cs bare)
+unclass ty = ([], ty)
+
 constraintVars :: EffConstraint -> Set Var
 constraintVars (EffEqual (EffRow _ a) (EffRow _ b)) = Set.union a b
 
@@ -118,6 +159,7 @@ unqualify :: Ty -> ([EffConstraint], Ty)
 unqualify (TQualified constraints ty) = let (more, bare) = unqualify ty in (constraints <> more, bare)
 unqualify (TFun a b) = let (ca, a') = unqualify a; (cb, b') = unqualify b in (ca <> cb, TFun a' b')
 unqualify (TComp eff ty) = let (cs, bare) = unqualify ty in (cs, TComp eff bare)
+unqualify (TClass ps ty) = let (cs, bare) = unqualify ty in (cs, TClass ps bare)
 unqualify (TJob eff ty) = let (cs, bare) = unqualify ty in (cs, TJob eff bare)
 unqualify (TList ty) = let (cs, bare) = unqualify ty in (cs, TList bare)
 unqualify (TStage i o) = let (ci, i') = unqualify i; (co, o') = unqualify o in (ci <> co, TStage i' o')
@@ -174,6 +216,10 @@ data Subst = Subst
   , getRowSubst :: Map Var Row
   , getEffectSubst :: Map Var EffRow
   , effectConstraints :: [EffConstraint]
+  , -- | Class predicates still to be resolved, each with the name of the
+    -- evidence variable that will hold its dictionary. They are applied to
+    -- the final substitution when they are solved.
+    classPreds :: [(String, Pred)]
   }
   deriving (Eq, Show)
 
@@ -192,7 +238,7 @@ data TypeError
 
 -- | The substitution that solves nothing.
 emptySubst :: Subst
-emptySubst = Subst Map.empty Map.empty Map.empty []
+emptySubst = Subst Map.empty Map.empty Map.empty [] []
 
 -- | One solved unknown.
 singleton :: Var -> Ty -> Subst
@@ -227,6 +273,7 @@ apply s (TComp eff t) = TComp (applyEffects s eff) (apply s t)
 apply s (TJob eff t) = TJob (applyEffects s eff) (apply s t)
 apply s (TStream eff i o r) = TStream (applyEffects s eff) (apply s i) (apply s o) (apply s r)
 apply s (TQualified cs ty) = qualify (map (applyConstraint s) cs) (apply s ty)
+apply s (TClass ps ty) = TClass (map (applyPred s) ps) (apply s ty)
 apply s (TList t) = TList (apply s t)
 apply s (TStage i o) = TStage (apply s i) (apply s o)
 apply s (TCollector i o) = TCollector (apply s i) (apply s o)
@@ -254,6 +301,7 @@ compose s1 s2 = Subst
   , getRowSubst = Map.map (applyRow s1) (getRowSubst s2) `Map.union` getRowSubst s1
   , getEffectSubst = Map.map (applyEffects s1) (getEffectSubst s2) `Map.union` getEffectSubst s1
   , effectConstraints = nub (map (applyConstraint s1) (effectConstraints s2) <> effectConstraints s1)
+  , classPreds = classPreds s2 <> classPreds s1
   }
 
 -- | Does this unknown appear anywhere in this type?
@@ -265,6 +313,7 @@ occurs v (TComp (EffRow _ vars) t) = Set.member v vars || occurs v t
 occurs v (TJob (EffRow _ vars) t) = Set.member v vars || occurs v t
 occurs v (TStream (EffRow _ vars) i o r) = Set.member v vars || any (occurs v) [i, o, r]
 occurs v (TQualified cs ty) = any (Set.member v . constraintVars) cs || occurs v ty
+occurs v (TClass ps ty) = any (Set.member v . predVars) ps || occurs v ty
 occurs v (TList t) = occurs v t
 occurs v (TStage i o) = occurs v i || occurs v o
 occurs v (TCollector i o) = occurs v i || occurs v o
