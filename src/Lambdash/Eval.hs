@@ -32,7 +32,7 @@ import Lambdash.Overlay
 import Lambdash.Runtime
 import Lambdash.Process (Status (..))
 import Lambdash.Stream (StreamError (..))
-import Lambdash.Stream (Stage (..), runStages)
+import Lambdash.Stream (Stage (..), runStagesAll)
 import Lambdash.Lines (runLines)
 import Lambdash.Unify
 import System.IO (stdout)
@@ -61,7 +61,10 @@ data Value
   | VStage [Stage Value]
   | VCollector [Stage Value]
 
-data Return = ReturnUnit | ReturnStatus
+-- | What a plan returns. 'ReturnPipefail' is the status of the first stage
+-- that failed, where a stage killed by SIGPIPE before the last one did not
+-- fail: a closed reader is how a pipeline cancels its producers.
+data Return = ReturnUnit | ReturnStatus | ReturnPipefail
 
 -- | What each name in scope has as its value.
 type Scope = Map Name Value
@@ -128,19 +131,42 @@ bytes (VBytes value) = value
 bytes _ = error "stream: the checker passed non-Bytes to an external"
 
 runPlan :: Runtime -> Return -> [Stage Value] -> (Value -> IO ()) -> IO Value
-runPlan runtime result stages output = do
-  status <- runStages runtime VBytes bytes output stages
-  pure $ case result of
-    ReturnStatus -> VStatus status
-    ReturnUnit -> VUnit
+runPlan runtime result stages output = fst <$> runPlanAll runtime result stages output
+
+-- | The return value, and the status of each external in order.
+runPlanAll :: Runtime -> Return -> [Stage Value] -> (Value -> IO ()) -> IO (Value, [Status])
+runPlanAll runtime result stages output = do
+  statuses <- runStagesAll runtime VBytes bytes output stages
+  let value = case result of
+        ReturnStatus -> VStatus (lastStatus statuses)
+        ReturnPipefail -> VStatus (pipefailStatus statuses)
+        ReturnUnit -> VUnit
+  pure (value, statuses)
+
+lastStatus :: [Status] -> Status
+lastStatus statuses = case reverse statuses of
+  status : _ -> status
+  [] -> ExitedWith 0
+
+-- | The first failure, or the last status when nothing failed.
+pipefailStatus :: [Status] -> Status
+pipefailStatus statuses =
+  case [status | (index, status) <- zip [1 :: Int ..] statuses, failedAt index status] of
+    status : _ -> status
+    [] -> lastStatus statuses
+ where
+  count = length statuses
+  failedAt _ (ExitedWith 0) = False
+  failedAt index (KilledBy 13) = index == count
+  failedAt _ _ = True
 
 collectPlan :: Return -> [Stage Value] -> Value
 collectPlan result stages = VComp $ \runtime -> do
   values <- newIORef []
   -- The final bridge routes even a raw external's stdout through the sink.
-  status <- runPlan runtime result (stages <> [MapStage id]) (\value -> modifyIORef' values (value :))
+  (status, statuses) <- runPlanAll runtime result (stages <> [MapStage id]) (\value -> modifyIORef' values (value :))
   items <- reverse <$> readIORef values
-  pure (VRecord [("items", VList items), ("status", status)])
+  pure (VRecord [("items", VList items), ("status", status), ("statuses", VList (map VStatus statuses))])
 
 pipeValue :: Value -> Value -> Value
 pipeValue (VStream left result) (VCollector right) = collectPlan result (left <> right)
@@ -216,6 +242,9 @@ builtins =
     ("overlay", mono (TFun TString (TFun (TList TPatch) TOverlay)), VBuiltin "overlay" overlayV),
     ("use", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "use" useV),
     ("unuse", mono (TFun TString (TComp (effect Environment) TUnit)), VBuiltin "unuse" unuseV),
+    ( "pipefail",
+      Forall [t, u, effA] (TFun (TStream (effectVar effA) (TVar t) (TVar u) TStatus) (TStream (effectVar effA) (TVar t) (TVar u) TStatus)),
+      VBuiltin "pipefail" pipefailV ),
     ("environments", mono (TComp (effect Environment) (TList TString)), VComp environmentsV),
     ("pkg", mono (TFun TString (TComp (effect (Exec "nix")) TOverlay)), VBuiltin "pkg" (\ref -> VComp (\runtime -> VOverlay <$> resolvePkg runtime (str ref)))),
     ("dev", mono (TFun TString (TComp (unionEffects (effect (Exec "nix")) (effect (Exec "bash"))) TOverlay)), VBuiltin "dev" (\ref -> VComp (\runtime -> VOverlay <$> resolveDev runtime (str ref)))),
@@ -228,6 +257,8 @@ builtins =
     u = Var 1
     effA = Var 2
     effB = Var 3
+    pipefailV (VStream stages _) = VStream stages ReturnPipefail
+    pipefailV _ = error "pipefail: the checker passed a non-stream"
     -- Run the first, then the computation that its result chooses.
     andThenV first = VBuiltin "andThen" $ \next -> VComp $ \runtime -> do
       value <- runComp runtime first

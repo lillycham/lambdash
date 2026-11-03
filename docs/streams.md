@@ -53,6 +53,32 @@ When two streams connect, the right stream supplies the return value.
 An `each` source on the right therefore supplies `()` even if the left stream contains a command.
 Adapters preserve that return value.
 
+## Statuses and `pipefail`
+
+`collect` also records every external's status, in pipeline order:
+
+```text
+yes | head -1 | lines | collect
+{items = ["y"], status = exit 0, statuses = [signal 13, exit 0]}
+```
+
+`statuses` is `[]` when nothing external ran. The return value is still the
+last external's status.
+
+`pipefail` makes a command stream return the first failure instead:
+
+```text
+pipefail : Stream a b Status -> Stream a b Status
+
+pipefail (sh -c "exit 3" | sh -c "exit 4" | cat)   -- exit 3
+pipefail (yes | head -1)                           -- success
+```
+
+A stage killed by SIGPIPE before the last stage has not failed. A closed
+reader is how a pipeline cancels its producers. SIGPIPE in the last stage is a
+failure. `pipefail` survives later stages, so
+`pipefail (a | b) | lines | collect` has the pipefail status.
+
 Pure functions after a stream map its items, so `.size` needs no explicit `map`.
 `map` is useful when a transform should be a reusable adapter value.
 `filter` accepts a predicate with result `Bool`; it does not run computation-valued predicates.

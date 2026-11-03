@@ -320,7 +320,7 @@ infer env (EPipe left right) = do
       pure (s, item)
   pure (s3 `compose` known, apply s3 result)
  where
-  collectedTy item result = TRecord (RExtend "items" (TList item) (RExtend "status" result REmpty))
+  collectedTy item result = TRecord (RExtend "items" (TList item) (RExtend "status" result (RExtend "statuses" (TList TStatus) REmpty)))
 
 infer env (EList items) = do
   itemTy <- fresh

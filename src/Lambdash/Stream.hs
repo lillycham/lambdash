@@ -1,7 +1,7 @@
 -- | Bounded streams. Adjacent external stages share an OS pipe. A pure stage
 -- uses a worker and one item of buffering between two pure stages. Closing a
 -- downstream reader releases blocked writers and propagates cancellation.
-module Lambdash.Stream (Stage (..), StreamError (..), runStages) where
+module Lambdash.Stream (Stage (..), StreamError (..), runStages, runStagesAll) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently, mapConcurrently_)
@@ -225,8 +225,18 @@ withTerminal action = do
 -- started, so a source that changes the session cannot split a pipeline.
 runStages :: Runtime -> (BS.ByteString -> a) -> (a -> BS.ByteString) -> (a -> IO ())
           -> [Stage a] -> IO Status
-runStages _ _ _ _ [] = pure (ExitedWith 0)
-runStages runtime fromBytes toBytes sink stages@(firstStage : restStages) = do
+runStages runtime fromBytes toBytes sink stages = do
+  statuses <- runStagesAll runtime fromBytes toBytes sink stages
+  pure (case reverse statuses of
+    status : _ -> status
+    [] -> ExitedWith 0)
+
+-- | The same, with the status of every external, in pipeline order. A plan
+-- with no externals has none.
+runStagesAll :: Runtime -> (BS.ByteString -> a) -> (a -> BS.ByteString) -> (a -> IO ())
+             -> [Stage a] -> IO [Status]
+runStagesAll _ _ _ _ [] = pure []
+runStagesAll runtime fromBytes toBytes sink stages@(firstStage : restStages) = do
   hFlush stdout
   env <- runtimeEnviron runtime
   -- This also sees commands hidden in bound stages. Resolve the entire plan
@@ -282,6 +292,4 @@ runStages runtime fromBytes toBytes sink stages@(firstStage : restStages) = do
             quietly (signalProcessGroup sigCONT job)
         wait = maybe (pure Map.empty) (\job -> waitStages (park job) children job) group
     (statuses, _) <- concurrently wait (mapConcurrently_ id workers)
-    pure $ case reverse pids of
-      pid : _ -> Map.findWithDefault (ExitedWith 127) pid statuses
-      [] -> ExitedWith 0
+    pure [Map.findWithDefault (ExitedWith 127) pid statuses | pid <- pids]

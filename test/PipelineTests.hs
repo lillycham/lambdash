@@ -110,48 +110,61 @@ tests =
   , ("lists: literals and length", gives ["[1, 2, 3]", "length [1, 2, 3]"] "" ["[1, 2, 3]", "3"])
   , ("lists: nested and empty literals", gives ["[[], [1, 2]]", ":t []"] "" ["[[], [1, 2]]", "[a]"])
   , ("lists: empty bindings remain polymorphic", gives ["xs = []", "each xs | filter isEmpty | collect", "each xs | add 1 | collect"] ""
-      ["xs : [a]", "{items = [], status = ()}", "{items = [], status = ()}"])
+      ["xs : [a]", "{items = [], status = (), statuses = []}", "{items = [], status = (), statuses = []}"])
   , ("lists: heterogeneous items fail", do
       (_, results) <- capture (linesIO ["[1, true]"])
       pure (any (isInfixOf "type mismatch") results))
   , ("lists: actions stay latent", gives ["[print 1, print 2]", "each [print 1] | collect"] ""
-      ["[<computation>, <computation>]", "{items = [<computation>], status = ()}"])
+      ["[<computation>, <computation>]", "{items = [<computation>], status = (), statuses = []}"])
   , ("lines: collected external output", gives ["printf \"owl\\ncat\\n\" | lines | collect"] ""
-      ["{items = [\"owl\", \"cat\"], status = exit 0}"])
+      ["{items = [\"owl\", \"cat\"], status = exit 0, statuses = [exit 0]}"])
   , ("lines: a finite byte value can be a source", gives ["encodeUtf8 \"λ\\ncat\" | lines | collect"] ""
-      ["{items = [" <> show "λ" <> ", \"cat\"], status = ()}"])
+      ["{items = [" <> show "λ" <> ", \"cat\"], status = (), statuses = []}"])
   , ("lines: a computation can be a byte source", gives ["pure (encodeUtf8 \"owl\\n\") | lines | collect"] ""
-      ["{items = [\"owl\"], status = ()}"])
+      ["{items = [\"owl\"], status = (), statuses = []}"])
   , ("filter: string predicates select lines", gives ["printf \"owl\\ncat\\nbarn owl\\n\" | lines | filter (contains \"owl\") | collect"] ""
-      ["{items = [\"owl\", \"barn owl\"], status = exit 0}"])
+      ["{items = [\"owl\", \"barn owl\"], status = exit 0, statuses = [exit 0]}"])
   , ("filter: composed pure predicates skip empty items", gives ["each [\"owl\", \"\", \"cat\"] | filter (x -> not (isEmpty x)) | collect"] ""
-      ["{items = [\"owl\", \"cat\"], status = ()}"])
+      ["{items = [\"owl\", \"cat\"], status = (), statuses = []}"])
   , ("filter: Boolean data remains structured", gives ["each [true, false, true] | filter (x -> x) | collect"] ""
-      ["{items = [true, true], status = ()}"])
+      ["{items = [true, true], status = (), statuses = []}"])
   , ("map: row accessors map structured records", gives ["each [{size = 1}, {size = 2}] | map .size | add 1 | collect"] ""
-      ["{items = [2, 3], status = ()}"])
+      ["{items = [2, 3], status = (), statuses = []}"])
   , ("stages: byte adapters compose and stay reusable", gives
       ["clean = lines | filter (x -> not (isEmpty x))", "readClean = clean | collect", "printf \"a\\n\\nb\\n\" | readClean", "printf \"c\\n\" | readClean"] ""
-      ["clean : Stage Bytes String", "readClean : Collector Bytes String", "{items = [\"a\", \"b\"], status = exit 0}", "{items = [\"c\"], status = exit 0}"])
+      ["clean : Stage Bytes String", "readClean : Collector Bytes String", "{items = [\"a\", \"b\"], status = exit 0, statuses = [exit 0]}", "{items = [\"c\"], status = exit 0, statuses = [exit 0]}"])
   , ("collect: items and status bind with <-", gives
       ["r <- printf \"a\\nb\\n\" | lines | collect", "r.items", "length r.items", "r.status"] ""
-      ["r : {items : [String], status : Status}", "[\"a\", \"b\"]", "2", "exit 0"])
+      ["r : {items : [String], status : Status, statuses : [Status]}", "[\"a\", \"b\"]", "2", "exit 0"])
   , ("collect: a nonzero status remains data", gives ["sh -c \"printf yes; exit 7\" | lines | filter (startsWith \"y\") | collect"] ""
-      ["{items = [\"yes\"], status = exit 7}"])
+      ["{items = [\"yes\"], status = exit 7, statuses = [exit 7]}"])
   , ("collect: a signal status remains data", gives ["sh -c \"printf yes; kill -9 $$\" | lines | collect"] ""
-      ["{items = [\"yes\"], status = signal 9}"])
+      ["{items = [\"yes\"], status = signal 9, statuses = [signal 9]}"])
   , ("collect: raw bytes are retained independent of chunking", gives
       ["r <- printf abc | collect", "each r.items", "r.status"] "abc"
-      ["r : {items : [Bytes], status : Status}", "", "exit 0"])
+      ["r : {items : [Bytes], status : Status, statuses : [Status]}", "", "exit 0"])
   , ("collect: naming it runs nothing", gives ["r = echo hi | lines | collect", ":t r"] ""
-      ["r : Comp {items : [String], status : Status}", "Comp {exec echo} {items : [String], status : Status}"])
-  , ("collect: a plain item collects once", gives ["42 | collect"] "" ["{items = [42], status = ()}"])
-  , ("collect: pure computation effects are retained", gives ["print 1 | collect"] "1\n" ["{items = [()], status = ()}"])
+      ["r : Comp {items : [String], status : Status, statuses : [Status]}", "Comp {exec echo} {items : [String], status : Status, statuses : [Status]}"])
+  , ("collect: every external's status, in order", gives ["sh -c \"exit 3\" | sh -c \"cat; exit 4\" | lines | collect"] ""
+      ["{items = [], status = exit 4, statuses = [exit 3, exit 4]}"])
+  , ("collect: a cancelled producer shows SIGPIPE", gives ["yes | head -1 | lines | collect"] ""
+      ["{items = [\"y\"], status = exit 0, statuses = [signal 13, exit 0]}"])
+  , ("pipefail: the type", pure $ typed "pipefail" "Stream a b Status -> Stream a b Status")
+  , ("pipefail: the first failure", gives ["pipefail (sh -c \"exit 3\" | sh -c \"exit 4\" | cat)"] "" ["exit 3"])
+  , ("pipefail: success is the last status", gives ["pipefail (echo hi | cat)"] "hi\n" [""])
+  , ("pipefail: SIGPIPE upstream is cancellation, not failure", gives ["pipefail (yes | head -1)"] "y\n" [""])
+  , ("pipefail: SIGPIPE in the last stage is a failure", gives ["pipefail (echo hi | sh -c \"kill -13 $$\")"] "" ["signal 13"])
+  , ("pipefail: without it, the last status wins", gives ["sh -c \"exit 3\" | cat"] "" [""])
+  , ("pipefail: it survives later stages", gives ["pipefail (sh -c \"exit 5\" | cat) | lines | collect"] ""
+      ["{items = [], status = exit 5, statuses = [exit 5, exit 0]}"])
+  , ("pipefail: it binds with <-", gives ["s <- pipefail (sh -c \"exit 6\" | cat)", "s"] "" ["s : Status", "exit 6"])
+  , ("collect: a plain item collects once", gives ["42 | collect"] "" ["{items = [42], status = (), statuses = []}"])
+  , ("collect: pure computation effects are retained", gives ["print 1 | collect"] "1\n" ["{items = [()], status = (), statuses = []}"])
   , ("collect: source failures cannot become a unit success", do
       result <- try (runComp runtime (VStream [SourceStage (const (ioError (userError "source failed"))), MapStage id] ReturnUnit)) :: IO (Either StreamError Value)
       pure $ case result of Left (StreamError _) -> True; _ -> False)
   , ("collect: a pure right stream retains its own return type", gives ["sh -c \"exit 7\" | each [1, 2] | collect"] ""
-      ["{items = [1, 2], status = ()}"])
+      ["{items = [1, 2], status = (), statuses = [exit 7]}"])
   , ("preflight: adapters preserve missing-command requirements", gives ["bad = missing-lines-command-xyz", "r <- bad | lines | filter isEmpty | collect"] ""
       ["bad : Stream Bytes Bytes Status", "command not found: missing-lines-command-xyz"])
   , ("preflight: predicates must be pure Booleans", do
@@ -159,7 +172,7 @@ tests =
       pure (BS.null output && any (isInfixOf "type mismatch") results))
   , ("types: list item constraints propagate", pure $ typed "x -> [x, add x 1]" "Int -> [Int]")
   , ("types: filters remain generic", pure $ typed "filter" "(a -> Bool) -> Stage a a")
-  , ("types: collector item types follow maps", pure $ typed "each [{size = 1}] | .size | collect" "Comp {items : [Int], status : ()}")
+  , ("types: collector item types follow maps", pure $ typed "each [{size = 1}] | .size | collect" "Comp {items : [Int], status : (), statuses : [Status]}")
   , ("types: adapters require an explicit source", do
       (output, results) <- capture (linesIO ["filter (contains \"a\") | encodeLine | cat"])
       pure (BS.null output && any (isInfixOf "type mismatch") results))
