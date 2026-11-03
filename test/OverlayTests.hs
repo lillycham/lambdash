@@ -65,6 +65,7 @@ tests =
   , ("prompt: active environments", prompt (active [dev, ffmpeg]) == "λ [dev ffmpeg]> ")
   , ("prompt: shadowing", prompt (active [dev, bench]) == "λ [dev bench ⚠ CC]> ")
   , ("prompt: a variable is flagged once", prompt (active [dev, bench, Overlay "t" [Patch "CC" (Set "tcc")]]) == "λ [dev bench t ⚠ CC]> ")
+  , ("prompt: at most three flags", prompt (active [Overlay "a" [Patch v (Set "1") | v <- ["A", "B", "C", "D", "E"]], Overlay "b" [Patch v (Set "2") | v <- ["A", "B", "C", "D", "E"]]]) == "λ [a b ⚠ A B C +2]> ")
   , ("render: an overlay is its own source", renderOverlay dev == "overlay \"dev\" [set \"CC\" \"gcc\", prepend \"PATH\" \"/dev/bin\"]")
   , ("render: another separator", renderPatch (Patch "X" (Append " " "-O2")) == "appendWith \" \" \"X\" \"-O2\"")
   , ("render: unset", renderPatch (Patch "X" Unset) == "unset \"X\"")

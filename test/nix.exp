@@ -1,0 +1,59 @@
+#!/usr/bin/env expect
+# Usage: expect test/nix.exp path/to/lambdash
+# Runs real Nix against test/nix-fixture, from the repository root. The first
+# run builds the fixture, so the timeout is long.
+set timeout 300
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+set fixture "./test/nix-fixture"
+
+spawn [lindex $argv 0]
+see {λ> $} "prompt"
+
+send "lsh-hello\r"
+see {command not found: lsh-hello} "the fixture is not on PATH yet"
+
+send "andThen (pkg \"$fixture\") use\r"
+see {λ \[\./test/nix-fixture\]> $} "pkg and use in one line"
+send "lsh-hello\r"
+see {hello from lsh-hello, LSH_HOOK=unset} "pkg puts the program on PATH"
+
+send "d <- dev \"$fixture\"\r"
+see {lsh fixture hook ran} "dev runs the hook"
+see {the hook defined 2 functions, not carried over: lsh_one lsh_two} "dev reports the hook's functions"
+see {d : Overlay} "dev gives an overlay"
+send "use d\r"
+send "lsh-hello\r"
+see {LSH_HOOK=ran} "the hook's exports reach a program"
+send "printenv LSH_ATTR\r"
+see {from-attr} "attributes reach a program"
+send "d\r"
+expect {
+  -re {TMPDIR|shellHook} { fail "dev drops the temporary directory and the hook source" }
+  -re {\]> $} { puts "\nPASS: dev drops the temporary directory and the hook source" }
+}
+
+send "o <- dev \"$fixture#other\"\r"
+see {o : Overlay} "another devshell"
+send "use o\r"
+see {warning: \./test/nix-fixture#other shadows LSH_HOOK} "a different value warns"
+see {⚠ LSH_HOOK} "and shows in the prompt"
+send "unuse \"$fixture#other\"\r"
+send "lsh-hello\r"
+see {LSH_HOOK=ran} "unuse restores the first devshell"
+
+send "x <- dev \"$fixture#nope\"\r"
+see {dev \./test/nix-fixture#nope failed} "a failed resolve reports"
+send "x\r"
+see {command not found: x} "and binds nothing"
+
+send ":q\r"
+expect eof
+puts "\nALL PASSED"

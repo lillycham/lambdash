@@ -27,6 +27,7 @@ import Data.IORef
 import Control.Exception (throwIO)
 import Control.Monad (when)
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
+import Lambdash.Nix (resolveDev, resolvePkg)
 import Lambdash.Overlay
 import Lambdash.Process (Status (..))
 import Lambdash.Stream (StreamError (..))
@@ -214,11 +215,22 @@ builtins =
     ("overlay", mono (TFun TString (TFun (TList TPatch) TOverlay)), VBuiltin "overlay" overlayV),
     ("use", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "use" useV),
     ("unuse", mono (TFun TString (TComp (effect Environment) TUnit)), VBuiltin "unuse" unuseV),
-    ("environments", mono (TComp (effect Environment) (TList TString)), VComp environmentsV)
+    ("environments", mono (TComp (effect Environment) (TList TString)), VComp environmentsV),
+    ("pkg", mono (TFun TString (TComp (effect (Exec "nix")) TOverlay)), VBuiltin "pkg" (\ref -> VComp (\runtime -> VOverlay <$> resolvePkg runtime (str ref)))),
+    ("dev", mono (TFun TString (TComp (unionEffects (effect (Exec "nix")) (effect (Exec "bash"))) TOverlay)), VBuiltin "dev" (\ref -> VComp (\runtime -> VOverlay <$> resolveDev runtime (str ref)))),
+    ( "andThen",
+      Forall [t, u, effA, effB] (TFun (TComp (effectVar effA) (TVar t)) (TFun (TFun (TVar t) (TComp (effectVar effB) (TVar u))) (TComp (unionEffects (effectVar effA) (effectVar effB)) (TVar u)))),
+      VBuiltin "andThen" andThenV )
   ]
   where
     t = Var 0
     u = Var 1
+    effA = Var 2
+    effB = Var 3
+    -- Run the first, then the computation that its result chooses.
+    andThenV first = VBuiltin "andThen" $ \next -> VComp $ \runtime -> do
+      value <- runComp runtime first
+      runComp runtime (applyValue next value)
     lineStage receive emit = runLines (fmap (fmap bytes) receive) (emit . VStr)
     mapV function = VStage [MapStage (applyValue function)]
     filterV predicate = VStage [TransformStage (\receive emit ->

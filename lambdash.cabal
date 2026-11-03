@@ -11,7 +11,7 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Stream, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Stream, Lambdash.Unify
   c-sources:       cbits/spawn.c
   build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, stm, text, transformers, unix
 
@@ -94,3 +94,10 @@ test-suite overlay-tests
   hs-source-dirs: test
   main-is:        OverlayTests.hs
   build-depends:  base, containers, lambdash
+
+test-suite nix-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        NixTests.hs
+  build-depends:  base, bytestring, containers, lambdash

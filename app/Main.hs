@@ -2,8 +2,9 @@ module Main (main) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (setupTerminal)
-import Lambdash.Repl (Session, Step (..), initial, sessionPrompt, step)
+import Lambdash.Repl (Session (..), Step (..), initial, sessionPrompt, step)
 import System.Console.Haskeline
 import System.IO (BufferMode (..), hSetBuffering, stdout)
 
@@ -12,7 +13,8 @@ main = do
   -- Computations print straight to stdout, beside the output of haskeline.
   hSetBuffering stdout LineBuffering
   setupTerminal
-  runInputT defaultSettings (loop initial)
+  withRootDirectory $ \roots ->
+    runInputT defaultSettings (loop initial {sessionRoots = roots})
 
 -- | All of the meaning is in 'step'. This only moves text.
 loop :: Session -> InputT IO ()

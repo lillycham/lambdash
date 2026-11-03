@@ -29,6 +29,7 @@ module Lambdash.Overlay
   , prompt
   , Runtime (..)
   , newRuntime
+  , newRuntimeWith
   , runtimeEnviron
   ) where
 
@@ -171,22 +172,35 @@ renderOverlay (Overlay name patches) =
 -- > λ>
 -- > λ [dev bench]>
 -- > λ [dev bench ⚠ CC]>
+-- > λ [dev bench ⚠ CC LD AR +2]>
 prompt :: ShellState -> String
 prompt state = case overlays state of
   [] -> "λ> "
   active ->
     let names = unwords (map overlayName active)
         flagged = nub (map shadowVar (shadows state))
-        flag = if null flagged then "" else " ⚠ " <> unwords flagged
+        -- Two real devshells can differ in many variables. :env has them all.
+        shown = take 3 flagged
+        more = if length flagged > 3 then " +" <> show (length flagged - 3) else ""
+        flag = if null flagged then "" else " ⚠ " <> unwords shown <> more
     in "λ [" <> names <> flag <> "]> "
 
--- | What a running computation can reach: the session's environments. A
--- computation that changes them changes this reference, and the REPL commits
--- it only when the line succeeds.
-newtype Runtime = Runtime {runtimeState :: IORef ShellState}
+-- | What a running computation can reach: the session's environments, and
+-- where the session keeps its Nix GC roots. A computation that changes the
+-- environments changes this reference, and the REPL commits it only when the
+-- line succeeds.
+data Runtime = Runtime
+  { runtimeState :: IORef ShellState
+  , -- | No directory means that nothing is rooted.
+    runtimeRoots :: Maybe FilePath
+  }
 
+-- | A runtime with no GC root directory.
 newRuntime :: ShellState -> IO Runtime
-newRuntime state = Runtime <$> newIORef state
+newRuntime = newRuntimeWith Nothing
+
+newRuntimeWith :: Maybe FilePath -> ShellState -> IO Runtime
+newRuntimeWith roots state = (`Runtime` roots) <$> newIORef state
 
 -- | The effective environment now.
 runtimeEnviron :: Runtime -> IO Environ

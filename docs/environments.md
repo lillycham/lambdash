@@ -102,8 +102,7 @@ CC = "gcc"
 
 ## Not yet
 
-- `pkg` and `dev`, which build overlays from Nix, and GC roots: Prototype 4.
-  `nix-notes.md` has the checked behaviour they rely on.
+- Overlays from Nix are in `nix.md`.
 - `with`, `use --local` and trust: Prototype 5. The runtime handle that
   computations receive is where `with` will add a local layer.
 - `unuse` takes a string, because a bare word in expression position is a

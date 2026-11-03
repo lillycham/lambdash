@@ -41,11 +41,13 @@ data Session = Session
   , sessionValues :: Scope
   , -- | The active environments.
     sessionShell :: ShellState
+  , -- | Where Nix GC roots go. Without one, @pkg@ and @dev@ root nothing.
+    sessionRoots :: Maybe FilePath
   }
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState
+initial = Session typeEnv scope emptyState Nothing
 
 -- | What the prompt should say: the active environments, and any shadowing.
 sessionPrompt :: Session -> String
@@ -360,7 +362,7 @@ stepLine session input =
       case closeEffects constraints (actionEffects ty) of
         Nothing -> pure (Continue session "cannot run an action with an unresolved effect row")
         Just (EffRow labels _) -> do
-          runtime <- newRuntime (sessionShell session)
+          runtime <- newRuntimeWith (sessionRoots session) (sessionShell session)
           env <- runtimeEnviron runtime
           missing <- filterM (fmap not . programExists env) [name | Exec name <- Set.toList labels]
           case missing of

@@ -179,7 +179,7 @@ tests =
       let row = unionEffects (effect (Exec "cat")) (effectVar (Var 0))
           qualified = qualify [EffEqual row (effect (Exec "cat"))] (TStream row TBytes TBytes TStatus)
           session = Session (Map.singleton "job" (Forall [Var 0] qualified))
-            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]] ReturnStatus)) emptyState
+            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]] ReturnStatus)) emptyState Nothing
       (output, result) <- capture (step session "job")
       pure $ BS.null output && case result of Continue _ "" -> True; _ -> False)
   , ("constraints: proved requirements still get preflight", do
@@ -187,7 +187,7 @@ tests =
           row = unionEffects missing (effectVar (Var 0))
           qualified = qualify [EffEqual row missing] (TStream row TBytes TBytes TStatus)
           session = Session (Map.singleton "job" (Forall [Var 0] qualified))
-            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []] ReturnStatus)) emptyState
+            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []] ReturnStatus)) emptyState Nothing
       (output, result) <- capture (step session "job")
       pure $ BS.null output && case result of Continue _ "command not found: missing-constraint-command-xyz" -> True; _ -> False)
   , ("constraints: a binding retains and resolves its bound", gives
