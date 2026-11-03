@@ -78,5 +78,5 @@ gcc
 - A stopped `with` block keeps its layer when `fg` resumes it.
 
 `with (pkg "nixpkgs#ffmpeg") do …` does not typecheck, because `pkg` returns a
-computation. Use `andThen (pkg "nixpkgs#ffmpeg") (o -> with o do … end)`, or
-resolve it first with `<-`.
+computation. Write the reference bare, `with nixpkgs#ffmpeg do … end`, which
+resolves it first, or bind it: `do o <- pkg "x"; with o do … end end`.

@@ -83,8 +83,8 @@ again:
 makes it global again, and `unuse` removes it. `:env` shows where each local
 overlay applies, and whether that is here.
 
-The plan's `use --local` cannot parse, because `--` starts a comment in
-expression position.
+This is the plan's `use --local`, spelled as a function: `--` would start a
+comment in expression position.
 
 ## Approval
 

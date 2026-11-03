@@ -115,10 +115,10 @@ tests =
   , ("ref: the current flake", is "f .#" (EApp (v "f") (ELit (LRef ".#"))) && is "f .#bench" (EApp (v "f") (ELit (LRef ".#bench"))))
   , ("ref: paths and URLs", is "f ./a/b#dev" (EApp (v "f") (ELit (LRef "./a/b#dev"))) && is "f github:o/r?ref=x#y" (EApp (v "f") (ELit (LRef "github:o/r?ref=x#y"))))
   , ("ref: an accessor is still an accessor", is "f .size" (EApp (v "f") (ELam "r" (ESelect (v "r") "size"))))
-  , ("ref: use means pkg", is "use nixpkgs#jq" (EApp (EApp (v "andThen") (EApp (v "pkg") (ELit (LStr "nixpkgs#jq")))) (v "use")))
+  , ("ref: use means pkg", is "use nixpkgs#jq" (EDo [SBind " overlay" (EApp (v "pkg") (ELit (LStr "nixpkgs#jq"))), SRun (EApp (v "use") (v " overlay"))]))
   , ("ref: use of a string is not sugar", is "use \"x#y\"" (EApp (v "use") (ELit (LStr "x#y"))))
   , ("ref: with resolves first", is "with .#b do x end"
-      (EApp (EApp (v "andThen") (EApp (v "pkg") (ELit (LStr ".#b")))) (ELam " overlay" (EWith (v " overlay") (EDo [SRun (v "x")])))))
+      (EDo [SBind " overlay" (EApp (v "pkg") (ELit (LStr ".#b"))), SRun (EWith (v " overlay") (EDo [SRun (v "x")]))]))
   ]
 
 runTest :: (String, Bool) -> IO Bool

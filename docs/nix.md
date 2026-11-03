@@ -25,15 +25,15 @@ output. In external argument position a word stays a word, so
 `nix build nixpkgs#jq` is unchanged. In head position a word is a command.
 
 ```text
-λ> use nixpkgs#ffmpeg           -- andThen (pkg "nixpkgs#ffmpeg") use
+λ> use nixpkgs#ffmpeg           -- do o <- pkg "nixpkgs#ffmpeg"; use o end
 λ [nixpkgs#ffmpeg]> unuse nixpkgs#ffmpeg
 λ> with nixpkgs#ffmpeg do ffmpeg -i a.mov a.mp4 end
 λ> d <- dev .#bench
 ```
 
 A bare reference after `use` or `with` means `pkg`, as in the plan. To use a
-devshell, resolve it with `dev` first. The sugar names the builtins `use`,
-`pkg` and `andThen`, so it follows a rebinding of any of them.
+devshell, resolve it with `dev` first. The sugar is a `do` block that names
+the builtins `use` and `pkg`, so it follows a rebinding of either.
 
 The two differ because `nix shell` and `nix develop` differ. `pkg ".#"` is
 `packages.default`. `dev ".#"` is `devShells.default`, and falls back to the
@@ -50,8 +50,9 @@ andThen :: Comp {| a} b -> (b -> Comp {| c} d) -> Comp {| a + c} d
 ```
 
 Run a computation, then the computation its result chooses, with the union of
-both effect rows. `andThen (pkg "nixpkgs#jq") use` resolves and activates on one
-line.
+both effect rows. It is an ordinary function, the bind that a `do` block
+chains, and no syntax depends on it. `andThen (pkg "nixpkgs#jq") use` and
+`do o <- pkg "nixpkgs#jq"; use o end` mean the same.
 
 `|` does not bind. `c | f` maps `f` over the result, so `pkg "x" | use` is a
 computation that returns a computation. Binding in `|` would depend on whether
@@ -129,7 +130,8 @@ Run it from the repository root. The first run builds the fixture.
 
 ## Not yet
 
-- `use --local`, `with` and trust: Prototype 5.
+- Directory-scoped overlays and approval are in `directories.md`, and `with`
+  is in `blocks.md`.
 - Invalidation when `flake.lock` changes.
 - A devshell is resolved in one directory, and `NIX_LDFLAGS` names
   `$PWD/outputs/out/lib` from there.

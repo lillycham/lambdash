@@ -12,8 +12,8 @@
 -- > do x <- e; f x end           a block of statements, run in order
 -- > with o do e end              a block with one more environment layer
 -- > nixpkgs#ffmpeg  .#dev        a flake reference: a String
--- > use nixpkgs#ffmpeg           means andThen (pkg "nixpkgs#ffmpeg") use
--- > with .#bench do e end        means andThen (pkg ".#bench") (o -> with o do e end)
+-- > use nixpkgs#ffmpeg           means do o <- pkg "nixpkgs#ffmpeg"; use o end
+-- > with .#bench do e end        means do o <- pkg ".#bench"; with o do e end end
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
@@ -258,9 +258,9 @@ application = external <|> do
   pure (useRef (foldl EApp fun (slotted <> args)))
  where
   -- A bare reference means pkg, as in the plan. This names the builtins, so it
-  -- follows a rebinding of use, pkg or andThen.
-  useRef (EApp (EVar "use") (ELit (LRef ref))) = andThenPkg ref (EVar "use")
-  useRef (EApp (EVar "useLocal") (ELit (LRef ref))) = andThenPkg ref (EVar "useLocal")
+  -- follows a rebinding of use or pkg.
+  useRef (EApp (EVar "use") (ELit (LRef ref))) = resolveThen ref (EApp (EVar "use"))
+  useRef (EApp (EVar "useLocal") (ELit (LRef ref))) = resolveThen ref (EApp (EVar "useLocal"))
   useRef e = e
 
 -- | One argument position of a builtin, for parsing.
@@ -305,8 +305,12 @@ pathArg = do
   sc
   pure arg
 
-andThenPkg :: String -> Expr -> Expr
-andThenPkg ref next = EApp (EApp (EVar "andThen") (EApp (EVar "pkg") (ELit (LStr ref)))) next
+-- | @do o <- pkg ref; next o end@. The name has a space, so nothing written
+-- can capture it. The sugar is a block, so andThen stays an ordinary function
+-- that no syntax depends on.
+resolveThen :: String -> (Expr -> Expr) -> Expr
+resolveThen ref next =
+  EDo [SBind " overlay" (EApp (EVar "pkg") (ELit (LStr ref))), SRun (next (EVar " overlay"))]
 
 -- | @x y -> body@ means @\\x -> \\y -> body@. The body goes as far right as it
 -- can.
@@ -362,14 +366,13 @@ doBlock = do
 -- | @with overlay do ... end@.
 withBlock :: Parser Expr
 --
--- A bare reference resolves with pkg first. The name that holds the overlay
--- has a space, so nothing written can capture it.
+-- A bare reference resolves with pkg first.
 withBlock = do
   lexeme (keyword "with")
   overlay <- postfix
   body <- doBlock
   pure $ case overlay of
-    ELit (LRef ref) -> andThenPkg ref (ELam " overlay" (EWith (EVar " overlay") body))
+    ELit (LRef ref) -> resolveThen ref (`EWith` body)
     _ -> EWith overlay body
 
 -- | Any expression.

@@ -19,8 +19,14 @@ let         = "let" IDENT "=" expr "in" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
 pipeline    = stage { "|" stage } ;
 stage       = lambda | external | application ;
-application = postfix { postfix } ;
+application = postfix { slot } { postfix } ;
 external    = HEAD { ARG } ;
+
+block       = "do" statement { ";" statement } [ ";" ] "end" ;
+statement   = IDENT "<-" expr | IDENT "=" expr | expr ;
+with        = "with" postfix block ;
+
+slot        = "$" IDENT | STRING | "(" expr ")" | WORD ;
 ```
 
 ## Tight rules
@@ -36,7 +42,8 @@ accessor    = "." IDENT { "." IDENT } ;
 Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
-atom        = literal | record | list | accessor | IDENT | "(" expr ")" ;
+atom        = block | with | REF | literal | record | list | accessor | IDENT
+            | "(" expr ")" ;
 literal     = INT | STRING | "true" | "false" | "(" ")" ;
 record      = "{" [ field { "," field } ] "}" ;
 field       = IDENT "=" expr ;
@@ -47,14 +54,15 @@ list        = "[" [ expr { "," expr } ] "]" ;
 
 ```ebnf
 IDENT       = LETTER { LETTER | DIGIT | "_" | "'" } - RESERVED ;
-RESERVED    = "let" | "in" | "true" | "false" ;
+RESERVED    = "let" | "in" | "true" | "false" | "do" | "end" | "with" ;
 INT         = [ "+" | "-" ] DIGIT { DIGIT } ;
 STRING      = a Haskell string literal ;
 COMMENT     = "--" { any character except newline } ;
 
 HEAD        = WORD ;     (* a path, or a word that starts with an unbound name *)
 ARG         = "$" IDENT | STRING | WORD ;
-WORD        = { any character except space and ) } ] | " $ } ;
+WORD        = { any character except space and ) } ] | " $ ; } ;
+REF         = { LETTER | DIGIT | . _ - / : ~ + @ ? = & # % } ;   (* with at least one # *)
 ```
 
 A reserved word ends where a character that can continue an `IDENT` does not
@@ -79,18 +87,33 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
   session names, lambda parameters and let names. The parser never reads `PATH`.
 - Inside `external`, only spaces separate words, and `--` is an ordinary word.
   A line, a pipe or a closing bracket ends it. A quoted pipe stays in its word.
+- A `slot` applies only after a builtin that declares path slots, `cd` and
+  `ls`, while it is still the builtin. A missing slot takes its default
+  (`~` for `cd`, `.` for `ls`). See [directories](directories.md).
+- A `REF` is a String. `use REF` means `do o <- pkg REF; use o end`, and so
+  does `useLocal REF`. `with REF block` resolves with `pkg` the same way. See
+  [Nix](nix.md).
+- The last `statement` of a `block` must be an `expr`. A name a statement
+  binds is bound for the statements after it. Inside a `block`, a bare `end`
+  ends an external, so quote it to pass it. See [blocks](blocks.md).
 - In a list element or record field, a comma also ends an external argument.
   Parentheses reset that rule: `[(echo a,b), echo c]` has two elements.
   Outside these containers, `echo a,b` keeps the comma in its argument.
 
 ## REPL lines
 
-The REPL parses one `line` at a time. `:t` and `:q` are reserved words in this
-rule only.
+The REPL parses one `line` at a time. `:t`, `:q` and `:env` are reserved words
+in this rule only. A line may span several input lines while a `do` is open.
 
 ```ebnf
-line        = [ ":q" | ":t" expr | IDENT "=" expr | IDENT "<-" expr | expr ] EOF ;
+line        = [ ":q" | ":t" expr | ":env" [ NAME ] | command
+              | IDENT "=" expr | IDENT "<-" expr | expr ] EOF ;
+command     = "jobs" | "fg" [ JOB ] | "bg" [ JOB ] | "allow" | "deny" ;
+JOB         = [ "%" ] DIGIT { DIGIT } ;
 ```
+
+- A `command` is a command only when nothing binds its word, like an external.
+  See [jobs](jobs.md) and [directories](directories.md).
 
 - `x = e` names a value and runs nothing.
 - `x <- e` runs a `Comp a` or `Stream i o r` and binds its return value (`a` or `r`).
@@ -106,3 +129,7 @@ See [structured streams](streams.md) for lists, line framing, filters and collec
 - `true` and `false` are values, so `true` at the prompt does not run a program.
 - `lambda` wins over `external`, so `echo a -> b` is a lambda.
 - A `"` ends a word, so `a"b"` is two arguments.
+- A `;` ends a word everywhere, so `echo a;b` is an error outside a block.
+- A bare `cd` means `cd ~`, also under `:t`. The function is `x -> cd $x`.
+- `--` starts a comment in expression position, which is why flags such as
+  `--local` are not syntax.
