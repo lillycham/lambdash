@@ -43,13 +43,21 @@ module Lambdash.Parser
     expr,
     parseExpr,
     parseSurfaceIn,
+    Fixity (..),
+    Assoc (..),
+    Fixities,
+    defaultFixities,
+    runWith,
+    operatorName,
+    parenOperator,
   )
 where
 
 import Control.Monad (when)
 import Control.Monad.Reader (Reader, asks, local, runReader)
 import Data.Bifunctor (first)
-import Data.Char (isAlphaNum, isSpace)
+import Data.Char (isAlphaNum, isDigit, isSpace)
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Void (Void)
@@ -89,7 +97,29 @@ data ParseContext = ParseContext
   , commaDelimiter :: Bool
   , -- | Inside @do ... end@, the word @end@ ends a command line.
     inBlock :: Bool
+  , -- | Each operator's precedence and associativity. An operator not here
+    -- is @infixl 9@.
+    contextFixities :: Fixities
   }
+
+data Assoc = InfixL | InfixR | InfixN
+  deriving (Eq, Show)
+
+data Fixity = Fixity Assoc Int
+  deriving (Eq, Show)
+
+type Fixities = Map.Map Name Fixity
+
+-- | The operator table, loosest first. Every operator binds tighter than
+-- @|@ and looser than application.
+defaultFixities :: Fixities
+defaultFixities = Map.fromList $
+  [(op, Fixity InfixR 1) | op <- [">>>", "<<<"]]
+    <> [("||", Fixity InfixR 2), ("&&", Fixity InfixR 3)]
+    <> [(op, Fixity InfixN 4) | op <- ["==", "!=", "<", "<=", ">", ">="]]
+    <> [("<>", Fixity InfixR 5)]
+    <> [(op, Fixity InfixL 6) | op <- ["+", "-"]]
+    <> [(op, Fixity InfixL 7) | op <- ["*", "/", "%"]]
 
 type Parser = ParsecT Void String (Reader ParseContext)
 
@@ -98,7 +128,28 @@ withComma active = local (\context -> context {commaDelimiter = active})
 
 -- | Run a parser, given what is bound.
 runIn :: Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
-runIn bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False False)
+runIn = runWith defaultFixities
+
+-- | The same, with the session's fixities.
+runWith :: Fixities -> Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
+runWith fixities bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False False fixities)
+
+operatorChars :: String
+operatorChars = "!%&*+-/<=>?@^|~:"
+
+-- | A run of operator characters that is an operator. The reserved ones
+-- mean something else: =, ->, <-, |, &, ::, a lone :, and anything that
+-- starts a comment.
+operatorName :: Parser Name
+operatorName = try $ do
+  name <- some (satisfy (`elem` operatorChars))
+  if name `elem` ["=", "->", "<-", "|", "&", "::", ":"] || take 2 name == "--"
+    then fail ("reserved: " <> name)
+    else pure name
+
+-- | @(op)@: an operator as a name.
+parenOperator :: Parser Name
+parenOperator = try (symbol "(" *> lexeme operatorName <* char ')')
 
 -- | Give a node the span of the text it was parsed from.
 spanned :: Parser Node -> Parser Surface
@@ -194,7 +245,9 @@ flakeRef = try $ do
 -- | One thing that needs no parentheses. It does not skip trailing space.
 atom :: Parser Surface
 atom =
-  doBlock
+  spanned (SLit LUnit <$ try (symbol "(" *> char ')'))
+    <|> parenthesised
+    <|> doBlock
     <|> withBlock
     <|> spanned (SLit . LRef <$> flakeRef)
     <|> spanned (SLit <$> literal)
@@ -202,8 +255,26 @@ atom =
     <|> spanned (SList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
     <|> accessor
     <|> spanned (SVar <$> identifier)
-    <|> spanned (SLit LUnit <$ try (symbol "(" *> char ')'))
-    <|> between (symbol "(") (char ')') (withComma False expr)
+
+-- | An expression in parentheses, an operator as a value, or a section.
+-- @(-1)@ is a number and @(- 1)@ the section @x -> x - 1@.
+parenthesised :: Parser Surface
+parenthesised = spanned $ between (symbol "(") (char ')') (withComma False inner)
+ where
+  inner =
+        (try (SVar <$> lexeme operatorName <* lookAhead (char ')')))
+    <|> (try (notFollowedBy (char '-' *> satisfy isDigit)) *> try (SRightSection <$> lexeme operatorName <*> operators))
+    <|> do
+      e <- expr
+      section <- optional (lexeme operatorName <* lookAhead (char ')'))
+      pure $ case section of
+        Just op -> SLeftSection e op
+        Nothing
+          | Surface _ (SOp _ _ _) <- e, leftmostAccessor e -> SAccessorSection e
+          | Surface _ node <- e -> node
+  leftmostAccessor (Surface _ (SOp _ left _)) = leftmostAccessor left
+  leftmostAccessor (Surface _ (SAccessor _)) = True
+  leftmostAccessor _ = False
 
 -- | An atom, then any number of @.label@, then skip what follows.
 --
@@ -211,11 +282,17 @@ atom =
 -- the space means that @.a@ is an argument. If 'atom' ate the space, the two
 -- would look the same here.
 postfix :: Parser Surface
-postfix = do
+postfix = fst <$> postfixSpaced
+
+-- | The same, and whether space followed it: x-1 subtracts, f -1 applies.
+postfixSpaced :: Parser (Surface, Bool)
+postfixSpaced = do
   e <- atom
   selected <- selects e
+  before <- getOffset
   sc
-  pure selected
+  after <- getOffset
+  pure (selected, after > before)
  where
   selects e = option e $ do
     field <- char '.' *> identifier
@@ -271,13 +348,13 @@ external = do
 
 application :: Parser Surface
 application = external <|> do
-  fun <- postfix
+  (fun, spaced) <- postfixSpaced
   slotted <- case fun of
     Surface _ (SVar name) -> do
       signature <- asks (signatureOf name . contextBound)
       maybe (pure []) slotArgs signature
     _ -> pure []
-  args <- many postfix
+  args <- arguments spaced
   builtin <- asks (isBuiltin . contextBound)
   case (fun, slotted <> args) of
     -- A bare reference means pkg, as in the plan, while the head is still
@@ -288,6 +365,64 @@ application = external <|> do
  where
   foldApply f [] = pure f
   foldApply f (x : xs) = extend f (SApp f x) >>= (`foldApply` xs)
+
+-- | Arguments, while the next thing is not an operator. A minus starts an
+-- argument only after a space and before a digit: f -1 is f (-1), and x-1
+-- and x - 1 subtract.
+arguments :: Bool -> Parser [Surface]
+arguments spaced = option [] $ do
+  next <- lookAhead (optional (satisfy (`elem` operatorChars)))
+  case next of
+    Just '-' | spaced -> do
+      _ <- lookAhead (try (char '-' *> satisfy isDigit))
+      (arg, spaced') <- postfixSpaced
+      (arg :) <$> arguments spaced'
+    Just _ -> pure []
+    Nothing -> do
+      (arg, spaced') <- postfixSpaced
+      (arg :) <$> arguments spaced'
+
+-- | Operands joined by operators, resolved by precedence. A lambda can be
+-- the last operand: f >>> x -> x.
+operators :: Parser Surface
+operators = do
+  leftmost <- operand
+  -- An operator just before a closing parenthesis is a left section's.
+  rest <- many ((,) <$> try (operatorToken <* notFollowedBy (char ')')) <*> operand)
+  fixities <- asks contextFixities
+  either fail pure (resolve fixities leftmost rest)
+ where
+  operand = lambda <|> application
+  operatorToken = try (lexeme operatorName <* notFollowedBy (char '>'))
+
+-- | Shunting-yard over one flat run of operators. An operator binds by its
+-- fixity; a non-associative operator cannot chain, and two operators of one
+-- precedence must agree on associativity.
+resolve :: Fixities -> Surface -> [(Name, Surface)] -> Either String Surface
+resolve fixities leftmost rest = go [leftmost] [] rest
+ where
+  fixity op = Map.findWithDefault (Fixity InfixL 9) op fixities
+  go operands stack [] = finish operands stack
+  go operands stack ((op, e) : more) = do
+    (operands', stack') <- popWhile op operands stack
+    go (e : operands') (op : stack') more
+  popWhile op operands stack = case stack of
+    top : below -> do
+      let Fixity assocTop precTop = fixity top
+          Fixity assocOp precOp = fixity op
+      if precTop > precOp || (precTop == precOp && assocTop == InfixL && assocOp == InfixL)
+        then popWhile op (reduce top operands) below
+        else if precTop == precOp && (assocTop /= assocOp || assocOp == InfixN)
+          then Left ("cannot mix " <> top <> " and " <> op <> " without parentheses")
+          else pure (operands, stack)
+    [] -> pure (operands, stack)
+  finish operands [] = case operands of
+    [e] -> pure e
+    _ -> Left "an operator is missing an operand"
+  finish operands (top : below) = finish (reduce top operands) below
+  reduce op (right : left : others) = Surface (spanOf left right) (SOp op left right) : others
+  reduce _ operands = operands
+  spanOf (Surface (Span start _) _) (Surface (Span _ end) _) = Span start end
 
 -- | Whether a name still means its builtin, as far as parsing knows. Without
 -- the session's builtins, as in tests, it does.
@@ -352,7 +487,7 @@ lambda = spanned $ do
 letIn :: Parser Surface
 letIn = spanned $ do
   lexeme (keyword "let")
-  name <- lexeme identifier
+  name <- lexeme identifier <|> lexeme parenOperator
   _ <- symbol "="
   bound <- expr
   lexeme (keyword "in")
@@ -385,7 +520,7 @@ doBlock = spanned $ do
     pure (stmt : more)
   statement =
         (StmtBind <$> try (lexeme identifier <* symbol "<-") <*> expr)
-    <|> (StmtLet <$> try (lexeme identifier <* symbol "=" <* notFollowedBy (char '=')) <*> expr)
+    <|> (StmtLet <$> try ((lexeme identifier <|> lexeme parenOperator) <* symbol "=" <* notFollowedBy (char '=')) <*> expr)
     <|> (StmtRun <$> expr)
 
 -- | @with overlay do ... end@.
@@ -404,12 +539,14 @@ expr :: Parser Surface
 expr = letIn <|> lambda <|> pipeline
  where
   pipeline = do
-    firstStage <- application
+    firstStage <- operators
     whole <- stages firstStage
-    background <- optional (try (symbol "&" <* notFollowedBy (char '&')))
+    -- A lone & backgrounds; && is an operator.
+    background <- optional (try (char '&' <* notFollowedBy (satisfy (`elem` operatorChars))) <* sc)
     maybe (pure whole) (const (extend whole (SBg whole))) background
+  -- A lone | is a pipe; || is an operator.
   stages left = option left $ do
-    right <- symbol "|" *> (lambda <|> application)
+    right <- try (char '|' <* notFollowedBy (satisfy (`elem` operatorChars)) <* sc) *> operators
     extend left (SPipe left right) >>= stages
 
 -- | Parse one whole expression to core, without spans, or give a readable

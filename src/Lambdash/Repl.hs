@@ -11,6 +11,7 @@ module Lambdash.Repl
   , Command (..)
   , command
   , parseCommand
+  , parseCommandWith
   , renderType
   , renderEffectsType
   , renderError
@@ -29,7 +30,7 @@ import Data.List (intercalate)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, catch, fromException, throwIO)
 import Control.Exception qualified as Exception
-import Data.Char (isDigit)
+import Data.Char (digitToInt, isDigit)
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
@@ -47,7 +48,7 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, try)
+import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
@@ -69,6 +70,8 @@ data Session = Session
     sessionFlakes :: Map.Map FilePath String
   , -- | Directories and hashes already reported as not allowed.
     sessionNotified :: Set.Set (FilePath, String)
+  , -- | Operator fixities: the table, and the session's fixity lines.
+    sessionFixities :: Fixities
   }
 
 -- | A job in the table: a line that Ctrl-Z stopped, or a job that @&@
@@ -90,7 +93,7 @@ data Entry = Entry
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty
+initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities
 
 -- | Does this input open more @do@ blocks than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals.
@@ -148,6 +151,8 @@ data Command
     Allow
   | -- | @deny@: withdraw that.
     Deny
+  | -- | @infixl 6 <+>@: how later lines parse an operator.
+    SetFixity Fixity [Name]
   deriving (Eq, Show)
 
 -- | One line.
@@ -160,14 +165,23 @@ command =
   <|> (Exit <$ lexeme (keyword ":q"))
   <|> (TypeOf <$> (lexeme (keyword ":t") *> core))
   <|> (ShowCore <$> (lexeme (keyword ":core") *> core))
-  <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (lexeme identifier <* symbol "=" <* notFollowedBy (char '='))) <*> core))
+  <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (name <* symbol "=" <* notFollowedBy (char '='))) <*> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
-  <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> core)
-  <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> core)
+  <|> fixityLine
+  <|> (Bind <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> core)
+  <|> (BindRun <$> try (name <* symbol "<-") <*> core)
   <|> (Run <$> core)
  where
   -- The checker sees core, with the spans kept for its messages.
   core = desugar <$> expr
+  -- x, or an operator in parentheses: (<+>) = a b -> a <> b.
+  name = lexeme identifier <|> lexeme parenOperator
+  -- infixl 6 <+> <->. Only a precedence and operators after it make this a
+  -- fixity line, so infix is still a name.
+  fixityLine = try $ do
+    assoc <- (InfixL <$ lexeme (keyword "infixl")) <|> (InfixR <$ lexeme (keyword "infixr")) <|> (InfixN <$ lexeme (keyword "infix"))
+    level <- lexeme (digitToInt <$> satisfy isDigit)
+    SetFixity (Fixity assoc level) <$> some (lexeme operatorName)
 
 -- A variable name is any run of characters up to a space.
 optionalName :: Parser (Maybe String)
@@ -180,7 +194,11 @@ optionalName = do
 -- @jobs@ and @fg@ are commands only when nothing binds them, like an external
 -- command. They act on the shell, so they cannot be ordinary values.
 parseCommand :: Bound -> String -> Either String Command
-parseCommand bound input = case words input of
+parseCommand = parseCommandWith defaultFixities
+
+-- | The same, with the session's fixities.
+parseCommandWith :: Fixities -> Bound -> String -> Either String Command
+parseCommandWith fixities bound input = case words input of
   ["jobs"] | free "jobs" -> Right ListJobs
   ["allow"] | free "allow" -> Right Allow
   ["deny"] | free "deny" -> Right Deny
@@ -188,7 +206,7 @@ parseCommand bound input = case words input of
   ["bg", number] | free "bg", Just n <- jobNumberOf number -> Right (Background (Just n))
   ["fg"] | free "fg" -> Right (Foreground Nothing)
   ["fg", number] | free "fg", Just n <- jobNumberOf number -> Right (Foreground (Just n))
-  _ -> first errorBundlePretty (runIn bound (sc *> command <* eof) input)
+  _ -> first errorBundlePretty (runWith fixities bound (sc *> command <* eof) input)
  where
   -- A word is a command when nothing binds it, or when it is still the
   -- builtin: fg is also a function, and fg j applies it.
@@ -632,7 +650,7 @@ step session input = do
 
 stepLine :: Session -> String -> IO Step
 stepLine session input =
-  case parseCommand (BoundWith (Map.keysSet types) builtinNames) input of
+  case parseCommandWith (sessionFixities session) (BoundWith (Map.keysSet types) builtinNames) input of
     Left err -> pure (Continue session err)
     Right Blank -> pure (Continue session "")
     Right Exit
@@ -689,11 +707,13 @@ stepLine session input =
               shown = jobLine job <> if lastWord (jobLine job) == "&" then "" else " &"
           continueJob False job
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
+    Right (SetFixity fixity names) ->
+      pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
     Right (ShowCore expression) -> pure (Continue session (renderCore expression))
     Right (ShowElab named expression) ->
       let mode = maybe Defaulting (const Generalising) named
       in checked (elaborateIn mode types expression) $ \(_, code) ->
-        pure (Continue session (maybe "" (<> " = ") named <> renderCore code))
+        pure (Continue session (maybe "" ((<> " = ") . displayName) named <> renderCore code))
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do
@@ -741,7 +761,7 @@ stepLine session input =
             { sessionTypes = Map.insert name (generalise (sessionTypes now) ty) (sessionTypes now)
             , sessionValues = Map.insert name value (sessionValues now)
             }
-      in Continue next (name <> " : " <> renderType ty)
+      in Continue next (displayName name <> " : " <> renderType ty)
     -- Commands resolve in the effective environment, so an overlay that
     -- prepends to PATH changes what the preflight finds.
     preflight ty action = do
@@ -759,3 +779,9 @@ stepLine session input =
     showResult (VStatus (ExitedWith 0)) = ""
     showResult (VJob job _) = "[" <> show (jobNumber job) <> "] " <> jobLine job
     showResult value = render value
+
+-- | A name as the prompt shows it: an operator in parentheses.
+displayName :: Name -> String
+displayName name
+  | not (null name), all (`elem` ("!%&*+-/<=>?@^|~:" :: String)) name = "(" <> name <> ")"
+  | otherwise = name

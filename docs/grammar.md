@@ -15,15 +15,17 @@ program     = expr EOF ;
 
 expr        = let | lambda | pipeline ;
 
-let         = "let" IDENT "=" expr "in" expr ;
+let         = "let" name "=" expr "in" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
 pipeline    = stage { "|" stage } [ "&" ] ;
-stage       = lambda | external | application ;
+stage       = operand { OP operand } ;            (* resolved by fixity *)
+operand     = lambda | external | application ;
+name        = IDENT | "(" OP ")" ;
 application = postfix { slot } { postfix } ;
 external    = HEAD { ARG } ;
 
 block       = "do" statement { ";" statement } [ ";" ] "end" ;
-statement   = IDENT "<-" expr | IDENT "=" expr | expr ;
+statement   = IDENT "<-" expr | name "=" expr | expr ;
 with        = "with" postfix block ;
 
 slot        = "$" IDENT | STRING | "(" expr ")" | WORD ;
@@ -43,7 +45,7 @@ Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
 atom        = block | with | REF | literal | record | list | accessor | IDENT
-            | "(" expr ")" ;
+            | "(" expr ")" | "(" OP ")" | "(" OP stage ")" | "(" expr OP ")" ;
 literal     = INT | STRING | "true" | "false" | "(" ")" ;
 record      = "{" [ field { "," field } ] "}" ;
 field       = IDENT "=" expr ;
@@ -58,6 +60,9 @@ RESERVED    = "let" | "in" | "true" | "false" | "do" | "end" | "with" ;
 INT         = [ "+" | "-" ] DIGIT { DIGIT } ;
 STRING      = a Haskell string literal ;
 COMMENT     = "--" { any character except newline } ;
+OP          = OPCHAR { OPCHAR } - OPRESERVED ;
+OPCHAR      = ! % & * + - / < = > ? @ ^ | ~ : ;
+OPRESERVED  = "=" | "->" | "<-" | "|" | "&" | "::" | ":" | "--" { OPCHAR } ;
 
 HEAD        = WORD ;     (* a path, or a word that starts with an unbound name *)
 ARG         = "$" IDENT | STRING | WORD ;
@@ -83,6 +88,22 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
 - `postfix` goes to the left: `r.a.b` is `(r.a).b`.
 - `.a.b` means `r -> r.a.b`.
 - Inside `INT`, no space can follow the sign.
+- Operators bind looser than application and tighter than `|`, by the
+  fixity table below. Two operators of one precedence must agree on
+  associativity, and a non-associative one cannot chain: `a == b == c` is
+  an error, "cannot mix == and == without parentheses".
+- Minus is decided by spacing. `-` with a digit after it, after a space or
+  an opening bracket, is a negative `INT`: `f -1` is `f (-1)`. Otherwise it
+  subtracts: `x-1`, `x - 1`. In parentheses, `(-1)` is a number and `(- 1)`
+  the section `x -> x - 1`.
+- `(op e)` is a right section, `x -> x op e`, and `(e op)` a left section,
+  `op e`. `(op)` is the operator as a value.
+- An operator expression in parentheses whose leftmost operand is an
+  accessor is an accessor section: `(.size > 1)` is `r -> r.size > 1`.
+- Inside `external`, operator characters are ordinary word characters:
+  `git log -n 1` and `a+b` are words. `|`, `&` and `;` end a word, so
+  `make && y` is `&&` applied to `make` and `y`.
+- A lone `|` pipes and a lone `&` backgrounds; `||` and `&&` are operators.
 - `external` applies only when nothing binds the head. Bound names are the
   session names, lambda parameters and let names. The parser never reads `PATH`.
 - Inside `external`, only spaces separate words, and `--` is an ordinary word.
@@ -114,11 +135,18 @@ evaluator see:
 | `do a; c end` | bind an invented name to running `a`, then run `c` |
 | `use REF`, `useLocal REF` | `do o <- pkg REF; use o end` |
 | `with REF do … end` | `do o <- pkg REF; with o do … end end` |
+| `a op b` | `(op) a b` |
+| `(op e)` | `x -> (op) x e` |
+| `(e op)` | `(op) e` |
+| `(.a op e)` | `r -> r.a op e` |
 
 Everything else, including `|`, `with`, `&` and running a statement, has its
 own type rule in core, because what it means depends on types.
 
-`:core e` shows what `e` desugars to, without running it. Core has words of
+`:core e` shows what `e` desugars to, without running it. It writes an
+operator applied to two arguments infix, with parentheses around each
+operand that is itself an operator expression: `:core 1 + 2 * 3` is
+`1 + (2 * 3)`. Core has words of
 its own for the forms that only it has: `bind x <- e; rest`, `run e`, `bg e`
 and `with o e`.
 
@@ -139,8 +167,9 @@ The REPL parses one `line` at a time. `:t`, `:core`, `:elab`, `:q` and `:env` ar
 in this rule only. A line may span several input lines while a `do` is open.
 
 ```ebnf
-line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ IDENT "=" ] expr | ":env" [ NAME ] | command
-              | IDENT "=" expr | IDENT "<-" expr | expr ] EOF ;
+line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
+              | fixity | name "=" expr | name "<-" expr | expr ] EOF ;
+fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
 command     = "jobs" | "fg" [ JOB ] | "bg" [ JOB ] | "allow" | "deny" ;
 JOB         = [ "%" ] DIGIT { DIGIT } ;
 ```
@@ -168,3 +197,21 @@ See [structured streams](streams.md) for lists, line framing, filters and collec
 - A bare `cd` means `cd ~`, also under `:t`. The function is `x -> cd $x`.
 - `--` starts a comment in expression position, which is why flags such as
   `--local` are not syntax.
+- A `fixity` line sets how later lines parse its operators, for the rest of
+  the session. `infixl`, `infixr` and `infix` are not reserved: the line is a
+  fixity only with a digit and operators after the word.
+
+## Fixities
+
+Loosest first. An operator with no fixity is `infixl 9`.
+
+| Level | Operators | Associativity |
+| --- | --- | --- |
+| 1 | `>>>` `<<<` | right |
+| 2 | `\|\|` | right |
+| 3 | `&&` | right |
+| 4 | `==` `!=` `<` `<=` `>` `>=` | none |
+| 5 | `<>` | right |
+| 6 | `+` `-` | left |
+| 7 | `*` `/` `%` | left |
+| 9 | anything else | left |

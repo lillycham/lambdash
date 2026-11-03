@@ -233,7 +233,7 @@ tests =
       parseExpr "f x | g y | h" == Right (EPipe (EPipe (EApp (EVar "f") (EVar "x")) (EApp (EVar "g") (EVar "y"))) (EVar "h")))
   , ("parser: a quoted pipe stays in its word", pure $
       parseExprIn (BoundNames Set.empty) "printf \"a|b\"|cat" == Right (EPipe (ECmd "printf" [AWord "a|b"]) (ECmd "cat" [])))
-  , ("parser: incomplete pipes fail", pure $ all (either (const True) (const False) . parseExpr) ["x |", "| x", "x || y"])
+  , ("parser: incomplete pipes fail", pure $ all (either (const True) (const False) . parseExpr) ["x |", "| x", "x | | y"])
   , ("type: an external separates bytes and status", pure $ typed "echo hi" "Stream Bytes Bytes Status")
   , ("type: external stages connect", pure $ typed "echo hi | cat" "Stream Bytes Bytes Status")
   , ("type: pure stages map output items", pure $ typed "echo hi | byteLength" "Stream Bytes Int Status")

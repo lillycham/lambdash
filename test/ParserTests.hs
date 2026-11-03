@@ -134,7 +134,42 @@ tests =
   , ("ref: use of a string is not sugar", is "use \"x#y\"" (EApp (v "use") (ELit (LStr "x#y"))))
   , ("ref: with resolves first", is "with .#b do x end"
       (EBind "%1" (EApp (v "%pkg") (ELit (LStr ".#b"))) (ERun (EWith (v "%1") (ERun (v "x"))))))
+  , ("op: precedence", is "1 + 2 * 3" (op "+" (int 1) (op "*" (int 2) (int 3))))
+  , ("op: left associative", is "a - b - c" (op "-" (op "-" (v "a") (v "b")) (v "c")))
+  , ("op: right associative", is "a <> b <> c" (op "<>" (v "a") (op "<>" (v "b") (v "c"))))
+  , ("op: comparisons do not chain", bad "a == b == c" && bad "a < b > c")
+  , ("op: looser than application", is "f x + g y" (op "+" (EApp (v "f") (v "x")) (EApp (v "g") (v "y"))))
+  , ("op: tighter than a pipe", is "a + 1 | f" (EPipe (op "+" (v "a") (int 1)) (v "f")))
+  , ("op: || and && are operators", is "a || b && c" (op "||" (v "a") (op "&&" (v "b") (v "c"))))
+  , ("op: && is not a job", is "a && b" (op "&&" (v "a") (v "b")))
+  , ("op: a lambda is the last operand", is "f >>> x -> x" (op ">>>" (v "f") (ELam "x" (v "x"))))
+  , ("op: user operators are infixl 9", is "a <+> b <+> c * d" (op "*" (op "<+>" (op "<+>" (v "a") (v "b")) (v "c")) (v "d")))
+  , ("op: fixities come from the session",
+      runWith (Map.insert "<+>" (Fixity InfixR 1) defaultFixities) AllBound (stripLocations . desugar <$> (expr <* eof)) "a <+> b + c"
+        `matches` op "<+>" (v "a") (op "+" (v "b") (v "c")))
+  , ("op: reserved tokens are not operators", all (\t -> run operatorName t == Nothing) ["=", "->", "<-", "|", "&", "::", ":", "--", "-->"])
+  , ("op: operator characters", run operatorName "<+>" == Just "<+>" && run operatorName "!?@^~:" == Just "!?@^~:")
+  , ("minus: spaced or not, it subtracts", is "x-1" (op "-" (v "x") (int 1)) && is "x - 1" (op "-" (v "x") (int 1)))
+  , ("minus: after a space, before a digit, a literal", is "f -1" (EApp (v "f") (int (-1))))
+  , ("minus: in parentheses", is "(-1)" (int (-1)))
+  , ("section: (- 1) subtracts one", is "(- 1)" (ELam "%1" (op "-" (v "%1") (int 1))))
+  , ("section: right", is "(== 1)" (ELam "%1" (op "==" (v "%1") (int 1))))
+  , ("section: left", is "(1 <)" (EApp (v "<") (int 1)) && is "(1 - )" (EApp (v "-") (int 1)))
+  , ("section: an operator as a value", is "(+)" (v "+") && is "f (<>) x" (EApp (EApp (v "f") (v "<>")) (v "x")))
+  , ("section: accessor", is "(.size > 1)" (ELam "%1" (op ">" (ESelect (v "%1") "size") (int 1))))
+  , ("section: a nested accessor", is "(.a.b == 2 && x)" (ELam "%1" (op "&&" (op "==" (ESelect (ESelect (v "%1") "a") "b") (int 2)) (v "x"))))
+  , ("op: let binds an operator", is "let (<+>) = f in 1 <+> 2" (ELet "<+>" (v "f") (op "<+>" (int 1) (int 2))))
+  , ("op: a block binds an operator", is "do (%%) = f; x %% y end" (ELet "%%" (v "f") (ERun (op "%%" (v "x") (v "y")))))
+  , ("op: externals keep operator characters", parseExprIn (BoundNames Set.empty) "git log -n 1 a+b" == Right (ECmd "git" (map AWord ["log", "-n", "1", "a+b"])))
+  , ("op: an external ends at &&", parseExprIn (BoundNames (Set.fromList ["y"])) "make && y" == Right (op "&&" (ECmd "make" []) (v "y")))
   ]
+
+op :: Name -> Expr -> Expr -> Expr
+op name l r = EApp (EApp (v name) l) r
+
+matches :: Either e Expr -> Expr -> Bool
+matches (Right e) expected = e == expected
+matches (Left _) _ = False
 
 runTest :: (String, Bool) -> IO Bool
 runTest (name, result) = do

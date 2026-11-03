@@ -59,11 +59,28 @@ go (Surface location node) = ELoc location <$> case node of
     pure (EBind overlay (resolve ref) (ERun (EWith (EVar overlay) inner)))
   SWith overlay body -> EWith <$> go overlay <*> go body
   SBg e -> EBg <$> go e
+  SOp op left right -> (\l r -> EApp (EApp (EVar op) l) r) <$> go left <*> go right
+  SRightSection op operand -> do
+    x <- fresh
+    e <- go operand
+    pure (ELam x (EApp (EApp (EVar op) (EVar x)) e))
+  SLeftSection operand op -> EApp (EVar op) <$> go operand
+  SAccessorSection body -> do
+    record <- fresh
+    ELam record <$> go (replaceLeftmost record body)
   SUseRef headName ref -> do
     overlay <- fresh
     pure (EBind overlay (resolve ref) (ERun (EApp (EVar (builtinAlias headName)) (EVar overlay))))
  where
   resolve ref = EApp (EVar (builtinAlias "pkg")) (ELit (LStr ref))
+
+-- | Replace the leftmost operand of an operator expression, an accessor,
+-- with a selection from the named record: .size > 1 becomes r.size > 1.
+replaceLeftmost :: Name -> Surface -> Surface
+replaceLeftmost record (Surface location node) = Surface location $ case node of
+  SOp op left right -> SOp op (replaceLeftmost record left) right
+  SAccessor labels -> foldl (\inner label -> SSelect (Surface location inner) label) (SVar record) labels
+  other -> other
 
 -- | A block is a chain of binds that ends in a run. The parser guarantees a
 -- last statement that is an expression.
@@ -111,13 +128,20 @@ renderCore = render 0
   render :: Int -> Expr -> String
   render level expression = case expression of
     ELoc _ e -> render level e
-    -- A dictionary's name has spaces in it, so it is bracketed.
-    EVar name -> if ' ' `elem` name then "(" <> name <> ")" else name
+    -- A dictionary's name has spaces in it, and an operator is a name only
+    -- in parentheses, so both are bracketed.
+    EVar name -> if ' ' `elem` name || isOperator name then "(" <> name <> ")" else name
     ELit lit -> literal lit
     ELam _ _ ->
       let (names, body) = lambdas expression
       in parens (level > 0) (unwords names <> " -> " <> render 0 body)
-    EApp f x -> parens (level > 2) (render 2 f <> " " <> render 3 x)
+    -- An operator with exactly two arguments reads infix. With more, as
+    -- after elaboration gives it a dictionary, it reads as a function.
+    EApp _ _ | (op, [l, r]) <- spine expression, Just name <- operator op ->
+      parens (level > 1) (render 2 l <> " " <> name <> " " <> render 2 r)
+    EApp _ _ ->
+      let (f, args) = spine expression
+      in parens (level > 2) (unwords (render 2 f : map (render 3) args))
     EPipe a b -> parens (level > 1) (render 1 a <> " | " <> render 2 b)
     ELet name bound body -> parens (level > 0) ("let " <> name <> " = " <> render 0 bound <> " in " <> render 0 body)
     ECmd name args -> parens (level > 2) (unwords (name : map argument args))
@@ -128,6 +152,13 @@ renderCore = render 0
     ERun e -> parens (level > 2) ("run " <> render 3 e)
     EWith overlay body -> parens (level > 2) ("with " <> render 3 overlay <> " " <> render 3 body)
     EBg e -> parens (level > 2) ("bg " <> render 3 e)
+  spine (ELoc _ e) = spine e
+  spine (EApp f x) = let (h, args) = spine f in (h, args <> [x])
+  spine e = (e, [])
+  operator (ELoc _ e) = operator e
+  operator (EVar name) | isOperator name = Just name
+  operator _ = Nothing
+  isOperator name = not (null name) && all (`elem` ("!%&*+-/<=>?@^|~:" :: String)) name
   lambdas (ELoc _ e) = lambdas e
   lambdas (ELam name body) = let (names, inner) = lambdas body in (name : names, inner)
   lambdas e = ([], e)

@@ -1,7 +1,8 @@
 # Classes, equality and operators: design
 
 This records the design decided with Lilly on 2026-11-04, so that it can be
-built in slices. Slices 1, 2a and 2b are built: see [classes](classes.md).
+built in slices. Slices 1, 2a, 2b and 3 are built: see [classes](classes.md)
+and [the grammar](grammar.md).
 
 ## Decisions
 
@@ -45,7 +46,7 @@ application, so `ls | filter (.size > 1mb) | sort .name` reads as expected.
 - `$` stays out of expression syntax: it is the variable sigil in external
   arguments.
 
-Proposed, not yet confirmed:
+Confirmed with slice 3:
 
 - **Operator characters**: `! % & * + - / < = > ? @ ^ | ~ :`. Not `#`
   (flake references), `$` (variables) or `.` (select). Reserved: `=`, `->`,
@@ -74,8 +75,8 @@ Proposed, not yet confirmed:
 
 ## Still to decide
 
-1. **Defaulting for `Num`**: `Eq` and `Ord` default an ambiguous unknown to
-   `()`, as GHCi does. `Num` would default to `Int`.
+1. ~~Defaulting for `Num`~~: decided. An ambiguous unknown takes the first of
+   `()` and `Int` that has every class on it, so `Num` defaults to `Int`.
 2. **Declaration syntax** for `class` and `instance`, at the prompt and in a
    startup file, and what redeclaring one in a session means.
 3. **Coherence**: overlapping instances, and instances that a later line
@@ -94,6 +95,7 @@ Proposed, not yet confirmed:
    records, with `EqRow r` written `Eq { | r}`, and row evidence: a record's
    dictionary carries its fields' dictionaries.
 3. The operator table, minus by spacing, sections and accessor sections,
-   user operators and fixity lines.
-4. `Num` and literal defaulting, `Show`, `Semigroup`, and class and
-   instance declarations at the prompt.
+   user operators and fixity lines. **Done**, with `Num`, `Integral` and
+   `Semigroup`, and literals as `Num a => a` under the monomorphism
+   restriction, brought forward from slice 4.
+4. `Show`, and class and instance declarations at the prompt.

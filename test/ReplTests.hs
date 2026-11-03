@@ -403,6 +403,21 @@ tests =
   , (":env: a variable and its layers", final [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", ":env LSH_A"] == "LSH_A = \"2\"\n  base  unset\n  dev  set \"LSH_A\" \"1\"\n  b  set \"LSH_A\" \"2\"")
   , (":env: an unset variable", final [":env LSH_NOPE"] == "LSH_NOPE is unset\n  base  unset")
   , (":env: a prepend shows the base", ("/lsh-x:" `isInfixOf`) (final ["use (overlay \"p\" [prepend \"PATH\" \"/lsh-x\"])", ":env PATH"]))
+  , ("op: arithmetic", final ["1 + 2 * 3 - 4 / 2"] == "5")
+  , ("op: comparisons and logic", final ["1 < 2 && 2 <= 2 || false"] == "true")
+  , ("op: a chained comparison is an error", ("cannot mix == and ==" `isInfixOf`) (final ["1 == 2 == 3"]))
+  , ("op: <>", final ["\"ab\" <> \"cd\""] == "\"abcd\"" && final ["[1] <> [2, 3]"] == "[1, 2, 3]")
+  , ("op: minus by spacing", session ["x = 10", "x-1", "x - 1", "(- 1) x", "(x -) 1"] == ["x : Int", "9", "9", "9", "9"])
+  , ("op: composition", final ["f = (+ 1) >>> (* 2)", "f 3"] == "8" && final ["((+ 1) <<< (* 2)) 3"] == "7")
+  , ("op: an accessor section", final ["each [{size = 1}, {size = 3}] | filter (.size > 1) | collect"] == "{items = [{size = 3}], status = (), statuses = []}")
+  , ("op: the type of a section", ty "(== 1)" "(Eq a, Num a) => a -> Bool")
+  , ("op: define an operator", session ["(<+>) = a b -> a * 10 + b", "1 <+> 2"] == ["(<+>) : Num a => a -> a -> a", "12"])
+  , ("op: a user operator is infixl 9", final ["(<+>) = a b -> a * 10 + b", "1 <+> 2 + 3"] == "15")
+  , ("op: a fixity line lasts for the session", session ["(<+>) = a b -> a * 10 + b", "infixl 6 <+>", "1 <+> 2 + 3", "1 <+> 2 * 3"] == ["(<+>) : Num a => a -> a -> a", "", "15", "16"])
+  , ("op: a non-associative fixity", ("cannot mix ~= and ~=" `isInfixOf`) (final ["(~=) = eq", "infix 4 ~=", "1 ~= 2 ~= 3"]))
+  , ("op: infix is still a name", final ["infix = x -> x", "infix 3"] == "3")
+  , (":core: operators read infix", session [":core 1 + 2 * 3", ":core (.size > 1)", ":core (+)"] == ["1 + (2 * 3)", "%1 -> %1.size > 1", "(+)"])
+  , (":elab: an operator with its dictionary reads as a function", ("(+) %d" `isInfixOf`) (final [":elab 1 + 2"]))
   ]
  where
   withLine = "o = overlay \"o\" [set \"LSH_W\" \"inside\"]"

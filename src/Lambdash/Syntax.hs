@@ -75,6 +75,15 @@ data Node
     SBg Surface
   | -- | @use REF@ or @useLocal REF@, while the head is still the builtin.
     SUseRef Name String
+  | -- | @a op b@, after precedence.
+    SOp Name Surface Surface
+  | -- | @(op e)@, a right section: @x -> x op e@.
+    SRightSection Name Surface
+  | -- | @(e op)@, a left section: @x -> e op x@.
+    SLeftSection Surface Name
+  | -- | @(.size > 1)@: an operator expression whose leftmost operand is an
+    -- accessor is a function of the record.
+    SAccessorSection Surface
   deriving (Eq, Show)
 
 data Statement

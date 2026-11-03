@@ -14,8 +14,20 @@ f : Eq a => a -> Bool
 no instance: Eq (a -> a)
 ```
 
-There are no operators yet: comparisons are functions. `==`, `<` and the rest
-come with the operator table, as sugar for these.
+Operators are ordinary functions with symbol names: `a == b` is `(==) a b`,
+and `(==)` is `eq`. See [the grammar](grammar.md) for precedence, minus and
+sections.
+
+```text
+λ> 1 + 2 * 3 == 7 && "a" < "b"
+true
+λ> each files | filter (.size > 1000) | sortOn .name
+λ> (<+>) = a b -> a * 10 + b
+(<+>) : Num a => a -> a -> a
+λ> infixl 6 <+>
+λ> 1 <+> 2 * 3
+16
+```
 
 ## Methods
 
@@ -26,6 +38,13 @@ come with the operator table, as sugar for these.
 | `min`, `max` | `Ord a => a -> a -> a` |
 | `sort` | `Ord a => [a] -> [a]` |
 | `sortOn` | `Ord b => (a -> b) -> [a] -> [a]`, stable |
+| `==` `!=` | `eq`, `ne` |
+| `<` `<=` `>` `>=` | `lt`, `le`, `gt`, `ge` |
+| `+` `-` `*`, `negate` | `Num a => a -> a -> a` |
+| `/` `%`, `div` `mod` | `Integral a => a -> a -> a` |
+| `<>` | `Semigroup a => a -> a -> a` |
+| `&&` `\|\|` | `Bool -> Bool -> Bool`, lazy on the right |
+| `>>>` `<<<` | composition: `f >>> g` is `x -> g (f x)` |
 
 ```text
 λ> sort [[2], [1, 5], [1]]
@@ -39,6 +58,8 @@ come with the operator table, as sugar for these.
 | --- | --- |
 | `Eq` | `Int`, `Bool`, `String`, `()`, `Status`, `Bytes`, `Patch`, `Overlay`, `[a]` when `Eq a`, and records when every field is `Eq` |
 | `Ord` | `Int`, `Bool`, `String`, `()`, and `[a]` when `Ord a`, lexicographic |
+| `Num`, `Integral` | `Int`. `Integral` provides `Num` |
+| `Semigroup` | `String`, `Bytes`, `[a]`, and `Overlay`: `dev <> bench` is one overlay whose later patches win |
 
 `Ord a` provides `Eq a`, so a function that uses both shows only `Ord a`.
 Functions, computations, streams, stages, collectors and jobs have no `Eq`.
@@ -79,6 +100,9 @@ An ambiguous row defaults to the empty row.
 - A line that runs needs a concrete instance for each predicate. An unknown
   that a predicate mentions and nothing chooses is ambiguous, and defaults to
   `()`, as in GHCi: `eq [] []` is `true`.
+- An integer literal is `Num a => a`, so `1` works at any `Num` type. A
+  binding that is not a function keeps one type (the monomorphism
+  restriction): `x = 1` is `x : Int`, by defaulting `Num` to `Int`.
 - A rebound method is an ordinary function: after `eq = x -> x`, `eq 1` is `1`.
 
 ## How it works
