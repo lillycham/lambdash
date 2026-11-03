@@ -47,7 +47,8 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, satisfy, try)
+import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, try)
+import Text.Megaparsec.Char (char)
 import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
 
@@ -124,6 +125,9 @@ data Command
     TypeOf Expr
   | -- | @:core expr@: what the expression desugars to. Nothing runs.
     ShowCore Expr
+  | -- | @:elab expr@: the code a line would run, with its dictionaries.
+    -- @:elab x = expr@: the code a binding would hold. Nothing runs.
+    ShowElab (Maybe Name) Expr
   | -- | @:env@ lists the active environments and their patches. @:env NAME@
     -- shows a variable, and each layer that touched it.
     ShowEnv (Maybe String)
@@ -156,6 +160,7 @@ command =
   <|> (Exit <$ lexeme (keyword ":q"))
   <|> (TypeOf <$> (lexeme (keyword ":t") *> core))
   <|> (ShowCore <$> (lexeme (keyword ":core") *> core))
+  <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (lexeme identifier <* symbol "=" <* notFollowedBy (char '='))) <*> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> core)
   <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> core)
@@ -685,6 +690,10 @@ stepLine session input =
           continueJob False job
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
     Right (ShowCore expression) -> pure (Continue session (renderCore expression))
+    Right (ShowElab named expression) ->
+      let mode = maybe Defaulting (const Generalising) named
+      in checked (elaborateIn mode types expression) $ \(_, code) ->
+        pure (Continue session (maybe "" (<> " = ") named <> renderCore code))
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do

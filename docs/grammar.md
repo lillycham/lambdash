@@ -135,11 +135,11 @@ aliases of the same kind, `%pkg`, `%use` and `%useLocal`.
 
 ## REPL lines
 
-The REPL parses one `line` at a time. `:t`, `:core`, `:q` and `:env` are reserved words
+The REPL parses one `line` at a time. `:t`, `:core`, `:elab`, `:q` and `:env` are reserved words
 in this rule only. A line may span several input lines while a `do` is open.
 
 ```ebnf
-line        = [ ":q" | ":t" expr | ":core" expr | ":env" [ NAME ] | command
+line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ IDENT "=" ] expr | ":env" [ NAME ] | command
               | IDENT "=" expr | IDENT "<-" expr | expr ] EOF ;
 command     = "jobs" | "fg" [ JOB ] | "bg" [ JOB ] | "allow" | "deny" ;
 JOB         = [ "%" ] DIGIT { DIGIT } ;

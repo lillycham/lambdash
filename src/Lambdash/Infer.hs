@@ -473,7 +473,8 @@ generaliseBinding env s1 t1 e1 = do
       deferred = filter (not . ownedBy) residual
       (context, reduced) = reduceContext mine
       scheme = Forall bound (if null context then qualified else TClass (map snd context) qualified)
-  pure (scheme, foldr ELam (wrapLets (bindings <> reduced) e1) (map fst context), deferred)
+  -- Reduced evidence comes first: an instance's dictionary can refer to it.
+  pure (scheme, foldr ELam (wrapLets (reduced <> bindings) e1) (map fst context), deferred)
 
 -- | Resolve predicates on constructed types from instances, and keep the
 -- ones on unknowns. A resolved predicate's evidence is the instance's
@@ -541,7 +542,9 @@ resolveClasses mode solved ty code = do
       (context, reduced) = reduceContext (filter keeps residual)
       ambiguous = filter (not . keeps) residual
   defaulted <- defaultPreds ambiguous
-  let lets = wrapLets (bindings <> defaulted <> reduced) code
+  -- Defaulted and reduced evidence comes first: an instance's dictionary,
+  -- such as Eq [a]'s, can refer to the evidence for its argument.
+  let lets = wrapLets (defaulted <> reduced <> bindings) code
       shown = if null context then ty else TClass (map snd context) ty
   pure (shown, foldr ELam lets (map fst context))
 

@@ -101,6 +101,9 @@ stripLocations expression = case expression of
 -- > run e                       run a stream or a computation
 -- > bg e                        start e as a job
 -- > with o e                    run e with one more layer
+--
+-- Elaborated core also has dictionaries, @%instance Eq Int@, and evidence,
+-- @%d12@.
 renderCore :: Expr -> String
 renderCore = render 0
  where
@@ -108,7 +111,8 @@ renderCore = render 0
   render :: Int -> Expr -> String
   render level expression = case expression of
     ELoc _ e -> render level e
-    EVar name -> name
+    -- A dictionary's name has spaces in it, so it is bracketed.
+    EVar name -> if ' ' `elem` name then "(" <> name <> ")" else name
     ELit lit -> literal lit
     ELam _ _ ->
       let (names, body) = lambdas expression

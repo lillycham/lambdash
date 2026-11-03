@@ -69,6 +69,17 @@ elaborates each line:
 
 Dictionaries and evidence have names no identifier can spell
 (`%instance Eq Int`, `%d12`), so they capture nothing. `:core` shows a line
-before elaboration. Classes and instances are tables in `Lambdash.Classes`,
-so that declarations at the prompt can extend them later. See
+before elaboration, and `:elab` after it: `:elab e` is the code a line would
+run, and `:elab x = e` the code a binding would hold.
+
+```text
+λ> :elab eq [1] [2]
+let %d10 = (%instance Eq Int) in let %d5 = (%instance Eq List) %d10 in eq %d5 [1] [2]
+λ> :elab f = x -> eq x x
+f = %d6 x -> eq %d6 x x
+λ> :elab p = x -> {a = eq x x, b = lt x x}
+p = %d10 -> let %d6 = %d10.%Eq in x -> {a = eq %d6 x x, b = lt %d10 x x}
+```
+
+Classes and instances are tables in `Lambdash.Classes`, so that declarations at the prompt can extend them later. See
 [the design](equality.md).
