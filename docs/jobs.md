@@ -85,5 +85,3 @@ orphaned. A running job keeps running.
 
 - `&` to start a line in the background.
 - Notices wait for the next prompt. They do not interrupt a line being typed.
-- `pipefail`. A pipeline's status is its last external's status. How the
-  other statuses should appear is an open question in the plan.
