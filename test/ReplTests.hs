@@ -3,7 +3,7 @@
 module Main (main) where
 
 import Control.Exception (SomeException, evaluate, try)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Data.List (isInfixOf)
 import Data.Set qualified as Set
 import Lambdash.Infer
@@ -11,10 +11,10 @@ import Lambdash.Parser (Bound (..))
 import Lambdash.Repl
 import Lambdash.Unify
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.Directory (getCurrentDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Exit (exitFailure)
 import System.IO (hClose, hFlush, openTempFile, stdout)
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, setEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
 
@@ -235,7 +235,7 @@ tests =
   , ("env: a failed unuse changes nothing", promptAfter [devLine, "use dev", "unuse \"nope\""] == "λ [dev]> ")
   , ("env: <- commits too", promptAfter [devLine, "u <- use dev"] == "λ [dev]> ")
   , ("env: a later overlay wins", fst (prints [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "printenv LSH_A"]) == "2\n")
-  , ("env: shadowing warns once", session [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "print 1"] == ["dev : Overlay", "", "warning: b shadows LSH_A from dev", ""])
+  , ("env: shadowing warns once", session [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "pure ()"] == ["dev : Overlay", "", "warning: b shadows LSH_A from dev", ""])
   , ("env: shadowing shows in the prompt", promptAfter [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])"] == "λ [dev b ⚠ LSH_A]> ")
   , ("env: the same value does not warn", session [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"1\"])"] == ["dev : Overlay", "", ""])
   , ("env: unuse clears the flag", promptAfter [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "unuse \"b\""] == "λ [dev]> ")
@@ -266,7 +266,7 @@ tests =
   , ("do: newlines between statements", fst (prints ["do print 1;\n print 2 end"]) == "1\n2\n")
   , ("with: the layer reaches the body", fst (prints [withLine, "with o do printenv LSH_W end"]) == "inside\n")
   , ("with: only for the block", fst (prints [withLine, "with o do print 1 end", "printenv LSH_W"]) == "1\n")
-  , ("with: the prompt does not change", promptAfter [withLine, "with o do print 1 end"] == "λ> ")
+  , ("with: the prompt does not change", promptAfter [withLine, "with o do pure 1 end"] == "λ> ")
   , ("with: it wins over the session", fst (prints [withLine, "use (overlay \"s\" [set \"LSH_W\" \"session\"])", "with o do printenv LSH_W end", "printenv LSH_W"]) == "inside\nsession\n")
   , ("with: it discharges the commands it can see", ty "with (overlay \"o\" []) do ffmpeg-xyz end" "Comp Status")
   , ("with: so a missing command is found at spawn", final ["with (overlay \"o\" []) do nope-xyz end"] == "command not found: nope-xyz")
@@ -327,6 +327,14 @@ runTest (name, result) = do
 
 main :: IO ()
 main = do
+  -- Tests must not read or write the user's approvals: an approved flake in
+  -- the directory the tests start in would otherwise activate, hook and all.
+  temporary <- getTemporaryDirectory
+  let scratch = temporary <> "/lambdash-repl-tests"
+  exists <- doesDirectoryExist scratch
+  when exists (removeDirectoryRecursive scratch)
+  createDirectoryIfMissing True scratch
+  setEnv "XDG_STATE_HOME" scratch
   results <- mapM runTest tests
   putStrLn (show (length (filter id results)) <> "/" <> show (length results) <> " passed")
   unless (and results) exitFailure
