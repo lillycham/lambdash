@@ -32,8 +32,10 @@ output. In external argument position a word stays a word, so
 ```
 
 A bare reference after `use` or `with` means `pkg`, as in the plan. To use a
-devshell, resolve it with `dev` first. The sugar is a `do` block that names
-the builtins `use` and `pkg`, so it follows a rebinding of either.
+devshell, resolve it with `dev` first. The sugar is a `do` block that refers
+to the builtins themselves, so rebinding `pkg` does not change it. It applies
+only while `use` is still the builtin: a rebound `use` is an ordinary
+function, and `use nixpkgs#jq` then applies it to the string.
 
 The two differ because `nix shell` and `nix develop` differ. `pkg ".#"` is
 `packages.default`. `dev ".#"` is `devShells.default`, and falls back to the

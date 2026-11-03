@@ -7,7 +7,7 @@ module Lambdash.Infer
   , Lit (..)
   , Arg (..)
   , Expr (..)
-  , Stmt (..)
+  , Span (..)
   , commands
   , Scheme (..)
   , mono
@@ -38,27 +38,9 @@ import Control.Monad (foldM)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
+import Lambdash.Syntax (Arg (..), Lit (..), Name, Span (..))
 import Lambdash.Unify
 import qualified Data.Set as Set
-
-type Name = String
-
-data Lit
-  = LInt Int
-  | LBool Bool
-  | LUnit
-  | LStr String
-  | -- | A bare flake reference, such as @nixpkgs#ffmpeg@. It is a String.
-    LRef String
-  deriving (Eq, Show)
-
--- | One argument of an external command.
-data Arg
-  = -- | A bareword or a string literal.
-    AWord String
-  | -- | @$x@.
-    AVar Name
-  deriving (Eq, Show)
 
 data Expr
   = EVar Name
@@ -76,24 +58,19 @@ data Expr
   | EList [Expr]
   | -- | @r.name@.
     ESelect Expr Label
-  | -- | @do s; s; e end@: run each statement in order. The value is the last
-    -- statement's result.
-    EDo [Stmt]
+  | -- | Run the first, name its result, then the computation that follows.
+    -- A block desugars to these: @x <- e; rest@ is @EBind x e rest@.
+    EBind Name Expr Expr
+  | -- | Run a computation or a stream, as a block statement or at the prompt
+    -- does: a stream reads the terminal and gives its return value.
+    ERun Expr
+  | -- | Where an expression came from. It means the expression.
+    ELoc Span Expr
   | -- | @with overlay do ... end@: run the block with one more environment
     -- layer, for its dynamic extent only.
     EWith Expr Expr
   | -- | @e &@: start @e@ as a background job, and give its handle.
     EBg Expr
-  deriving (Eq, Show)
-
--- | One statement of a @do@ block.
-data Stmt
-  = -- | @x <- e@: run @e@ and name its result for the statements after it.
-    SBind Name Expr
-  | -- | @x = e@: name a value. Nothing runs.
-    SLet Name Expr
-  | -- | @e@: run it. Its result is dropped, unless it is the last statement.
-    SRun Expr
   deriving (Eq, Show)
 
 -- | A type that holds for every choice of the listed unknowns.
@@ -387,10 +364,24 @@ infer env (ESelect expr label) = do
   fieldSub <- unifying (unify recordTy requiredTy)
   pure (fieldSub `compose` exprSub, apply fieldSub fieldTy)
 
-infer env (EDo stmts) = do
-  (sub, effects, result) <- inferStmts env stmts
-  let row = foldr (unionEffects . applyEffects sub) noEffects effects
-  pure (sub, TComp row (apply sub result))
+-- A location changes nothing about the type.
+infer env (ELoc _ e) = infer env e
+
+-- Run the first, then the rest, with the union of their rows. Like a lambda
+-- parameter, a bound result has one type in what follows.
+infer env (EBind name e body) = do
+  (s1, eff, value) <- inferRun env e
+  let env' = Map.insert name (mono value) (applyEnv s1 env)
+  (s2, bodyTy) <- infer env' body
+  rest <- unifying (effectVar <$> freshVar)
+  result <- fresh
+  s3 <- unifying (unify bodyTy (TComp rest result))
+  let sub = s3 `compose` s2 `compose` s1
+  pure (sub, TComp (unionEffects (applyEffects sub eff) (applyEffects sub rest)) (apply sub result))
+
+infer env (ERun e) = do
+  (s, eff, result) <- inferRun env e
+  pure (s, TComp eff result)
 
 -- The checker drops the exec labels it can see in the body: the body runs
 -- with the overlay, so the session's PATH says nothing about them. Each
@@ -421,35 +412,9 @@ infer env (EBg e) = do
   (s, eff, result) <- inferRun env e
   pure (s, TComp eff (TJob eff result))
 
--- | The statements of a block: what they taught, each one's effect row, and
--- the last one's result. A run statement is a computation or a stream. A
--- stream reads the terminal, so its input is Bytes, and its result is its
+-- | What running an expression requires and gives. A computation gives its
+-- result. A stream reads the terminal, so its input is Bytes, and gives its
 -- return value, as at the prompt.
-inferStmts :: Env -> [Stmt] -> Infer (Subst, [EffRow], Ty)
-inferStmts _ [] = pure (emptySubst, [], TUnit)
-inferStmts env [SRun e] = do
-  (s, eff, result) <- inferRun env e
-  pure (s, [eff], result)
-inferStmts env (stmt : rest) = case stmt of
-  SRun e -> do
-    (s1, eff, _) <- inferRun env e
-    (s2, effs, result) <- inferStmts (applyEnv s1 env) rest
-    pure (s2 `compose` s1, eff : effs, result)
-  SBind name e -> do
-    (s1, eff, value) <- inferRun env e
-    -- Like a lambda parameter, a bound result has one type in the block.
-    let env' = Map.insert name (mono value) (applyEnv s1 env)
-    (s2, effs, result) <- inferStmts env' rest
-    pure (s2 `compose` s1, eff : effs, result)
-  SLet name e -> do
-    (raw, t1) <- infer env e
-    s1 <- checkedConstraints raw
-    let env' = applyEnv s1 env
-        sc = generalise env' (qualify (effectConstraints s1) (apply s1 t1))
-        escaped = connectedConstraints (ftvEnv env') (effectConstraints s1)
-    (s2, effs, result) <- inferStmts (Map.insert name sc env') rest
-    pure (s2 `compose` s1 {effectConstraints = escaped}, effs, result)
-
 inferRun :: Env -> Expr -> Infer (Subst, EffRow, Ty)
 inferRun env e = do
   (s1, t) <- infer env e
@@ -474,11 +439,9 @@ commands (ELet _ bound body) = commands bound <> commands body
 commands (ERecord fields) = concatMap (commands . snd) fields
 commands (EList items) = concatMap commands items
 commands (ESelect record _) = commands record
-commands (EDo stmts) = concatMap stmtCommands stmts
- where
-  stmtCommands (SBind _ e) = commands e
-  stmtCommands (SLet _ e) = commands e
-  stmtCommands (SRun e) = commands e
+commands (EBind _ e body) = commands e <> commands body
+commands (ERun e) = commands e
+commands (ELoc _ e) = commands e
 commands (EWith overlay body) = commands overlay <> commands body
 commands (EBg e) = commands e
 commands _ = []

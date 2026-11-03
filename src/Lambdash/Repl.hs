@@ -33,6 +33,7 @@ import Data.Char (isDigit)
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
+import Lambdash.Desugar (desugar)
 import Lambdash.Parser
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Control.Monad (when)
@@ -151,11 +152,14 @@ command :: Parser Command
 command =
       (Blank <$ eof)
   <|> (Exit <$ lexeme (keyword ":q"))
-  <|> (TypeOf <$> (lexeme (keyword ":t") *> expr))
+  <|> (TypeOf <$> (lexeme (keyword ":t") *> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
-  <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> expr)
-  <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> expr)
-  <|> (Run <$> expr)
+  <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> core)
+  <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> core)
+  <|> (Run <$> core)
+ where
+  -- The checker sees core, with the spans kept for its messages.
+  core = desugar <$> expr
 
 -- A variable name is any run of characters up to a space.
 optionalName :: Parser (Maybe String)

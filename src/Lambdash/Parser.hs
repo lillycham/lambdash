@@ -13,8 +13,11 @@
 -- > with o do e end              a block with one more environment layer
 -- > sleep 10 &                   a background job; gives its handle
 -- > nixpkgs#ffmpeg  .#dev        a flake reference: a String
--- > use nixpkgs#ffmpeg           means do o <- pkg "nixpkgs#ffmpeg"; use o end
--- > with .#bench do e end        means do o <- pkg ".#bench"; with o do e end end
+-- > use nixpkgs#ffmpeg           sugar for do o <- pkg "nixpkgs#ffmpeg"; use o end
+-- > with .#bench do e end        sugar for do o <- pkg ".#bench"; with o do e end end
+--
+-- The parser builds surface syntax with spans. "Lambdash.Desugar" turns it
+-- into core.
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
@@ -39,6 +42,7 @@ module Lambdash.Parser
     doBlock,
     expr,
     parseExpr,
+    parseSurfaceIn,
   )
 where
 
@@ -49,7 +53,9 @@ import Data.Char (isAlphaNum, isSpace)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Void (Void)
-import Lambdash.Infer (Arg (..), Expr (..), Lit (..), Name, Stmt (..))
+import Lambdash.Desugar (desugar, stripLocations)
+import Lambdash.Infer (Expr)
+import Lambdash.Syntax
 import Text.Megaparsec
 import Text.Megaparsec.Char (alphaNumChar, char, hspace, letterChar, space1, string)
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -93,6 +99,20 @@ withComma active = local (\context -> context {commaDelimiter = active})
 -- | Run a parser, given what is bound.
 runIn :: Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
 runIn bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False False)
+
+-- | Give a node the span of the text it was parsed from.
+spanned :: Parser Node -> Parser Surface
+spanned p = do
+  start <- getOffset
+  node <- p
+  end <- getOffset
+  pure (Surface (Span start end) node)
+
+-- | A node built from an earlier one: from its start to here.
+extend :: Surface -> Node -> Parser Surface
+extend (Surface (Span start _) _) node = do
+  end <- getOffset
+  pure (Surface (Span start end) node)
 
 -- | Skip spaces and comments.
 sc :: Parser ()
@@ -152,18 +172,14 @@ literal =
 
 -- | @{a = 1, b = 2}@, and @{}@. A later field with the same name is an ordinary
 -- field: the checker decides what that means.
-record :: Parser Expr
-record = ERecord <$> between (symbol "{") (char '}') (field `sepBy` symbol ",")
+record :: Parser Surface
+record = spanned (SRecord <$> between (symbol "{") (char '}') (field `sepBy` symbol ","))
   where
     field = (,) <$> lexeme identifier <*> (symbol "=" *> withComma True expr)
 
--- | @.a.b@ means @\\r -> r.a.b@. Use the name @r@, which cannot capture anything,
--- because the body mentions nothing else.
-accessor :: Parser Expr
-accessor = do
-  labels <- some (char '.' *> identifier)
-  let body = foldl ESelect (EVar "r") labels
-  pure (ELam "r" body)
+-- | @.a.b@ means @\\r -> r.a.b@.
+accessor :: Parser Surface
+accessor = spanned (SAccessor <$> some (char '.' *> identifier))
 
 -- | A bare flake reference: a word with a @#@, such as @nixpkgs#ffmpeg@, @.#@,
 -- @./path#dev@ or @github:owner/repo#x@. Nothing else in an expression uses
@@ -176,17 +192,17 @@ flakeRef = try $ do
   refChar c = isAlphaNum c || c `elem` ("._-/:~+@?=&#%" :: String)
 
 -- | One thing that needs no parentheses. It does not skip trailing space.
-atom :: Parser Expr
+atom :: Parser Surface
 atom =
   doBlock
     <|> withBlock
-    <|> (ELit . LRef <$> flakeRef)
-    <|> (ELit <$> literal)
+    <|> spanned (SLit . LRef <$> flakeRef)
+    <|> spanned (SLit <$> literal)
     <|> record
-    <|> (EList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
+    <|> spanned (SList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
     <|> accessor
-    <|> (EVar <$> identifier)
-    <|> (ELit LUnit <$ try (symbol "(" *> char ')'))
+    <|> spanned (SVar <$> identifier)
+    <|> spanned (SLit LUnit <$ try (symbol "(" *> char ')'))
     <|> between (symbol "(") (char ')') (withComma False expr)
 
 -- | An atom, then any number of @.label@, then skip what follows.
@@ -194,12 +210,16 @@ atom =
 -- This is why 'atom' leaves trailing space alone: @r.a@ selects, but in @f .a@
 -- the space means that @.a@ is an argument. If 'atom' ate the space, the two
 -- would look the same here.
-postfix :: Parser Expr
+postfix :: Parser Surface
 postfix = do
   e <- atom
-  labels <- many (char '.' *> identifier)
+  selected <- selects e
   sc
-  pure (foldl ESelect e labels)
+  pure selected
+ where
+  selects e = option e $ do
+    field <- char '.' *> identifier
+    extend e (SSelect e field) >>= selects
 
 -- | One or more 'postfix', applied to the left: @f x y@ is @(f x) y@.
 -- | A string in double quotes, with the escapes of Haskell.
@@ -239,30 +259,41 @@ argument = do
 
 -- | @git log --oneline $x@. Words end a line or a bracket, and @--@ is an
 -- ordinary word here, not a comment.
-external :: Parser Expr
+external :: Parser Surface
 external = do
+  start <- getOffset
   name <- try commandHead
   hspace
   args <- many (argument <* hspace)
+  end <- getOffset
   sc
-  pure (ECmd name args)
+  pure (Surface (Span start end) (SCmd name args))
 
-application :: Parser Expr
+application :: Parser Surface
 application = external <|> do
   fun <- postfix
   slotted <- case fun of
-    EVar name -> do
+    Surface _ (SVar name) -> do
       signature <- asks (signatureOf name . contextBound)
       maybe (pure []) slotArgs signature
     _ -> pure []
   args <- many postfix
-  pure (useRef (foldl EApp fun (slotted <> args)))
+  builtin <- asks (isBuiltin . contextBound)
+  case (fun, slotted <> args) of
+    -- A bare reference means pkg, as in the plan, while the head is still
+    -- the builtin. The desugared form refers to the builtins themselves.
+    (Surface _ (SVar name), [Surface _ (SLit (LRef ref))])
+      | name `elem` ["use", "useLocal"], builtin name -> extend fun (SUseRef name ref)
+    (_, all') -> foldApply fun all'
  where
-  -- A bare reference means pkg, as in the plan. This names the builtins, so it
-  -- follows a rebinding of use or pkg.
-  useRef (EApp (EVar "use") (ELit (LRef ref))) = resolveThen ref (EApp (EVar "use"))
-  useRef (EApp (EVar "useLocal") (ELit (LRef ref))) = resolveThen ref (EApp (EVar "useLocal"))
-  useRef e = e
+  foldApply f [] = pure f
+  foldApply f (x : xs) = extend f (SApp f x) >>= (`foldApply` xs)
+
+-- | Whether a name still means its builtin, as far as parsing knows. Without
+-- the session's builtins, as in tests, it does.
+isBuiltin :: Bound -> Name -> Bool
+isBuiltin (BoundWith _ builtin) name = Set.member name builtin
+isBuiltin _ _ = True
 
 -- | One argument position of a builtin, for parsing.
 data Slot
@@ -286,53 +317,46 @@ signatureOf _ _ = Nothing
 
 -- | Arguments for path slots. A missing argument with a default ends the
 -- slots: @ls | filter f@ is @ls "." | filter f@.
-slotArgs :: [Slot] -> Parser [Expr]
+slotArgs :: [Slot] -> Parser [Surface]
 slotArgs [] = pure []
 slotArgs (PathSlot fallback : rest) = do
   given <- optional pathArg
   case given of
     Just arg -> (arg :) <$> slotArgs rest
-    Nothing -> pure (maybe [] (\path -> [ELit (LStr path)]) fallback)
+    Nothing -> do
+      here <- getOffset
+      pure (maybe [] (\path -> [Surface (Span here here) (SLit (LStr path))]) fallback)
 
 -- | A path: @$x@, a string, a parenthesised expression or a bareword.
-pathArg :: Parser Expr
+pathArg :: Parser Surface
 pathArg = do
   block <- asks inBlock
   when block (notFollowedBy (keyword "end"))
-  arg <- (EVar <$> (char '$' *> identifier))
-    <|> (ELit . LStr <$> stringLiteral)
+  arg <- spanned (SVar <$> (char '$' *> identifier))
+    <|> spanned (SLit . LStr <$> stringLiteral)
     <|> between (symbol "(") (char ')') (withComma False expr)
-    <|> (ELit . LStr <$> some wordChar)
+    <|> spanned (SLit . LStr <$> some wordChar)
   sc
   pure arg
-
--- | @do o <- pkg ref; next o end@. The name has a space, so nothing written
--- can capture it. The sugar is a block, so andThen stays an ordinary function
--- that no syntax depends on.
-resolveThen :: String -> (Expr -> Expr) -> Expr
-resolveThen ref next =
-  EDo [SBind " overlay" (EApp (EVar "pkg") (ELit (LStr ref))), SRun (next (EVar " overlay"))]
 
 -- | @x y -> body@ means @\\x -> \\y -> body@. The body goes as far right as it
 -- can.
 --
 -- Note: @f x@ starts like a lambda until the arrow fails to arrive. Look at 'try'.
-lambda :: Parser Expr
-lambda = do
+lambda :: Parser Surface
+lambda = spanned $ do
   names <- try (some (lexeme identifier) <* symbol "->")
-  body <- binding names expr
-  pure (foldr ELam body names)
+  SLam names <$> binding names expr
 
 -- | @let x = bound in body@.
-letIn :: Parser Expr
-letIn = do
+letIn :: Parser Surface
+letIn = spanned $ do
   lexeme (keyword "let")
   name <- lexeme identifier
   _ <- symbol "="
   bound <- expr
   lexeme (keyword "in")
-  body <- binding [name] expr
-  pure (ELet name bound body)
+  SLet name bound <$> binding [name] expr
 
 -- | @do s; s; e end@. A statement is @x <- e@, @x = e@ or @e@, and the last
 -- one is an expression. A name that a statement binds is bound for the
@@ -340,60 +364,63 @@ letIn = do
 -- come before @end@.
 --
 -- Note: inside a block, a bare @end@ ends a command line. Quote it to pass it.
-doBlock :: Parser Expr
-doBlock = do
+doBlock :: Parser Surface
+doBlock = spanned $ do
   lexeme (keyword "do")
   stmts <- local (\context -> context {inBlock = True, commaDelimiter = False}) statements
   keyword "end"
   case reverse stmts of
-    SRun _ : _ -> pure (EDo stmts)
+    StmtRun _ : _ -> pure (SDo stmts)
     _ -> fail "a block must end with an expression"
  where
   statements = do
     stmt <- statement
     let names = case stmt of
-          SBind name _ -> [name]
-          SLet name _ -> [name]
-          SRun _ -> []
+          StmtBind name _ -> [name]
+          StmtLet name _ -> [name]
+          StmtRun _ -> []
     more <- option [] $ do
       _ <- symbol ";"
       option [] (notFollowedBy (keyword "end") *> binding names statements)
     pure (stmt : more)
   statement =
-        (SBind <$> try (lexeme identifier <* symbol "<-") <*> expr)
-    <|> (SLet <$> try (lexeme identifier <* symbol "=" <* notFollowedBy (char '=')) <*> expr)
-    <|> (SRun <$> expr)
+        (StmtBind <$> try (lexeme identifier <* symbol "<-") <*> expr)
+    <|> (StmtLet <$> try (lexeme identifier <* symbol "=" <* notFollowedBy (char '=')) <*> expr)
+    <|> (StmtRun <$> expr)
 
 -- | @with overlay do ... end@.
-withBlock :: Parser Expr
---
--- A bare reference resolves with pkg first.
-withBlock = do
+-- A bare reference resolves with pkg first: see "Lambdash.Desugar".
+withBlock :: Parser Surface
+withBlock = spanned $ do
   lexeme (keyword "with")
   overlay <- postfix
-  body <- doBlock
-  pure $ case overlay of
-    ELit (LRef ref) -> resolveThen ref (`EWith` body)
-    _ -> EWith overlay body
+  SWith overlay <$> doBlock
 
 -- | Any expression.
 --
 -- A trailing @&@ starts the whole pipeline before it as a background job:
 -- @a | b &@ is @(a | b) &@.
-expr :: Parser Expr
+expr :: Parser Surface
 expr = letIn <|> lambda <|> pipeline
  where
   pipeline = do
     firstStage <- application
-    rest <- many (symbol "|" *> (lambda <|> application))
-    let whole = foldl EPipe firstStage rest
+    whole <- stages firstStage
     background <- optional (try (symbol "&" <* notFollowedBy (char '&')))
-    pure (maybe whole (const (EBg whole)) background)
+    maybe (pure whole) (const (extend whole (SBg whole))) background
+  stages left = option left $ do
+    right <- symbol "|" *> (lambda <|> application)
+    extend left (SPipe left right) >>= stages
 
--- | Parse one whole expression, or give a readable error.
+-- | Parse one whole expression to core, without spans, or give a readable
+-- error. This is for tests and tools: the REPL keeps the spans.
 parseExpr :: String -> Either String Expr
 parseExpr = parseExprIn AllBound
 
 -- | The same, given what is bound.
 parseExprIn :: Bound -> String -> Either String Expr
-parseExprIn bound = first errorBundlePretty . runIn bound (sc *> expr <* eof)
+parseExprIn bound = fmap (stripLocations . desugar) . parseSurfaceIn bound
+
+-- | Parse one whole expression to surface syntax.
+parseSurfaceIn :: Bound -> String -> Either String Surface
+parseSurfaceIn bound = first errorBundlePretty . runIn bound (sc *> expr <* eof)

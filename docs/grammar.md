@@ -100,6 +100,28 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
   Parentheses reset that rule: `[(echo a,b), echo c]` has two elements.
   Outside these containers, `echo a,b` keeps the comma in its argument.
 
+## Desugaring
+
+The parser builds surface syntax, with a source span on every node.
+`Lambdash.Desugar` turns it into a smaller core, which the checker and the
+evaluator see:
+
+| Surface | Core |
+| --- | --- |
+| `x y -> e` | `x -> y -> e` |
+| `.a.b` | `r -> r.a.b` |
+| `do x <- a; y = b; c end` | bind `x` to the result of running `a`, then `let y = b`, then run `c` |
+| `do a; c end` | bind an invented name to running `a`, then run `c` |
+| `use REF`, `useLocal REF` | `do o <- pkg REF; use o end` |
+| `with REF do … end` | `do o <- pkg REF; with o do … end end` |
+
+Everything else, including `|`, `with`, `&` and running a statement, has its
+own type rule in core, because what it means depends on types.
+
+Names that desugaring invents start with `%`, which no identifier can
+contain, so they capture nothing. The sugar refers to the builtins through
+aliases of the same kind, `%pkg`, `%use` and `%useLocal`.
+
 ## REPL lines
 
 The REPL parses one `line` at a time. `:t`, `:q` and `:env` are reserved words

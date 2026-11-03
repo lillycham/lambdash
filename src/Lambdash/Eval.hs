@@ -33,7 +33,7 @@ import Data.List (sort)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
-import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), Stmt (..), mono)
+import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
 import Lambdash.Nix (resolveDev, resolvePkg)
 import Lambdash.Overlay
 import Lambdash.Runtime
@@ -212,7 +212,11 @@ eval env expression =
     ESelect record label -> select label (eval env record)
     ELet name value body -> eval (Map.insert name (eval env value) env) body
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
-    EDo stmts -> VComp (\runtime -> runStmts runtime env stmts)
+    ELoc _ e -> eval env e
+    EBind name e body -> VComp $ \runtime -> do
+      value <- runComp runtime (eval env e)
+      runComp runtime (eval (Map.insert name value env) body)
+    ERun e -> VComp (\runtime -> runComp runtime (eval env e))
     EBg e -> VComp (\runtime -> background runtime (eval env e))
     EWith overlay body -> case eval env overlay of
       VOverlay layer -> VComp $ \runtime -> do
@@ -320,18 +324,6 @@ foregroundJob job result = do
   case outcome of
     Nothing -> throwIO (StreamError ("[" <> show (jobNumber job) <> "] stopped  " <> jobLine job))
     Just value -> markCollected job >> either throwIO pure value
-
--- | Run a block's statements in order. Each statement sees the names that
--- earlier ones bound.
-runStmts :: Runtime -> Scope -> [Stmt] -> IO Value
-runStmts _ _ [] = pure VUnit
-runStmts runtime env [SRun e] = runComp runtime (eval env e)
-runStmts runtime env (stmt : rest) = case stmt of
-  SRun e -> runComp runtime (eval env e) >> runStmts runtime env rest
-  SBind name e -> do
-    value <- runComp runtime (eval env e)
-    runStmts runtime (Map.insert name value env) rest
-  SLet name e -> runStmts runtime (Map.insert name (eval env e) env) rest
 
 -- | A @with@ block does not change the prompt, so it warns once about the
 -- shadowing it causes.
@@ -471,8 +463,14 @@ builtins =
 
 -- | The builtins as the checker sees them.
 typeEnv :: Env
-typeEnv = Map.fromList [(n, t) | (n, t, _) <- builtins]
+typeEnv = Map.fromList [(n, t) | (n, t, _) <- builtins <> aliases]
 
 -- | The builtins as the evaluator sees them.
 scope :: Scope
-scope = Map.fromList [(n, x) | (n, _, x) <- builtins]
+scope = Map.fromList [(n, x) | (n, _, x) <- builtins <> aliases]
+
+-- | The builtins that sugar refers to, under names that no identifier can
+-- spell, so that rebinding @use@ or @pkg@ does not change what @use REF@
+-- means. See "Lambdash.Desugar".
+aliases :: [(Name, Scheme, Value)]
+aliases = [('%' : n, t, x) | (n, t, x) <- builtins, n `elem` ["pkg", "use", "useLocal"]]
