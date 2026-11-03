@@ -25,7 +25,10 @@ cabal build all >/dev/null || { cabal build all; exit 1; }
 
 failed=()
 echo "== unit"
-unit=$(cabal test 2>&1)
+# Unit tests never get the terminal: with a tty on stdin, a test that starts
+# a job would hand the terminal over and back, and a pure first stage would
+# read it, either of which can stop this script in an interactive shell.
+unit=$(cabal test 2>&1 </dev/null)
 status=$?
 echo "$unit" | grep -E "^(FAIL|TODO|HANG) |^[0-9]+/[0-9]+ passed$"
 [ $status -eq 0 ] || failed+=("unit")

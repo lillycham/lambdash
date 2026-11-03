@@ -214,7 +214,7 @@ withTerminal isForeground action = do
   -- No terminal call here may throw: a stopped job's thread has nobody to
   -- report to, and the REPL takes the terminal back after every wait anyway.
   -- On resume, ownership moves before the modes change, as in bash.
-  suspend :: (ProcessGroupID, Maybe TerminalAttributes, System.Posix.Signals.Handler) -> ProcessGroupID -> IO Bool -> IO ()
+  suspend :: (ProcessGroupID, Maybe TerminalAttributes, ()) -> ProcessGroupID -> IO Bool -> IO ()
   suspend (group, attrs, _) job wait = do
     owned <- isForeground
     jobAttrs <- if not owned then pure attrs else do
@@ -232,12 +232,16 @@ withTerminal isForeground action = do
     owned <- isForeground
     attrs <- if owned then readModes "modes before the job" else shellModes
     group <- getProcessGroupID
-    previous <- installHandler sigTTOU Ignore Nothing
-    pure (group, attrs, previous)
-  restore (group, attrs, previous) = do
+    -- Taking the terminal back from a job's group needs SIGTTOU ignored. The
+    -- setting is process-wide and jobs run concurrently, so it is set and
+    -- never put back: saving and restoring it per job let one job restore
+    -- the default while another was handing over, which stopped the shell.
+    -- The REPL ignores SIGTTOU from the start anyway.
+    _ <- installHandler sigTTOU Ignore Nothing
+    pure (group, attrs, ())
+  restore (group, attrs, ()) = do
     foreground <- isForeground
-    (when foreground (giveTerminal "job ends, shell takes the terminal" group >> mapM_ (writeModes "job ends, shell modes") attrs))
-      `finally` void (installHandler sigTTOU previous Nothing)
+    when foreground (giveTerminal "job ends, shell takes the terminal" group >> mapM_ (writeModes "job ends, shell modes") attrs)
 
 -- | Run a plan once. The final external's status is the return value. Output
 -- items are streamed to the sink; they are never accumulated or decoded here.

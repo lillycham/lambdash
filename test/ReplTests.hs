@@ -13,7 +13,7 @@ import Lambdash.Unify
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Exit (exitFailure)
-import System.IO (hClose, hFlush, openTempFile, stdout)
+import System.IO (IOMode (..), hClose, hFlush, openFile, openTempFile, stdin, stdout)
 import System.Environment (lookupEnv, setEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
@@ -340,6 +340,12 @@ runTest (name, result) = do
 
 main :: IO ()
 main = do
+  -- Unit tests must not touch the terminal they were started from: with a
+  -- tty on stdin, jobs hand the terminal over and back, which can stop the
+  -- whole test run in an interactive shell. With stdin on /dev/null that code
+  -- is skipped, and a program that reads stdin sees end of input.
+  devNull <- openFile "/dev/null" ReadMode
+  hDuplicateTo devNull stdin
   -- Tests must not read or write the user's approvals: an approved flake in
   -- the directory the tests start in would otherwise activate, hook and all.
   temporary <- getTemporaryDirectory

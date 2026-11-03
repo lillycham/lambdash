@@ -319,6 +319,12 @@ runTest (name, action) = do
 
 main :: IO ()
 main = do
+  -- Unit tests must not touch the terminal they were started from: with a
+  -- tty on stdin, jobs hand the terminal over and back, which can stop the
+  -- whole test run in an interactive shell. With stdin on /dev/null that code
+  -- is skipped, and a program that reads stdin sees end of input.
+  devNull <- openFile "/dev/null" ReadMode
+  hDuplicateTo devNull stdin
   results <- mapM runTest tests
   putStrLn (show (length (filter id results)) <> "/" <> show (length results) <> " passed")
   unless (and results) exitFailure
