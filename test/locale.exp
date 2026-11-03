@@ -1,0 +1,37 @@
+#!/usr/bin/env expect
+# Usage: expect test/locale.exp path/to/lambdash
+#
+# Under LANG=C, GHC encodes text as ASCII and used to throw on the first
+# non-ASCII character, which ended the shell. The prompt is not checked here,
+# because haskeline shows λ as ? in that locale.
+set timeout 5
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {> $} "prompt" }
+
+spawn env LANG=C LC_ALL=C [lindex $argv 0]
+prompt
+
+# A typed é is decoded by the locale, so check only that the shell survives.
+send "print \"é\"\r"
+prompt
+send "print 1\r"
+see {1\r\n} "non-ASCII input under LANG=C leaves the shell alive"
+prompt
+
+send "echo é\r"
+prompt
+send "print 2\r"
+see {2\r\n} "a non-ASCII argument under LANG=C leaves the shell alive"
+prompt
+
+send ":q\r"
+expect eof
+puts "\nALL PASSED"

@@ -6,11 +6,22 @@ import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, sessionPrompt, step)
 import System.Console.Haskeline
+import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
 import System.Directory (getCurrentDirectory)
-import System.IO (BufferMode (..), hSetBuffering, stdout)
+import System.IO (BufferMode (..), hSetBuffering, hSetEncoding, stderr, stdin, stdout)
 
 main :: IO ()
 main = do
+  -- A shell must not die on the locale. Under LANG=C, GHC would encode text as
+  -- ASCII and throw on the first non-ASCII character, so text is always UTF-8:
+  -- the terminal, arguments, paths and the environment.
+  --
+  -- Note: haskeline still decodes keys by the locale, so under LANG=C a typed
+  -- é arrives as replacement characters. It no longer crashes the shell.
+  setLocaleEncoding utf8
+  setForeignEncoding utf8
+  setFileSystemEncoding utf8
+  mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
   -- Computations print straight to stdout, beside the output of haskeline.
   hSetBuffering stdout LineBuffering
   setupTerminal
