@@ -33,7 +33,7 @@ import Data.Char (isDigit)
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
-import Lambdash.Desugar (desugar)
+import Lambdash.Desugar (desugar, renderCore)
 import Lambdash.Parser
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Control.Monad (when)
@@ -122,6 +122,8 @@ data Command
     Exit
   | -- | @:t expr@.
     TypeOf Expr
+  | -- | @:core expr@: what the expression desugars to. Nothing runs.
+    ShowCore Expr
   | -- | @:env@ lists the active environments and their patches. @:env NAME@
     -- shows a variable, and each layer that touched it.
     ShowEnv (Maybe String)
@@ -153,6 +155,7 @@ command =
       (Blank <$ eof)
   <|> (Exit <$ lexeme (keyword ":q"))
   <|> (TypeOf <$> (lexeme (keyword ":t") *> core))
+  <|> (ShowCore <$> (lexeme (keyword ":core") *> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> core)
   <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> core)
@@ -655,6 +658,7 @@ stepLine session input =
               shown = jobLine job <> if lastWord (jobLine job) == "&" then "" else " &"
           continueJob False job
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
+    Right (ShowCore expression) -> pure (Continue session (renderCore expression))
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do

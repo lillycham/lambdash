@@ -118,17 +118,28 @@ evaluator see:
 Everything else, including `|`, `with`, `&` and running a statement, has its
 own type rule in core, because what it means depends on types.
 
+`:core e` shows what `e` desugars to, without running it. Core has words of
+its own for the forms that only it has: `bind x <- e; rest`, `run e`, `bg e`
+and `with o e`.
+
+```text
+λ> :core do x <- f; y = g x; h y end
+bind x <- f; let y = g x in run (h y)
+λ> :core use nixpkgs#jq
+bind %1 <- %pkg "nixpkgs#jq"; run (%use %1)
+```
+
 Names that desugaring invents start with `%`, which no identifier can
 contain, so they capture nothing. The sugar refers to the builtins through
 aliases of the same kind, `%pkg`, `%use` and `%useLocal`.
 
 ## REPL lines
 
-The REPL parses one `line` at a time. `:t`, `:q` and `:env` are reserved words
+The REPL parses one `line` at a time. `:t`, `:core`, `:q` and `:env` are reserved words
 in this rule only. A line may span several input lines while a `do` is open.
 
 ```ebnf
-line        = [ ":q" | ":t" expr | ":env" [ NAME ] | command
+line        = [ ":q" | ":t" expr | ":core" expr | ":env" [ NAME ] | command
               | IDENT "=" expr | IDENT "<-" expr | expr ] EOF ;
 command     = "jobs" | "fg" [ JOB ] | "bg" [ JOB ] | "allow" | "deny" ;
 JOB         = [ "%" ] DIGIT { DIGIT } ;

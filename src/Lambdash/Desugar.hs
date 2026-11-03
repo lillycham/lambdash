@@ -16,9 +16,11 @@ module Lambdash.Desugar
   ( desugar
   , stripLocations
   , builtinAlias
+  , renderCore
   ) where
 
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
+import Data.List (intercalate)
 import Lambdash.Infer (Expr (..))
 import Lambdash.Syntax
 
@@ -91,3 +93,46 @@ stripLocations expression = case expression of
   EWith overlay body -> EWith (stripLocations overlay) (stripLocations body)
   EBg e -> EBg (stripLocations e)
   other -> other
+
+-- | Core as text, for @:core@. It reads like the surface syntax where core
+-- has the same form. The forms that only core has get words of their own:
+--
+-- > bind x <- e; rest           run e, name its result, continue
+-- > run e                       run a stream or a computation
+-- > bg e                        start e as a job
+-- > with o e                    run e with one more layer
+renderCore :: Expr -> String
+renderCore = render 0
+ where
+  -- 0: anything. 1: a pipeline stage. 2: a function. 3: an argument.
+  render :: Int -> Expr -> String
+  render level expression = case expression of
+    ELoc _ e -> render level e
+    EVar name -> name
+    ELit lit -> literal lit
+    ELam _ _ ->
+      let (names, body) = lambdas expression
+      in parens (level > 0) (unwords names <> " -> " <> render 0 body)
+    EApp f x -> parens (level > 2) (render 2 f <> " " <> render 3 x)
+    EPipe a b -> parens (level > 1) (render 1 a <> " | " <> render 2 b)
+    ELet name bound body -> parens (level > 0) ("let " <> name <> " = " <> render 0 bound <> " in " <> render 0 body)
+    ECmd name args -> parens (level > 2) (unwords (name : map argument args))
+    ERecord fields -> "{" <> intercalate ", " [label <> " = " <> render 0 value | (label, value) <- fields] <> "}"
+    EList items -> "[" <> intercalate ", " (map (render 0) items) <> "]"
+    ESelect record label -> render 3 record <> "." <> label
+    EBind name e body -> parens (level > 0) ("bind " <> name <> " <- " <> render 0 e <> "; " <> render 0 body)
+    ERun e -> parens (level > 2) ("run " <> render 3 e)
+    EWith overlay body -> parens (level > 2) ("with " <> render 3 overlay <> " " <> render 3 body)
+    EBg e -> parens (level > 2) ("bg " <> render 3 e)
+  lambdas (ELoc _ e) = lambdas e
+  lambdas (ELam name body) = let (names, inner) = lambdas body in (name : names, inner)
+  lambdas e = ([], e)
+  parens True text = "(" <> text <> ")"
+  parens False text = text
+  literal (LInt n) = show n
+  literal (LBool b) = if b then "true" else "false"
+  literal LUnit = "()"
+  literal (LStr text) = show text
+  literal (LRef ref) = ref
+  argument (AWord word) = if any (`elem` (" \"$|;&()[]{}" :: String)) word || null word then show word else word
+  argument (AVar name) = '$' : name
