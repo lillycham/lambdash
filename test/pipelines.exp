@@ -18,7 +18,8 @@ set state [exec mktemp -d]
 spawn env XDG_STATE_HOME=$state [lindex $argv 0]
 prompt
 send "printf \"a|b\" | cat\r"
-see {a\|bλ> $} "quoted bytes cross a pipeline"
+# The line editor may switch keypad modes around a prompt, by TERM.
+see {a\|b(?:\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])*λ> $} "quoted bytes cross a pipeline"
 
 send "yes | head -1\r"
 see {y\r\n} "downstream demand ends an infinite source"
@@ -57,7 +58,9 @@ send "\003"
 see {signal 2} "Ctrl-C ends a job with altered modes"
 prompt
 send "print 1\r"
-see {print 1\r+\n1\r\n} "the prompt restores echo"
+# After an echoed line the line editor writes a break and, by TERM, keypad
+# and newline control sequences.
+see {print 1(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+1\r\n} "the prompt restores echo"
 prompt
 
 send "echo should-not-run | nope-pipeline-xyz\r"

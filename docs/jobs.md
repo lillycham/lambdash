@@ -65,6 +65,12 @@ program gets its own modes back.
 A process that stops with `SIGTTIN` or `SIGTTOU` before the job owns the
 terminal is continued at once, as in the spike.
 
+On macOS, a program stopped inside a terminal read gets `EINTR` when it is
+continued. Programs that treat that as fatal end after `fg`: GNU `cat` prints
+`Interrupted system call`. bash on macOS behaves the same, so this is the
+platform's, not the shell's. The job-control tests use `test/reader.sh`,
+which retries the read.
+
 ## Results arrive when the job finishes
 
 - A stopped `x <- cmd` binds `x` when `fg` finishes it, in the session as it

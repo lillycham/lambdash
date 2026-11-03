@@ -1,4 +1,5 @@
 #!/usr/bin/env expect
+# Run from the repository root: it uses test/reader.sh.
 # Usage: expect test/jobs.exp path/to/lambdash
 # Ctrl-Z stops a job, which then waits in the table, parked with its pipes and
 # workers, until fg.
@@ -25,16 +26,16 @@ see {no jobs} "fg with no jobs"
 prompt
 
 # A stopped reader gives the terminal back, and gets it back with fg.
-send "cat\r"
+send "./test/reader.sh\r"
 after 300
 send "\032"
-see {\[1\] stopped  cat} "Ctrl-Z stops a terminal reader"
+see {\[1\] stopped  \./test/reader\.sh} "Ctrl-Z stops a terminal reader"
 prompt
 send "print 7\r"
 see {7\r\n} "the shell works while a job is stopped"
 prompt
 send "jobs\r"
-see {\[1\] stopped  cat} "jobs lists it"
+see {\[1\] stopped  \./test/reader\.sh} "jobs lists it"
 prompt
 send "fg\r"
 after 300

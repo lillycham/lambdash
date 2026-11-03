@@ -60,7 +60,9 @@ send "\003"
 see {signal 2} "a program ends with echo off"
 prompt
 send "print 1\r"
-see {print 1\r+\n1\r\n} "the shell restores the terminal"
+# After an echoed line the line editor writes a break and, by TERM, keypad
+# and newline control sequences.
+see {print 1(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+1\r\n} "the shell restores the terminal"
 prompt
 
 send "nope-xyz\r"

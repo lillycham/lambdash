@@ -1,4 +1,5 @@
 #!/usr/bin/env expect
+# Run from the repository root: it uses test/reader.sh.
 # Usage: expect test/blocks.exp path/to/lambdash
 # do ... end over several lines, and a block stopped part way through.
 set timeout 5
@@ -34,10 +35,10 @@ see {in\r\n} "the layer reaches the body"
 prompt
 
 # A stopped block resumes where it stopped.
-send "do cat; print 9 end\r"
+send "do ./test/reader.sh; print 9 end\r"
 after 300
 send "\032"
-see {\[1\] stopped  do cat; print 9 end} "Ctrl-Z stops a block"
+see {\[1\] stopped  do \./test/reader\.sh; print 9 end} "Ctrl-Z stops a block"
 prompt
 send "fg\r"
 after 300
@@ -46,7 +47,7 @@ see {9\r\n} "fg runs the rest of the block"
 prompt
 
 # A stopped with keeps its layer when resumed.
-send "with (overlay \"o\" \[set \"LSH_B\" \"in\"\]) do cat; printenv LSH_B end\r"
+send "with (overlay \"o\" \[set \"LSH_B\" \"in\"\]) do ./test/reader.sh; printenv LSH_B end\r"
 after 300
 send "\032"
 see {\[1\] stopped} "Ctrl-Z stops a with block"
