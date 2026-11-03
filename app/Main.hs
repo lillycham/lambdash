@@ -4,7 +4,7 @@ import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (setupTerminal)
-import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, sessionPrompt, step)
+import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, sessionPrompt, step)
 import System.Console.Haskeline
 import System.Directory (getCurrentDirectory)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -32,7 +32,10 @@ more input
 
 -- | All of the meaning is in 'step'. This only moves text.
 loop :: Session -> InputT IO ()
-loop session = do
+loop before = do
+  -- Background jobs report at the next prompt, as in other shells.
+  (session, messages) <- liftIO (notices before)
+  mapM_ outputStrLn messages
   cwd <- liftIO getCurrentDirectory
   line <- getInputLine (sessionPrompt cwd session) >>= traverse more
   case line of

@@ -18,7 +18,7 @@ spawn [lindex $argv 0]
 prompt
 
 send "fg\r"
-see {no stopped jobs} "fg with no jobs"
+see {no jobs} "fg with no jobs"
 prompt
 
 # A stopped reader gives the terminal back, and gets it back with fg.
@@ -82,7 +82,7 @@ prompt
 
 # :q warns once about stopped jobs.
 send ":q\r"
-see {there are stopped jobs} ":q warns"
+see {there are jobs} ":q warns"
 prompt
 
 # A stopped job's changes to the environments are dropped if they changed.

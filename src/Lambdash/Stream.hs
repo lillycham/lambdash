@@ -12,7 +12,7 @@ import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Lambdash.Overlay (Environ)
-import Lambdash.Runtime (Runtime (..), runtimeEnviron)
+import Lambdash.Runtime (JobHooks (..), Runtime (..), runtimeEnviron)
 import Lambdash.Process (Status (..), programExists, spawnStage)
 import System.Exit (ExitCode (..))
 import System.IO
@@ -158,8 +158,11 @@ worker _ _ _ _ = error "worker: raw endpoint"
 -- the park action hands the terminal back and blocks until the job should
 -- continue. A child that stopped for reading or writing the terminal before
 -- it owned it is continued at once, as in the spike.
-waitStages :: IO () -> IORef [ProcessID] -> ProcessGroupID -> IO (Map.Map ProcessID Status)
-waitStages park children group = go Map.empty []
+--
+-- In the background, reading or writing the terminal is a real stop, and the
+-- job waits in the table for fg.
+waitStages :: IO Bool -> IO () -> IORef [ProcessID] -> ProcessGroupID -> IO (Map.Map ProcessID Status)
+waitStages isForeground park children group = go Map.empty []
  where
   go statuses stopped = do
     live <- readIORef children
@@ -177,10 +180,12 @@ waitStages park children group = go Map.empty []
         pure next
       case status of
         Nothing -> threadDelay 5000 >> go statuses stopped
-        Just (_, Stopped sig)
+        Just (pid, Stopped sig)
           | sig == sigTTIN || sig == sigTTOU -> do
-              quietly (signalProcessGroup sigCONT group)
-              go statuses stopped
+              foreground <- isForeground
+              if foreground
+                then quietly (signalProcessGroup sigCONT group) >> go statuses stopped
+                else go statuses (pid : stopped)
         Just (pid, Stopped _) -> go statuses (pid : stopped)
         Just (pid, outcome) -> do
           let result = case outcome of
@@ -193,29 +198,39 @@ waitStages park children group = go Map.empty []
 -- function is for a stopped job: it hands the terminal back to the shell, runs
 -- the wait, then returns the terminal to the job with the job's own modes,
 -- because a stopped editor has its own raw mode.
-withTerminal :: ((Maybe ProcessGroupID -> IO ()) -> (ProcessGroupID -> IO () -> IO ()) -> IO a) -> IO a
-withTerminal action = do
+--
+-- Only a foreground job touches the terminal. A background job that ends
+-- leaves it alone, because the prompt owns it then.
+withTerminal :: IO Bool -> ((Maybe ProcessGroupID -> IO ()) -> (ProcessGroupID -> IO Bool -> IO ()) -> IO a) -> IO a
+withTerminal isForeground action = do
   tty <- queryTerminal stdInput
-  if not tty then action (const (pure ())) (\_ wait -> wait) else
+  if not tty then action (const (pure ())) (\_ wait -> void wait) else
     bracket acquire restore $ \saved ->
       action give (suspend saved)
  where
-  give job = forM_ job (quietly . setTerminalProcessGroupID stdInput)
-  suspend :: (ProcessGroupID, TerminalAttributes, System.Posix.Signals.Handler) -> ProcessGroupID -> IO () -> IO ()
+  give job = do
+    foreground <- isForeground
+    when foreground (forM_ job (quietly . setTerminalProcessGroupID stdInput))
+  suspend :: (ProcessGroupID, TerminalAttributes, System.Posix.Signals.Handler) -> ProcessGroupID -> IO Bool -> IO ()
   suspend (group, attrs, _) job wait = do
-    jobAttrs <- getTerminalAttributes stdInput
-    quietly (setTerminalProcessGroupID stdInput group)
-    setTerminalAttributes stdInput attrs Immediately
-    wait
-    setTerminalAttributes stdInput jobAttrs Immediately
-    give (Just job)
+    owned <- isForeground
+    jobAttrs <- if not owned then pure attrs else do
+      current <- getTerminalAttributes stdInput
+      quietly (setTerminalProcessGroupID stdInput group)
+      setTerminalAttributes stdInput attrs Immediately
+      pure current
+    foreground <- wait
+    when foreground $ do
+      setTerminalAttributes stdInput jobAttrs Immediately
+      quietly (setTerminalProcessGroupID stdInput job)
   acquire = do
     attrs <- getTerminalAttributes stdInput
     group <- getProcessGroupID
     previous <- installHandler sigTTOU Ignore Nothing
     pure (group, attrs, previous)
-  restore (group, attrs, previous) =
-    (setTerminalProcessGroupID stdInput group >> setTerminalAttributes stdInput attrs Immediately)
+  restore (group, attrs, previous) = do
+    foreground <- isForeground
+    (when foreground (setTerminalProcessGroupID stdInput group >> setTerminalAttributes stdInput attrs Immediately))
       `finally` void (installHandler sigTTOU previous Nothing)
 
 -- | Run a plan once. The final external's status is the return value. Output
@@ -258,7 +273,8 @@ runStagesAll runtime fromBytes toBytes sink stages@(firstStage : restStages) = d
   firstMissing env (name : rest) = do
     found <- programExists env name
     if found then firstMissing env rest else pure (Just name)
-  execute env = withTerminal $ \giveTerminal suspendTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
+  isForeground = maybe (pure True) hookForeground (runtimeJob runtime)
+  execute env = withTerminal isForeground $ \giveTerminal suspendTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
     edges <- sequence [edge resources fromBytes toBytes l r | (l, r) <- zip stages (drop 1 stages)]
     let lastStage = foldl (\_ next -> next) firstStage restStages
         start = if isExternal firstStage
@@ -281,15 +297,16 @@ runStagesAll runtime fromBytes toBytes sink stages@(firstStage : restStages) = d
     -- Close the parent's copies before waiting or a reader can never see EOF.
     forM_ nodes $ \(stage, input, output) -> when (isExternal stage) (closeInput input >> closeOutput output)
     group <- readIORef groupRef
+    forM_ group (\job -> forM_ (runtimeJob runtime) (\hooks -> hookStarted hooks job))
     giveTerminal group
     forM_ group (quietly . signalProcessGroup sigCONT)
     let workers = [worker runtime stage input output | (stage, input, output) <- nodes, not (isExternal stage)]
         -- Without a way to resume it later, a stopped job continues at once.
-        park job = case runtimePark runtime of
+        park job = case runtimeJob runtime of
           Nothing -> quietly (signalProcessGroup sigCONT job)
-          Just resume -> do
-            suspendTerminal job resume
+          Just hooks -> do
+            suspendTerminal job (hookPark hooks)
             quietly (signalProcessGroup sigCONT job)
-        wait = maybe (pure Map.empty) (\job -> waitStages (park job) children job) group
+        wait = maybe (pure Map.empty) (\job -> waitStages isForeground (park job) children job) group
     (statuses, _) <- concurrently wait (mapConcurrently_ id workers)
     pure [Map.findWithDefault (ExitedWith 127) pid statuses | pid <- pids]

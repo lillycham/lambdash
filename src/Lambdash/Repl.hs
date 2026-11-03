@@ -7,6 +7,7 @@ module Lambdash.Repl
   , sessionPrompt
   , needsMore
   , arrive
+  , notices
   , Command (..)
   , command
   , parseCommand
@@ -29,14 +30,20 @@ import Data.Set qualified as Set
 import Data.List (intercalate)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
-import Control.Exception (SomeException, catch, fromException, throwIO)
+import Control.Exception (IOException, SomeException, catch, fromException, throwIO)
 import Control.Exception qualified as Exception
 import Data.Char (isDigit)
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
-import Data.IORef (readIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Control.Monad (forM_, void, when)
+import System.Posix.IO (stdInput)
+import System.Posix.Process (getProcessGroupID)
+import System.Posix.Signals (sigCONT, signalProcessGroup)
+import System.Posix.Terminal (queryTerminal, setTerminalProcessGroupID)
+import System.Posix.Types (ProcessGroupID)
 import Lambdash.Nix (resolveDev)
 import Lambdash.Overlay
 import Lambdash.Trust (autoName, flakeHash, isAllowed)
@@ -73,9 +80,16 @@ data Job = Job
   { jobNumber :: Int
   , jobLine :: String
   , jobEvents :: MVar Event
-  , jobResume :: MVar ()
+  , -- | Wakes a parked job: True in the foreground, False in the background.
+    jobResume :: MVar Bool
   , -- | What the line does with its result, given the session at that time.
     jobFinish :: Session -> Value -> IO Step
+  , -- | Whether the job owns the terminal. The job's thread reads it too.
+    jobForeground :: IORef Bool
+  , -- | The process group of the job's current pipeline.
+    jobGroup :: IORef (Maybe ProcessGroupID)
+  , -- | Running in the background, rather than stopped.
+    jobRunning :: Bool
   }
 
 data Event = Finished (Either SomeException Value) | Suspended
@@ -128,6 +142,8 @@ data Command
     ListJobs
   | -- | @fg@, or @fg 2@, when nothing binds it.
     Foreground (Maybe Int)
+  | -- | @bg@, or @bg 2@: continue a stopped job without the terminal.
+    Background (Maybe Int)
   | -- | @allow@: activate this directory's flake now and on every arrival,
     -- while @flake.nix@ and @flake.lock@ stay as they are.
     Allow
@@ -164,6 +180,8 @@ parseCommand bound input = case words input of
   ["jobs"] | free "jobs" -> Right ListJobs
   ["allow"] | free "allow" -> Right Allow
   ["deny"] | free "deny" -> Right Deny
+  ["bg"] | free "bg" -> Right (Background Nothing)
+  ["bg", number] | free "bg", Just n <- jobNumberOf number -> Right (Background (Just n))
   ["fg"] | free "fg" -> Right (Foreground Nothing)
   ["fg", number] | free "fg", Just n <- jobNumberOf number -> Right (Foreground (Just n))
   _ -> first errorBundlePretty (runIn bound (sc *> command <* eof) input)
@@ -365,26 +383,74 @@ foreground :: Session -> String -> Runtime -> Value -> (Runtime -> Session -> Va
 foreground session line runtime0 value finish = do
   events <- newEmptyMVar
   resume <- newEmptyMVar
-  let runtime = runtime0 {runtimePark = Just (putMVar events Suspended >> takeMVar resume)}
+  owned <- newIORef True
+  group <- newIORef Nothing
+  let hooks = JobHooks
+        { hookPark = do
+            putMVar events Suspended
+            next <- takeMVar resume
+            writeIORef owned next
+            pure next
+        , hookStarted = writeIORef group . Just
+        , hookForeground = readIORef owned
+        }
+      runtime = runtime0 {runtimeJob = Just hooks}
       number = 1 + maximum (0 : map jobNumber (sessionJobs session))
   _ <- forkIO (Exception.try (runComp runtime value) >>= putMVar events . Finished)
-  awaitJob session (Job number line events resume (finish runtime))
+  awaitJob session (Job number line events resume (finish runtime) owned group False)
 
 -- | Wait until a job ends or stops. A stopped job joins the table.
 awaitJob :: Session -> Job -> IO Step
 awaitJob session job = do
   event <- takeMVar (jobEvents job)
+  -- A job that was running in the background can end just as fg hands it the
+  -- terminal, and then nothing hands it back. Take it back in every case.
+  reclaimTerminal
   case event of
     Finished (Right value) -> jobFinish job session value
     Finished (Left err) -> case fromException err of
       Just (StreamError message) -> pure (Continue session message)
       Nothing -> throwIO err
     Suspended ->
-      pure (Continue session {sessionJobs = sessionJobs session <> [job], sessionWarned = False}
-        (describeJob job))
+      let stopped = job {jobRunning = False}
+      in pure (Continue session {sessionJobs = sessionJobs session <> [stopped], sessionWarned = False}
+        (describeJob stopped))
+
+reclaimTerminal :: IO ()
+reclaimTerminal = do
+  tty <- queryTerminal stdInput
+  when tty $ do
+    group <- getProcessGroupID
+    void (Exception.try (setTerminalProcessGroupID stdInput group) :: IO (Either IOException ()))
 
 describeJob :: Job -> String
-describeJob job = "[" <> show (jobNumber job) <> "] stopped  " <> jobLine job
+describeJob job = "[" <> show (jobNumber job) <> "] " <> (if jobRunning job then "running" else "stopped") <> "  " <> jobLine job
+
+-- | What background jobs did since the last prompt: a job that ended gives
+-- its result now, in the session as it is now, and a job that stopped waits
+-- in the table.
+notices :: Session -> IO (Session, [String])
+notices session = go session [] [job | job <- sessionJobs session, jobRunning job]
+ where
+  go current messages [] = pure (current, reverse messages)
+  go current messages (job : rest) = do
+    event <- tryTakeMVar (jobEvents job)
+    let others = filter ((/= jobNumber job) . jobNumber) (sessionJobs current)
+        label = "[" <> show (jobNumber job) <> "] "
+    case event of
+      Nothing -> go current messages rest
+      Just Suspended ->
+        let stopped = job {jobRunning = False}
+        in go current {sessionJobs = others <> [stopped]} (describeJob stopped : messages) rest
+      Just (Finished (Right value)) -> do
+        result <- jobFinish job current {sessionJobs = others} value
+        case result of
+          Continue next text -> go next (unwords' [label <> "done  " <> jobLine job, text] : messages) rest
+          Quit -> go current {sessionJobs = others} messages rest
+      Just (Finished (Left err)) -> case fromException err of
+        Just (StreamError message) -> go current {sessionJobs = others} ((label <> "failed  " <> jobLine job <> ": " <> message) : messages) rest
+        Nothing -> throwIO err
+  unwords' parts = intercalate "\n" (filter (not . null) parts)
 
 renderShadow :: Shadow -> String
 renderShadow (Shadow var earlier later) = "warning: " <> later <> " shadows " <> var <> " from " <> earlier
@@ -498,7 +564,7 @@ stepLine session input =
     Right Exit
       | null (sessionJobs session) || sessionWarned session -> pure Quit
       | otherwise -> pure (Continue session {sessionWarned = True}
-          "there are stopped jobs: :q again to quit, and they get SIGHUP")
+          "there are jobs: :q again to quit; stopped ones get SIGHUP, running ones keep running")
     Right Allow -> do
       cwd <- getCurrentDirectory
       found <- flakeHash cwd
@@ -524,11 +590,33 @@ stepLine session input =
             Nothing -> reverse jobs
             Just n -> filter ((== n) . jobNumber) jobs
       in case chosen of
-        [] -> pure (Continue session (maybe "no stopped jobs" (\n -> "no job " <> show n) wanted))
+        [] -> pure (Continue session (maybe "no jobs" (\n -> "no job " <> show n) wanted))
         job : _ -> do
           let rest = session {sessionJobs = filter ((/= jobNumber job) . jobNumber) jobs}
-          putMVar (jobResume job) ()
-          awaitJob rest job
+          if jobRunning job
+            then do
+              -- It is not parked, so hand it the terminal from here.
+              writeIORef (jobForeground job) True
+              group <- readIORef (jobGroup job)
+              tty <- queryTerminal stdInput
+              forM_ group $ \pgid -> do
+                when tty (void (Exception.try (setTerminalProcessGroupID stdInput pgid) :: IO (Either IOException ())))
+                void (Exception.try (signalProcessGroup sigCONT pgid) :: IO (Either IOException ()))
+            else putMVar (jobResume job) True
+          awaitJob rest {sessionWarned = False} job {jobRunning = False}
+    Right (Background wanted) ->
+      let jobs = sessionJobs session
+          stopped = [job | job <- jobs, not (jobRunning job)]
+          chosen = case wanted of
+            Nothing -> reverse stopped
+            Just n -> filter ((== n) . jobNumber) stopped
+      in case chosen of
+        [] -> pure (Continue session (maybe "no stopped jobs" (\n -> "no stopped job " <> show n) wanted))
+        job : _ -> do
+          putMVar (jobResume job) False
+          let running = job {jobRunning = True}
+              others = filter ((/= jobNumber job) . jobNumber) jobs
+          pure (Continue session {sessionJobs = others <> [running]} ("[" <> show (jobNumber job) <> "] " <> jobLine job <> " &"))
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do
