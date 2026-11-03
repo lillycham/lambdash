@@ -100,6 +100,17 @@ tests =
   , ("typed: select from a record", typed "{name = 1, ok = true}.ok" TBool)
   , ("typed: an accessor as an argument", typed "(f -> f {size = 1}) .size" TInt)
   , ("typed: not", typed "not true" TBool)
+  , ("do: statements", is "do x <- f; y = x; f y end" (EDo [SBind "x" (v "f"), SLet "y" (v "x"), SRun (EApp (v "f") (v "y"))]))
+  , ("do: one statement", is "do x end" (EDo [SRun (v "x")]))
+  , ("do: a trailing ;", is "do x; end" (EDo [SRun (v "x")]))
+  , ("do: an argument", is "f do x end" (EApp (v "f") (EDo [SRun (v "x")])))
+  , ("do: nested", is "do do x end end" (EDo [SRun (EDo [SRun (v "x")])]))
+  , ("with: an overlay and a block", is "with o do x end" (EWith (v "o") (EDo [SRun (v "x")])))
+  , ("error: do with no end", bad "do x")
+  , ("error: an empty block", bad "do end")
+  , ("error: a block that ends with a binding", bad "do x <- f end")
+  , ("error: with needs a block", bad "with o x")
+  , ("error: end is reserved", bad "end")
   ]
 
 runTest :: (String, Bool) -> IO Bool

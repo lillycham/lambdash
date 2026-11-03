@@ -7,6 +7,7 @@ module Lambdash.Infer
   , Lit (..)
   , Arg (..)
   , Expr (..)
+  , Stmt (..)
   , commands
   , Scheme (..)
   , mono
@@ -73,6 +74,22 @@ data Expr
   | EList [Expr]
   | -- | @r.name@.
     ESelect Expr Label
+  | -- | @do s; s; e end@: run each statement in order. The value is the last
+    -- statement's result.
+    EDo [Stmt]
+  | -- | @with overlay do ... end@: run the block with one more environment
+    -- layer, for its dynamic extent only.
+    EWith Expr Expr
+  deriving (Eq, Show)
+
+-- | One statement of a @do@ block.
+data Stmt
+  = -- | @x <- e@: run @e@ and name its result for the statements after it.
+    SBind Name Expr
+  | -- | @x = e@: name a value. Nothing runs.
+    SLet Name Expr
+  | -- | @e@: run it. Its result is dropped, unless it is the last statement.
+    SRun Expr
   deriving (Eq, Show)
 
 -- | A type that holds for every choice of the listed unknowns.
@@ -364,6 +381,76 @@ infer env (ESelect expr label) = do
   fieldSub <- unifying (unify recordTy requiredTy)
   pure (fieldSub `compose` exprSub, apply fieldSub fieldTy)
 
+infer env (EDo stmts) = do
+  (sub, effects, result) <- inferStmts env stmts
+  let row = foldr (unionEffects . applyEffects sub) noEffects effects
+  pure (sub, TComp row (apply sub result))
+
+-- The checker drops the exec labels it can see in the body: the body runs
+-- with the overlay, so the session's PATH says nothing about them. Each
+-- pipeline still resolves its programs before it spawns anything. A label
+-- hidden in an unknown tail, such as a parameter's, stays.
+infer env (EWith overlay body) = do
+  (s1, overlayTy) <- infer env overlay
+  s2 <- unifying (unify overlayTy TOverlay)
+  let known = s2 `compose` s1
+  (s3, bodyTy) <- infer (applyEnv known env) body
+  let sub = s3 `compose` known
+  case apply sub bodyTy of
+    TComp (EffRow labels tails) result ->
+      pure (sub, TComp (EffRow (Set.filter (not . isExec) labels) tails) result)
+    other -> do
+      eff <- unifying (effectVar <$> freshVar)
+      result <- fresh
+      s4 <- unifying (unify other (TComp eff result))
+      pure (s4 `compose` sub, apply s4 result)
+ where
+  isExec (Exec _) = True
+  isExec _ = False
+
+-- | The statements of a block: what they taught, each one's effect row, and
+-- the last one's result. A run statement is a computation or a stream. A
+-- stream reads the terminal, so its input is Bytes, and its result is its
+-- return value, as at the prompt.
+inferStmts :: Env -> [Stmt] -> Infer (Subst, [EffRow], Ty)
+inferStmts _ [] = pure (emptySubst, [], TUnit)
+inferStmts env [SRun e] = do
+  (s, eff, result) <- inferRun env e
+  pure (s, [eff], result)
+inferStmts env (stmt : rest) = case stmt of
+  SRun e -> do
+    (s1, eff, _) <- inferRun env e
+    (s2, effs, result) <- inferStmts (applyEnv s1 env) rest
+    pure (s2 `compose` s1, eff : effs, result)
+  SBind name e -> do
+    (s1, eff, value) <- inferRun env e
+    -- Like a lambda parameter, a bound result has one type in the block.
+    let env' = Map.insert name (mono value) (applyEnv s1 env)
+    (s2, effs, result) <- inferStmts env' rest
+    pure (s2 `compose` s1, eff : effs, result)
+  SLet name e -> do
+    (raw, t1) <- infer env e
+    s1 <- checkedConstraints raw
+    let env' = applyEnv s1 env
+        sc = generalise env' (qualify (effectConstraints s1) (apply s1 t1))
+        escaped = connectedConstraints (ftvEnv env') (effectConstraints s1)
+    (s2, effs, result) <- inferStmts (Map.insert name sc env') rest
+    pure (s2 `compose` s1 {effectConstraints = escaped}, effs, result)
+
+inferRun :: Env -> Expr -> Infer (Subst, EffRow, Ty)
+inferRun env e = do
+  (s1, t) <- infer env e
+  case apply s1 t of
+    TStream eff input _ result -> do
+      s2 <- unifying (unify input TBytes)
+      pure (s2 `compose` s1, applyEffects s2 eff, apply s2 result)
+    TComp eff result -> pure (s1, eff, result)
+    other -> do
+      eff <- unifying (effectVar <$> freshVar)
+      result <- fresh
+      s2 <- unifying (unify other (TComp eff result))
+      pure (s2 `compose` s1, applyEffects s2 eff, apply s2 result)
+
 -- | The external commands that an expression names, also under lambdas.
 commands :: Expr -> [Name]
 commands (ECmd name _) = [name]
@@ -374,6 +461,12 @@ commands (ELet _ bound body) = commands bound <> commands body
 commands (ERecord fields) = concatMap (commands . snd) fields
 commands (EList items) = concatMap commands items
 commands (ESelect record _) = commands record
+commands (EDo stmts) = concatMap stmtCommands stmts
+ where
+  stmtCommands (SBind _ e) = commands e
+  stmtCommands (SLet _ e) = commands e
+  stmtCommands (SRun e) = commands e
+commands (EWith overlay body) = commands overlay <> commands body
 commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied.

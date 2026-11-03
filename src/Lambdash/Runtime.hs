@@ -23,6 +23,9 @@ data Runtime = Runtime
     -- It blocks until the job should continue. Without it, a stopped job is
     -- continued at once, because nothing could resume it later.
     runtimePark :: Maybe (IO ())
+  , -- | Layers that @with@ adds, innermost last. They are not in the session:
+    -- they last for the extent of a block.
+    runtimeLocal :: [Overlay]
   }
 
 -- | A runtime with no GC roots and no job control.
@@ -32,10 +35,11 @@ newRuntime = newRuntimeWith Nothing
 newRuntimeWith :: Maybe FilePath -> ShellState -> IO Runtime
 newRuntimeWith roots state = do
   ref <- newIORef state
-  pure (Runtime ref roots Nothing)
+  pure (Runtime ref roots Nothing [])
 
 -- | The effective environment now.
 runtimeEnviron :: Runtime -> IO Environ
 runtimeEnviron runtime = do
   base <- Map.fromList <$> getEnvironment
-  effective base <$> readIORef (runtimeState runtime)
+  state <- readIORef (runtimeState runtime)
+  pure (effective base (ShellState (overlays state <> runtimeLocal runtime)))

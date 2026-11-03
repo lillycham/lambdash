@@ -103,8 +103,7 @@ CC = "gcc"
 ## Not yet
 
 - Overlays from Nix are in `nix.md`.
-- `with`, `use --local` and trust: Prototype 5. The runtime handle that
-  computations receive is where `with` will add a local layer.
+- `with` is in `blocks.md`. `use --local` and trust: Prototype 5.
 - `unuse` takes a string, because a bare word in expression position is a
   variable.
 - No `export`: the base is the environment λsh started with.

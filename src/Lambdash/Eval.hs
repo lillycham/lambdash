@@ -26,7 +26,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import Data.IORef
 import Control.Exception (throwIO)
 import Control.Monad (when)
-import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
+import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), Stmt (..), mono)
 import Lambdash.Nix (resolveDev, resolvePkg)
 import Lambdash.Overlay
 import Lambdash.Runtime
@@ -35,7 +35,7 @@ import Lambdash.Stream (StreamError (..))
 import Lambdash.Stream (Stage (..), runStagesAll)
 import Lambdash.Lines (runLines)
 import Lambdash.Unify
-import System.IO (stdout)
+import System.IO (hPutStrLn, stderr, stdout)
 
 -- | What an expression can evaluate to. Fields stay in written order, because
 -- that is the order to show them in. The checker says that a field exists, and
@@ -202,6 +202,12 @@ eval env expression =
     ESelect record label -> select label (eval env record)
     ELet name value body -> eval (Map.insert name (eval env value) env) body
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
+    EDo stmts -> VComp (\runtime -> runStmts runtime env stmts)
+    EWith overlay body -> case eval env overlay of
+      VOverlay layer -> VComp $ \runtime -> do
+        warnShadows runtime layer
+        runComp runtime {runtimeLocal = runtimeLocal runtime <> [layer]} (eval env body)
+      _ -> error "eval: the checker passed a non-Overlay to with"
   where
     evalLit (LInt n) = VInt n
     evalLit (LBool b) = VBool b
@@ -211,6 +217,28 @@ eval env expression =
     word (AVar name) = case Map.lookup name env of
       Just (VStr s) -> s
       _ -> error "eval: the checker passed a non-String argument"
+
+-- | Run a block's statements in order. Each statement sees the names that
+-- earlier ones bound.
+runStmts :: Runtime -> Scope -> [Stmt] -> IO Value
+runStmts _ _ [] = pure VUnit
+runStmts runtime env [SRun e] = runComp runtime (eval env e)
+runStmts runtime env (stmt : rest) = case stmt of
+  SRun e -> runComp runtime (eval env e) >> runStmts runtime env rest
+  SBind name e -> do
+    value <- runComp runtime (eval env e)
+    runStmts runtime (Map.insert name value env) rest
+  SLet name e -> runStmts runtime (Map.insert name (eval env e) env) rest
+
+-- | A @with@ block does not change the prompt, so it warns once about the
+-- shadowing it causes.
+warnShadows :: Runtime -> Overlay -> IO ()
+warnShadows runtime layer = do
+  state <- readIORef (runtimeState runtime)
+  let outer = ShellState (overlays state <> runtimeLocal runtime)
+      inner = ShellState (overlays outer <> [layer])
+      fresh = [shadow | shadow <- shadows inner, shadow `notElem` shadows outer]
+  mapM_ (\(Shadow var earlier later) -> hPutStrLn stderr ("warning: " <> later <> " shadows " <> var <> " from " <> earlier)) fresh
 
 -- | The names that exist before any input, with a type and a value together, so
 -- that the two cannot drift apart.

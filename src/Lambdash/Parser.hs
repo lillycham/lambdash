@@ -9,6 +9,8 @@
 -- > 1  "a"  true  false  ()  x  (e)  atoms
 -- > git log --oneline $x        external command, when nothing binds the head
 -- > source | stage | stage      pipeline, below application precedence
+-- > do x <- e; f x end           a block of statements, run in order
+-- > with o do e end              a block with one more environment layer
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
@@ -29,6 +31,7 @@ module Lambdash.Parser
     application,
     lambda,
     letIn,
+    doBlock,
     expr,
     parseExpr,
   )
@@ -41,7 +44,7 @@ import Data.Char (isSpace)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Void (Void)
-import Lambdash.Infer (Arg (..), Expr (..), Lit (..), Name)
+import Lambdash.Infer (Arg (..), Expr (..), Lit (..), Name, Stmt (..))
 import Text.Megaparsec
 import Text.Megaparsec.Char (alphaNumChar, char, hspace, letterChar, space1, string)
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -67,6 +70,8 @@ binding names = local (\context -> context {contextBound = add (contextBound con
 data ParseContext = ParseContext
   { contextBound :: Bound
   , commaDelimiter :: Bool
+  , -- | Inside @do ... end@, the word @end@ ends a command line.
+    inBlock :: Bool
   }
 
 type Parser = ParsecT Void String (Reader ParseContext)
@@ -76,7 +81,7 @@ withComma active = local (\context -> context {commaDelimiter = active})
 
 -- | Run a parser, given what is bound.
 runIn :: Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
-runIn bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False)
+runIn bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False False)
 
 -- | Skip spaces and comments.
 sc :: Parser ()
@@ -95,7 +100,10 @@ reservedNames =
   [ "let",
     "in",
     "true",
-    "false"
+    "false",
+    "do",
+    "end",
+    "with"
   ]
 
 -- | A reserved word. @let@ matches in @let x@, but not in @letter@.
@@ -149,7 +157,9 @@ accessor = do
 -- | One thing that needs no parentheses. It does not skip trailing space.
 atom :: Parser Expr
 atom =
-  (ELit <$> literal)
+  doBlock
+    <|> withBlock
+    <|> (ELit <$> literal)
     <|> record
     <|> (EList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
     <|> accessor
@@ -178,7 +188,7 @@ stringLiteral = char '"' *> manyTill L.charLiteral (char '"')
 wordChar :: Parser Char
 wordChar = do
   comma <- asks commaDelimiter
-  satisfy (\c -> not (isSpace c) && c `notElem` (")}]|\"$" :: String) && not (comma && c == ','))
+  satisfy (\c -> not (isSpace c) && c `notElem` (")}]|\"$;" :: String) && not (comma && c == ','))
 
 -- | The head of an external command: a path, or a word that starts with a name
 -- that nothing binds. A bound name is left for 'application'.
@@ -198,7 +208,9 @@ commandHead = do
 
 -- | One argument of an external command.
 argument :: Parser Arg
-argument =
+argument = do
+  block <- asks inBlock
+  when block (notFollowedBy (keyword "end"))
   AVar <$> (char '$' *> identifier)
     <|> AWord <$> stringLiteral
     <|> AWord <$> some wordChar
@@ -239,6 +251,43 @@ letIn = do
   lexeme (keyword "in")
   body <- binding [name] expr
   pure (ELet name bound body)
+
+-- | @do s; s; e end@. A statement is @x <- e@, @x = e@ or @e@, and the last
+-- one is an expression. A name that a statement binds is bound for the
+-- statements after it, so it is a function there, not a command. A @;@ may
+-- come before @end@.
+--
+-- Note: inside a block, a bare @end@ ends a command line. Quote it to pass it.
+doBlock :: Parser Expr
+doBlock = do
+  lexeme (keyword "do")
+  stmts <- local (\context -> context {inBlock = True, commaDelimiter = False}) statements
+  keyword "end"
+  case reverse stmts of
+    SRun _ : _ -> pure (EDo stmts)
+    _ -> fail "a block must end with an expression"
+ where
+  statements = do
+    stmt <- statement
+    let names = case stmt of
+          SBind name _ -> [name]
+          SLet name _ -> [name]
+          SRun _ -> []
+    more <- option [] $ do
+      _ <- symbol ";"
+      option [] (notFollowedBy (keyword "end") *> binding names statements)
+    pure (stmt : more)
+  statement =
+        (SBind <$> try (lexeme identifier <* symbol "<-") <*> expr)
+    <|> (SLet <$> try (lexeme identifier <* symbol "=" <* notFollowedBy (char '=')) <*> expr)
+    <|> (SRun <$> expr)
+
+-- | @with overlay do ... end@.
+withBlock :: Parser Expr
+withBlock = do
+  lexeme (keyword "with")
+  overlay <- postfix
+  EWith overlay <$> doBlock
 
 -- | Any expression.
 expr :: Parser Expr

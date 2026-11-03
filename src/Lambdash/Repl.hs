@@ -5,6 +5,7 @@ module Lambdash.Repl
   ( Session (..)
   , initial
   , sessionPrompt
+  , needsMore
   , Command (..)
   , command
   , parseCommand
@@ -73,6 +74,24 @@ data Event = Finished (Either SomeException Value) | Suspended
 -- | The session before any input.
 initial :: Session
 initial = Session typeEnv scope emptyState Nothing [] False
+
+-- | Does this input open more @do@ blocks than it closes? The REPL then reads
+-- another line. Only whole words count, outside string literals.
+needsMore :: String -> Bool
+needsMore input = depth (tokens (withoutStrings input)) > 0
+ where
+  withoutStrings [] = []
+  withoutStrings ('"' : rest) = ' ' : withoutStrings (skipString rest)
+  withoutStrings (c : rest) = c : withoutStrings rest
+  skipString ('\\' : _ : rest) = skipString rest
+  skipString ('"' : rest) = rest
+  skipString (_ : rest) = skipString rest
+  skipString [] = []
+  tokens = words . map (\c -> if c `elem` (";(){}[]|," :: String) then ' ' else c)
+  depth = foldl (\n token -> case token of
+    "do" -> n + 1
+    "end" -> n - 1
+    _ -> n) (0 :: Int)
 
 -- | What the prompt should say: the active environments, and any shadowing.
 sessionPrompt :: Session -> String
