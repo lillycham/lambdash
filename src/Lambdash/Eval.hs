@@ -14,6 +14,7 @@ module Lambdash.Eval
     builtins,
     typeEnv,
     scope,
+    summarise,
   )
 where
 
@@ -24,7 +25,10 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.List (isInfixOf, isPrefixOf)
 import Data.IORef
-import Control.Exception (IOException, throwIO, try)
+import Control.Concurrent.STM
+import Control.Exception (IOException, SomeException, bracket, displayException, fromException, throwIO, try)
+import Control.Monad (forM_, void)
+import System.Posix.Signals (Handler (..), installHandler, sigINT)
 import Data.List (sort)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
@@ -60,6 +64,8 @@ data Value
     VComp (Runtime -> IO Value)
   | VOverlay Overlay
   | VPatch Patch
+  | -- | A job handle: the job, and where its result arrives.
+    VJob Job (TMVar (Either SomeException Value))
   | VStream [Stage Value] Return
   | VStage [Stage Value]
   | VCollector [Stage Value]
@@ -94,6 +100,7 @@ render (VStage _) = "<stage>"
 render (VCollector _) = "<collector>"
 render (VOverlay overlay) = renderOverlay overlay
 render (VPatch patch) = renderPatch patch
+render (VJob job _) = "<job " <> show (jobNumber job) <> ">"
 
 commaSep :: [String] -> String
 commaSep = foldr step ""
@@ -206,6 +213,7 @@ eval env expression =
     ELet name value body -> eval (Map.insert name (eval env value) env) body
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
     EDo stmts -> VComp (\runtime -> runStmts runtime env stmts)
+    EBg e -> VComp (\runtime -> background runtime (eval env e))
     EWith overlay body -> case eval env overlay of
       VOverlay layer -> VComp $ \runtime -> do
         warnShadows runtime layer
@@ -267,6 +275,52 @@ listEntries path = do
           _ -> ""
     pure (VRecord [("name", VStr name), ("type", VStr kind), ("size", VInt size), ("ext", VStr ext)])
 
+-- | @e &@: start the action as a job that does not own the terminal, register
+-- it for the REPL's table, and give its handle at once.
+background :: Runtime -> Value -> IO Value
+background runtime action = do
+  number <- case runtimeTable runtime of
+    Nothing -> pure 0
+    Just table -> atomicModifyIORef' (tableNext table) (\n -> (n + 1, n))
+  (job, result) <- startJob runtime number (runtimeLine runtime) False (`runComp` action) summarise
+  forM_ (runtimeTable runtime) (\table -> modifyIORef' (tableNew table) (job :))
+  pure (VJob job result)
+
+-- | What a job's notice says when it ends: what the line would have shown.
+summarise :: Either SomeException Value -> Either String String
+summarise (Right VUnit) = Right ""
+summarise (Right (VStatus (ExitedWith 0))) = Right ""
+summarise (Right value) = Right (render value)
+summarise (Left err) = Left (maybe (displayException err) (\(StreamError message) -> message) (fromException err))
+
+-- | The result of a job, once it is done. A stopped job cannot finish by
+-- itself, so waiting for one is an error rather than a hang.
+--
+-- The shell ignores SIGINT so that Ctrl-C reaches jobs. While wait blocks,
+-- the shell owns the terminal and no job does, so wait catches SIGINT itself.
+waitFor :: Job -> TMVar (Either SomeException Value) -> IO Value
+waitFor job result = do
+  interrupted <- newEmptyTMVarIO
+  let catchInt = Catch (atomically (void (tryPutTMVar interrupted ())))
+      waitOn = atomically $
+            (Right . Just <$> readTMVar result)
+        `orElse` (readTVar (jobStopped job) >>= check >> pure (Right Nothing))
+        `orElse` (Left () <$ takeTMVar interrupted)
+  outcome <- bracket (installHandler sigINT catchInt Nothing) (\old -> installHandler sigINT old Nothing) (const waitOn)
+  case outcome of
+    Left () -> throwIO (StreamError ("wait: interrupted; job " <> show (jobNumber job) <> " is still running"))
+    Right Nothing -> throwIO (StreamError ("job " <> show (jobNumber job) <> " is stopped: fg it"))
+    Right (Just value) -> markCollected job >> either throwIO pure value
+
+-- | Bring a job to the foreground, then wait for it.
+foregroundJob :: Job -> TMVar (Either SomeException Value) -> IO Value
+foregroundJob job result = do
+  continueJob True job
+  outcome <- awaitDone job (readTMVar result)
+  case outcome of
+    Nothing -> throwIO (StreamError ("[" <> show (jobNumber job) <> "] stopped  " <> jobLine job))
+    Just value -> markCollected job >> either throwIO pure value
+
 -- | Run a block's statements in order. Each statement sees the names that
 -- earlier ones bound.
 runStmts :: Runtime -> Scope -> [Stmt] -> IO Value
@@ -321,6 +375,12 @@ builtins =
     ("use", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "use" useV),
     ("useLocal", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "useLocal" useLocalV),
     ("unuse", mono (TFun TString (TComp (effect Environment) TUnit)), VBuiltin "unuse" unuseV),
+    ( "wait",
+      Forall [t, effA] (TFun (TJob (effectVar effA) (TVar t)) (TComp (effectVar effA) (TVar t))),
+      VBuiltin "wait" (jobAction waitFor) ),
+    ( "fg",
+      Forall [t, effA] (TFun (TJob (effectVar effA) (TVar t)) (TComp (effectVar effA) (TVar t))),
+      VBuiltin "fg" (jobAction foregroundJob) ),
     ( "pipefail",
       Forall [t, u, effA] (TFun (TStream (effectVar effA) (TVar t) (TVar u) TStatus) (TStream (effectVar effA) (TVar t) (TVar u) TStatus)),
       VBuiltin "pipefail" pipefailV ),
@@ -339,6 +399,8 @@ builtins =
     effA = Var 2
     effB = Var 3
     lsV path = VStream [TransformStage (\_ emit -> listEntries (str path) >>= mapM_ emit)] ReturnUnit
+    jobAction act (VJob job result) = VComp (const (act job result))
+    jobAction _ _ = error "wait: the checker passed a non-job"
     pipefailV (VStream stages _) = VStream stages ReturnPipefail
     pipefailV _ = error "pipefail: the checker passed a non-stream"
     -- Run the first, then the computation that its result chooses.

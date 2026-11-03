@@ -82,6 +82,8 @@ data Expr
   | -- | @with overlay do ... end@: run the block with one more environment
     -- layer, for its dynamic extent only.
     EWith Expr Expr
+  | -- | @e &@: start @e@ as a background job, and give its handle.
+    EBg Expr
   deriving (Eq, Show)
 
 -- | One statement of a @do@ block.
@@ -137,6 +139,7 @@ ftv (TFun t1 t2) = ftv t1 `Set.union` ftv t2
 ftv (TCon _) = Set.empty
 ftv (TRecord r) = ftvRow r
 ftv (TComp eff t) = ftvEffects eff `Set.union` ftv t
+ftv (TJob eff t) = ftvEffects eff `Set.union` ftv t
 ftv (TStream eff i o r) = Set.unions (ftvEffects eff : map ftv [i, o, r])
 ftv (TQualified cs ty) = Set.unions (ftv ty : map constraintVars cs)
 ftv (TList ty) = ftv ty
@@ -411,6 +414,13 @@ infer env (EWith overlay body) = do
   isExec (Exec _) = True
   isExec _ = False
 
+-- Starting a job starts its commands, so its row is the job's row, and the
+-- preflight checks them before anything runs. The row also travels in the
+-- handle, for wait and fg.
+infer env (EBg e) = do
+  (s, eff, result) <- inferRun env e
+  pure (s, TComp eff (TJob eff result))
+
 -- | The statements of a block: what they taught, each one's effect row, and
 -- the last one's result. A run statement is a computation or a stream. A
 -- stream reads the terminal, so its input is Bytes, and its result is its
@@ -470,6 +480,7 @@ commands (EDo stmts) = concatMap stmtCommands stmts
   stmtCommands (SLet _ e) = commands e
   stmtCommands (SRun e) = commands e
 commands (EWith overlay body) = commands overlay <> commands body
+commands (EBg e) = commands e
 commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied.

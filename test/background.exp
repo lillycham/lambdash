@@ -1,0 +1,96 @@
+#!/usr/bin/env expect
+# Run from the repository root: it uses test/reader.sh.
+# Usage: expect test/background.exp path/to/lambdash
+# e & starts a job and gives its handle; wait and fg take its result.
+# Between an echoed line and the next prompt the line editor may write a break
+# and, by TERM, keypad and newline control sequences.
+set timeout 5
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {λ> $} "prompt" }
+
+# λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
+# in this directory from activating, and the tests from touching real state.
+set state [exec mktemp -d]
+spawn env XDG_STATE_HOME=$state [lindex $argv 0]
+prompt
+
+send "j <- sh -c \"sleep 1; exit 4\" &\r"
+see {j : Job Status} "& gives a handle at once"
+prompt
+send "jobs\r"
+see {\[1\] running  j <- sh -c "sleep 1; exit 4" &} "the job is in the table"
+prompt
+send "wait j\r"
+see {exit 4\r\n} "wait gives its result"
+prompt
+send "wait j\r"
+see {exit 4\r\n} "and again"
+prompt
+send "jobs\r"
+see {jobs(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+λ> $} "a waited job leaves the table quietly"
+
+# A job nobody waits for is reported at the next prompt.
+send "sh -c \"exit 6\" &\r"
+see {\[1\] sh -c "exit 6" &} "a bare line shows the job"
+prompt
+after 500
+send "\r"
+see {\[1\] done  sh -c "exit 6" &\r\nexit 6} "its end is reported"
+prompt
+
+# A background reader stops for the terminal; fg j hands it over.
+send "r <- ./test/reader.sh &\r"
+see {r : Job Status} "start a reader"
+prompt
+after 500
+send "\r"
+see {\[1\] stopped  r <- \./test/reader\.sh &} "it stops for the terminal"
+prompt
+send "wait r\r"
+see {job 1 is stopped: fg it} "wait refuses a stopped job"
+prompt
+send "fg r\r"
+after 300
+send "via fg\r"
+see {via fg\r\nvia fg} "fg j gives it the terminal"
+send "\004"
+prompt
+send "jobs\r"
+see {jobs(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+λ> $} "fg collected it"
+
+# Ctrl-C interrupts wait, not the job.
+send "s <- sleep 100 &\r"
+prompt
+send "wait s\r"
+after 300
+send "\003"
+see {wait: interrupted; job 1 is still running} "Ctrl-C interrupts wait"
+prompt
+send "jobs\r"
+see {\[1\] running  s <- sleep 100 &} "and the job keeps running"
+prompt
+
+# A line that starts a job and is then stopped takes the next number.
+send "do t <- sleep 100 &; ./test/reader.sh end\r"
+after 300
+send "\032"
+see {\[3\] stopped  do t <- sleep 100 &; \./test/reader\.sh end} "a stopped line numbers after its jobs"
+prompt
+send "jobs\r"
+see {\[2\] running  do t <- sleep 100 &} "its job is in the table"
+prompt
+
+send ":q\r"
+see {there are jobs} ":q warns"
+send ":q\r"
+expect eof
+exec rm -rf $state
+puts "\nALL PASSED"

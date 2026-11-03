@@ -38,6 +38,6 @@ fresh state directory. `--no-nix` skips the suite that builds a flake.
 | [environments](docs/environments.md) | overlays, `use`, `unuse`, `:env` |
 | [nix](docs/nix.md) | `pkg`, `dev`, flake references, GC roots, `andThen` |
 | [directories](docs/directories.md) | path arguments, `cd`, `ls`, `useLocal`, `allow` |
-| [jobs](docs/jobs.md) | Ctrl-Z, `jobs`, `fg`, `bg` |
+| [jobs](docs/jobs.md) | Ctrl-Z, `&` and job handles, `wait`, `jobs`, `fg`, `bg` |
 | [nix notes](docs/nix-notes.md) | Nix behaviour, checked against Nix 2.34 |
 | [equality](docs/equality.md) | design note: `Eq a` |

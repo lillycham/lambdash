@@ -17,7 +17,7 @@ expr        = let | lambda | pipeline ;
 
 let         = "let" IDENT "=" expr "in" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
-pipeline    = stage { "|" stage } ;
+pipeline    = stage { "|" stage } [ "&" ] ;
 stage       = lambda | external | application ;
 application = postfix { slot } { postfix } ;
 external    = HEAD { ARG } ;
@@ -61,7 +61,7 @@ COMMENT     = "--" { any character except newline } ;
 
 HEAD        = WORD ;     (* a path, or a word that starts with an unbound name *)
 ARG         = "$" IDENT | STRING | WORD ;
-WORD        = { any character except space and ) } ] | " $ ; } ;
+WORD        = { any character except space and ) } ] | " $ ; & } ;
 REF         = { LETTER | DIGIT | . _ - / : ~ + @ ? = & # % } ;   (* with at least one # *)
 ```
 
@@ -130,6 +130,8 @@ See [structured streams](streams.md) for lists, line framing, filters and collec
 - `lambda` wins over `external`, so `echo a -> b` is a lambda.
 - A `"` ends a word, so `a"b"` is two arguments.
 - A `;` ends a word everywhere, so `echo a;b` is an error outside a block.
+- An `&` ends a word too, and a trailing `&` backgrounds the pipeline before
+  it: `a | b &` is `(a | b) &`. See [jobs](jobs.md).
 - A bare `cd` means `cd ~`, also under `:t`. The function is `x -> cd $x`.
 - `--` starts a comment in expression position, which is why flags such as
   `--local` are not syntax.

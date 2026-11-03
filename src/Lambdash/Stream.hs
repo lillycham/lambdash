@@ -13,7 +13,7 @@ import Data.IORef
 import Data.Map.Strict qualified as Map
 import Lambdash.Overlay (Environ)
 import Lambdash.Runtime (JobHooks (..), Runtime (..), runtimeEnviron)
-import Lambdash.Process (Status (..), continueGroup, giveTerminal, programExists, readModes, spawnStage, writeModes)
+import Lambdash.Process (Status (..), continueGroup, giveTerminal, programExists, readModes, shellModes, spawnStage, writeModes)
 import System.Exit (ExitCode (..))
 import System.IO
 import System.IO.Error (isResourceVanishedError)
@@ -226,8 +226,11 @@ withTerminal isForeground action = do
     when foreground $ do
       giveTerminal "resumed job takes the terminal" job
       mapM_ (writeModes "resumed job's modes") jobAttrs
+  -- A job that starts in the background takes the shell's saved modes: the
+  -- terminal's current modes may be the line editor's raw mode by now.
   acquire = do
-    attrs <- readModes "modes before the job"
+    owned <- isForeground
+    attrs <- if owned then readModes "modes before the job" else shellModes
     group <- getProcessGroupID
     previous <- installHandler sigTTOU Ignore Nothing
     pure (group, attrs, previous)

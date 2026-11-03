@@ -16,9 +16,7 @@ module Lambdash.Repl
   , renderError
   , Step (..)
   , step
-  , Job
-  , jobNumber
-  , jobLine
+  , Entry
   ) where
 
 import Control.Monad (filterM)
@@ -28,8 +26,7 @@ import Data.Char (chr, ord)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.List (intercalate)
-import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar
+import Control.Concurrent.STM
 import Control.Exception (SomeException, catch, fromException, throwIO)
 import Control.Exception qualified as Exception
 import Data.Char (isDigit)
@@ -37,18 +34,17 @@ import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Control.Monad (forM_, when)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Control.Monad (when)
 import System.Posix.IO (stdInput)
 import System.Posix.Process (getProcessGroupID)
 import System.Posix.Terminal (queryTerminal)
-import System.Posix.Types (ProcessGroupID)
 import Lambdash.Nix (resolveDev)
 import Lambdash.Overlay
 import Lambdash.Trust (autoName, flakeHash, isAllowed)
 import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
-import Lambdash.Process (Status (..), continueGroup, giveTerminal, programExists)
+import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, satisfy, try)
 import System.Directory (getCurrentDirectory)
@@ -64,7 +60,7 @@ data Session = Session
   , -- | Where Nix GC roots go. Without one, @pkg@ and @dev@ root nothing.
     sessionRoots :: Maybe FilePath
   , -- | Stopped jobs, oldest first.
-    sessionJobs :: [Job]
+    sessionJobs :: [Entry]
   , -- | Whether @:q@ has already warned about stopped jobs.
     sessionWarned :: Bool
   , -- | Directories whose flake activated on arrival, with the hash approved.
@@ -73,25 +69,22 @@ data Session = Session
     sessionNotified :: Set.Set (FilePath, String)
   }
 
--- | A line that Ctrl-Z stopped. It is still running, parked on its own
--- thread, and holds its processes, pipes and workers as they were.
-data Job = Job
-  { jobNumber :: Int
-  , jobLine :: String
-  , jobEvents :: MVar Event
-  , -- | Wakes a parked job: True in the foreground, False in the background.
-    jobResume :: MVar Bool
-  , -- | What the line does with its result, given the session at that time.
-    jobFinish :: Session -> Value -> IO Step
-  , -- | Whether the job owns the terminal. The job's thread reads it too.
-    jobForeground :: IORef Bool
-  , -- | The process group of the job's current pipeline.
-    jobGroup :: IORef (Maybe ProcessGroupID)
-  , -- | Running in the background, rather than stopped.
-    jobRunning :: Bool
+-- | A job in the table: a line that Ctrl-Z stopped, or a job that @&@
+-- started. Either is still running on its own thread, or parked there with
+-- its processes, pipes and workers as they were.
+data Entry = Entry
+  { -- | The number in the table. A line takes one only when it stops, so
+    -- that the jobs it starts with @&@ get the lowest numbers.
+    entryNumber :: Int
+  , entryJob :: Job
+  , -- | For a line: where its result arrives, and what the line does with it,
+    -- given the session at that time.
+    entryLine :: Maybe (TMVar (Either SomeException Value), Session -> Value -> IO Step)
+  , -- | Where the line registers the jobs it starts with @&@.
+    entryTable :: Maybe JobTable
+  , -- | The state last reported, so that each change is reported once.
+    entrySeen :: JobState
   }
-
-data Event = Finished (Either SomeException Value) | Suspended
 
 -- | The session before any input.
 initial :: Session
@@ -185,10 +178,12 @@ parseCommand bound input = case words input of
   ["fg", number] | free "fg", Just n <- jobNumberOf number -> Right (Foreground (Just n))
   _ -> first errorBundlePretty (runIn bound (sc *> command <* eof) input)
  where
+  -- A word is a command when nothing binds it, or when it is still the
+  -- builtin: fg is also a function, and fg j applies it.
   free name = case bound of
     AllBound -> False
     BoundNames names -> Set.notMember name names
-    BoundWith names _ -> Set.notMember name names
+    BoundWith names builtin -> Set.notMember name names || Set.member name builtin
   jobNumberOf ('%' : digits) = jobNumberOf digits
   jobNumberOf digits
     | not (null digits) && all isDigit digits = Just (read digits)
@@ -214,6 +209,7 @@ hideEffects (TList ty) = TList (hideEffects ty)
 hideEffects (TStage i o) = TStage (hideEffects i) (hideEffects o)
 hideEffects (TCollector i o) = TCollector (hideEffects i) (hideEffects o)
 hideEffects (TComp _ t) = TComp noEffects (hideEffects t)
+hideEffects (TJob _ t) = TJob noEffects (hideEffects t)
 hideEffects (TStream _ i o r) = TStream noEffects (hideEffects i) (hideEffects o) (hideEffects r)
 hideEffects (TRecord row) = TRecord (hideRow row)
  where
@@ -260,16 +256,27 @@ renderTy (TComp eff result) = do
   pure $ case result of
     TFun _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     TComp _ _ -> "Comp" <> effects <> " (" <> text <> ")"
+    TJob _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     TStream _ _ _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     TStage _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     TCollector _ _ -> "Comp" <> effects <> " (" <> text <> ")"
     _ -> "Comp" <> effects <> " " <> text
+renderTy (TJob eff result) = do
+  effects <- renderEffects eff
+  text <- renderTy result
+  pure $ case result of
+    TFun _ _ -> "Job" <> effects <> " (" <> text <> ")"
+    TComp _ _ -> "Job" <> effects <> " (" <> text <> ")"
+    TStream _ _ _ _ -> "Job" <> effects <> " (" <> text <> ")"
+    TJob _ _ -> "Job" <> effects <> " (" <> text <> ")"
+    _ -> "Job" <> effects <> " " <> text
 renderTy (TStream eff input output result) = do
   effects <- renderEffects eff
   parts <- mapM renderTy [input, output, result]
   let argument ty text = case ty of
         TFun _ _ -> "(" <> text <> ")"
         TComp _ _ -> "(" <> text <> ")"
+        TJob _ _ -> "(" <> text <> ")"
         TStream _ _ _ _ -> "(" <> text <> ")"
         TStage _ _ -> "(" <> text <> ")"
         TCollector _ _ -> "(" <> text <> ")"
@@ -285,6 +292,7 @@ renderAdapter name input output = do
   let argument ty text = case ty of
         TFun _ _ -> "(" <> text <> ")"
         TComp _ _ -> "(" <> text <> ")"
+        TJob _ _ -> "(" <> text <> ")"
         TStream _ _ _ _ -> "(" <> text <> ")"
         TStage _ _ -> "(" <> text <> ")"
         TCollector _ _ -> "(" <> text <> ")"
@@ -377,77 +385,103 @@ committed runtime start next text = do
       else Continue next {sessionShell = state} (output warnings)
 
 -- | Run a line's computation on its own thread, so that Ctrl-Z can park it.
--- Then wait for it, as 'awaitJob' does.
+-- Then wait for it, as 'awaitEntry' does.
 foreground :: Session -> String -> Runtime -> Value -> (Runtime -> Session -> Value -> IO Step) -> IO Step
 foreground session line runtime0 value finish = do
-  events <- newEmptyMVar
-  resume <- newEmptyMVar
-  owned <- newIORef True
-  group <- newIORef Nothing
-  let hooks = JobHooks
-        { hookPark = do
-            putMVar events Suspended
-            next <- takeMVar resume
-            writeIORef owned next
-            pure next
-        , hookStarted = writeIORef group . Just
-        , hookForeground = readIORef owned
-        }
-      runtime = runtime0 {runtimeJob = Just hooks}
-      number = 1 + maximum (0 : map jobNumber (sessionJobs session))
-  _ <- forkIO (Exception.try (runComp runtime value) >>= putMVar events . Finished)
-  awaitJob session (Job number line events resume (finish runtime) owned group False)
+  table <- JobTable <$> newIORef (nextNumber session) <*> newIORef []
+  let runtime = runtime0 {runtimeLine = line, runtimeTable = Just table}
+  (job, result) <- startJob runtime 0 line True (`runComp` value) summarise
+  awaitEntry session (Entry 0 job (Just (result, finish runtime)) (Just table) Running)
 
--- | Wait until a job ends or stops. A stopped job joins the table.
-awaitJob :: Session -> Job -> IO Step
-awaitJob session job = do
-  event <- takeMVar (jobEvents job)
+nextNumber :: Session -> Int
+nextNumber session = 1 + maximum (0 : map entryNumber (sessionJobs session))
+
+-- | Wait until a job ends or stops. A stopped job joins the table, and the
+-- jobs that its line started with @&@ join it either way.
+awaitEntry :: Session -> Entry -> IO Step
+awaitEntry session entry = do
+  let job = entryJob entry
+  outcome <- case entryLine entry of
+    Just (result, finish) -> fmap (Left . (,) finish) <$> awaitDone job (readTMVar result)
+    Nothing -> fmap Right <$> awaitDone job (readTMVar (jobOutcome job))
   -- A job that was running in the background can end just as fg hands it the
   -- terminal, and then nothing hands it back. Take it back in every case.
   reclaimTerminal
-  case event of
-    Finished (Right value) -> jobFinish job session value
-    Finished (Left err) -> case fromException err of
-      Just (StreamError message) -> pure (Continue session message)
+  current <- adopt (entryTable entry) session
+  case outcome of
+    Nothing ->
+      let number = if entryNumber entry == 0 then nextNumber current else entryNumber entry
+          stopped = entry {entryNumber = number, entrySeen = Stopped}
+      in pure (Continue current {sessionJobs = sessionJobs current <> [stopped], sessionWarned = False}
+        (describeEntry Stopped stopped))
+    Just (Left (finish, Right value)) -> finish current value
+    Just (Left (_, Left err)) -> case fromException err of
+      Just (StreamError message) -> pure (Continue current message)
       Nothing -> throwIO err
-    Suspended ->
-      let stopped = job {jobRunning = False}
-      in pure (Continue session {sessionJobs = sessionJobs session <> [stopped], sessionWarned = False}
-        (describeJob stopped))
+    Just (Right summary) -> do
+      markCollected job
+      pure (Continue current (either id id summary))
+
+-- | Move the jobs that a line started with @&@ into the table.
+adopt :: Maybe JobTable -> Session -> IO Session
+adopt Nothing session = pure session
+adopt (Just table) session = do
+  started <- atomicModifyIORef' (tableNew table) (\jobs -> ([], jobs))
+  let entries = [Entry (jobNumber job) job Nothing Nothing Running | job <- reverse started]
+  pure session {sessionJobs = sessionJobs session <> entries}
 
 reclaimTerminal :: IO ()
 reclaimTerminal = do
   tty <- queryTerminal stdInput
   when tty (getProcessGroupID >>= giveTerminal "REPL reclaims the terminal")
 
-describeJob :: Job -> String
-describeJob job = "[" <> show (jobNumber job) <> "] " <> (if jobRunning job then "running" else "stopped") <> "  " <> jobLine job
+describeEntry :: JobState -> Entry -> String
+describeEntry state entry =
+  "[" <> show (entryNumber entry) <> "] " <> word state <> "  " <> jobLine job
+ where
+  job = entryJob entry
+  word Running = "running"
+  word Stopped = "stopped"
+  word Done = "done"
 
--- | What background jobs did since the last prompt: a job that ended gives
--- its result now, in the session as it is now, and a job that stopped waits
--- in the table.
+-- | What jobs did since the last prompt. A job that ended gives its result
+-- now, unless wait or fg took it: a line's in the session as it is now, as
+-- the line would have shown it. A job that stopped is reported once.
 notices :: Session -> IO (Session, [String])
-notices session = go session [] [job | job <- sessionJobs session, jobRunning job]
+notices session = go session {sessionJobs = []} [] (sessionJobs session)
  where
   go current messages [] = pure (current, reverse messages)
-  go current messages (job : rest) = do
-    event <- tryTakeMVar (jobEvents job)
-    let others = filter ((/= jobNumber job) . jobNumber) (sessionJobs current)
-        label = "[" <> show (jobNumber job) <> "] "
-    case event of
-      Nothing -> go current messages rest
-      Just Suspended ->
-        let stopped = job {jobRunning = False}
-        in go current {sessionJobs = others <> [stopped]} (describeJob stopped : messages) rest
-      Just (Finished (Right value)) -> do
-        result <- jobFinish job current {sessionJobs = others} value
-        case result of
-          Continue next text -> go next (unwords' [label <> "done  " <> jobLine job, text] : messages) rest
-          Quit -> go current {sessionJobs = others} messages rest
-      Just (Finished (Left err)) -> case fromException err of
-        Just (StreamError message) -> go current {sessionJobs = others} ((label <> "failed  " <> jobLine job <> ": " <> message) : messages) rest
-        Nothing -> throwIO err
-  unwords' parts = intercalate "\n" (filter (not . null) parts)
+  go current0 messages (entry : rest) = do
+    current <- adopt (entryTable entry) current0
+    let job = entryJob entry
+        label = "[" <> show (entryNumber entry) <> "] "
+        keep e = current {sessionJobs = sessionJobs current <> [e]}
+    state <- atomically (jobState job)
+    collected <- readTVarIO (jobCollected job)
+    case state of
+      Done | collected -> go current messages rest
+      Done -> case entryLine entry of
+        Just (result, finish) -> do
+          value <- atomically (readTMVar result)
+          case value of
+            Right v -> do
+              step' <- finish current v
+              case step' of
+                Continue next text -> go next (lines' [label <> "done  " <> jobLine job, text] : messages) rest
+                Quit -> go current messages rest
+            Left err -> case fromException err of
+              Just (StreamError message) -> go current ((label <> "failed  " <> jobLine job <> ": " <> message) : messages) rest
+              Nothing -> throwIO err
+        Nothing -> do
+          summary <- atomically (readTMVar (jobOutcome job))
+          let text = case summary of
+                Right shown -> lines' [label <> "done  " <> jobLine job, shown]
+                Left message -> label <> "failed  " <> jobLine job <> ": " <> message
+          go current (text : messages) rest
+      Stopped | entrySeen entry /= Stopped ->
+        go (keep entry {entrySeen = Stopped}) (describeEntry Stopped entry : messages) rest
+      _ -> go (keep entry {entrySeen = state}) messages rest
+  lines' parts = intercalate "\n" (filter (not . null) parts)
 
 renderShadow :: Shadow -> String
 renderShadow (Shadow var earlier later) = "warning: " <> later <> " shadows " <> var <> " from " <> earlier
@@ -528,6 +562,11 @@ data Step
     Continue Session String
   | Quit
 
+lastWord :: String -> String
+lastWord text = case words text of
+  [] -> ""
+  ws -> last ws
+
 -- | Run one line. A line that fails leaves the session as it was. Only a
 -- computation at the prompt, or on the right of @<-@, has any effect.
 --
@@ -580,40 +619,38 @@ stepLine session input =
           active = Map.member cwd (sessionFlakes session)
       pure (Continue session {sessionShell = if active then kept else shell, sessionFlakes = Map.delete cwd (sessionFlakes session)}
         (if active then name <> " deactivated" else ""))
-    Right ListJobs -> pure (Continue session (intercalate "\n" (map describeJob (sessionJobs session))))
+    Right ListJobs -> do
+      states <- mapM (atomically . jobState . entryJob) (sessionJobs session)
+      pure (Continue session (intercalate "\n" (zipWith describeEntry states (sessionJobs session))))
     Right (Foreground wanted) ->
       let jobs = sessionJobs session
           chosen = case wanted of
             Nothing -> reverse jobs
-            Just n -> filter ((== n) . jobNumber) jobs
+            Just n -> filter ((== n) . entryNumber) jobs
       in case chosen of
         [] -> pure (Continue session (maybe "no jobs" (\n -> "no job " <> show n) wanted))
-        job : _ -> do
-          let rest = session {sessionJobs = filter ((/= jobNumber job) . jobNumber) jobs}
-          if jobRunning job
-            then do
-              -- It is not parked, so hand it the terminal from here.
-              writeIORef (jobForeground job) True
-              group <- readIORef (jobGroup job)
-              tty <- queryTerminal stdInput
-              forM_ group $ \pgid -> do
-                when tty (giveTerminal "fg hands a running job the terminal" pgid)
-                continueGroup "fg continues a running job" pgid
-            else putMVar (jobResume job) True
-          awaitJob rest {sessionWarned = False} job {jobRunning = False}
-    Right (Background wanted) ->
+        entry : _ -> do
+          let number = entryNumber entry
+              rest = session {sessionJobs = filter ((/= number) . entryNumber) jobs}
+          continueJob True (entryJob entry)
+          awaitEntry rest {sessionWarned = False} entry
+    Right (Background wanted) -> do
+      states <- mapM (atomically . jobState . entryJob) (sessionJobs session)
       let jobs = sessionJobs session
-          stopped = [job | job <- jobs, not (jobRunning job)]
+          stopped = [entry | (entry, Stopped) <- zip jobs states]
           chosen = case wanted of
             Nothing -> reverse stopped
-            Just n -> filter ((== n) . jobNumber) stopped
-      in case chosen of
+            Just n -> filter ((== n) . entryNumber) stopped
+      case chosen of
         [] -> pure (Continue session (maybe "no stopped jobs" (\n -> "no stopped job " <> show n) wanted))
-        job : _ -> do
-          putMVar (jobResume job) False
-          let running = job {jobRunning = True}
-              others = filter ((/= jobNumber job) . jobNumber) jobs
-          pure (Continue session {sessionJobs = others <> [running]} ("[" <> show (jobNumber job) <> "] " <> jobLine job <> " &"))
+        entry : _ -> do
+          let job = entryJob entry
+              number = entryNumber entry
+              running = entry {entrySeen = Running}
+              others = filter ((/= number) . entryNumber) jobs
+              shown = jobLine job <> if lastWord (jobLine job) == "&" then "" else " &"
+          continueJob False job
+          pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do
@@ -675,4 +712,5 @@ stepLine session input =
             name : _ -> pure (Continue session ("command not found: " <> name))
     showResult VUnit = ""
     showResult (VStatus (ExitedWith 0)) = ""
+    showResult (VJob job _) = "[" <> show (jobNumber job) <> "] " <> jobLine job
     showResult value = render value

@@ -48,6 +48,46 @@ exit 3
 - A line cannot start in the background yet: there is no `&`. Stop it with
   Ctrl-Z, then `bg`.
 
+## Job handles
+
+`e &` starts `e` as a background job and gives a handle to it at once. The
+handle is a value: it can be named, passed around and waited on.
+
+```text
+e &   : Comp e a -> Comp e (Job e a)     -- also a stream, as in a do block
+wait  : Job e a -> Comp e a
+fg    : Job e a -> Comp e a
+```
+
+```text
+λ> j <- sh -c "sleep 5; exit 4" &
+j : Job Status
+λ> jobs
+[1] running  j <- sh -c "sleep 5; exit 4" &
+λ> wait j
+exit 4
+```
+
+- **The row travels with the job.** `:t sleep 1 &` is
+  `Comp {exec sleep} (Job {exec sleep} Status)`. Starting the job starts its
+  commands, so the preflight checks them before anything runs. `wait` and
+  `fg` carry the same row.
+- **`wait j`** blocks until `j` ends and gives its result: a status, a record
+  from `collect`, the value of a block. It can be called any number of times.
+  `wait` of a stopped job is an error, because the job cannot finish by
+  itself: `fg` it. Ctrl-C interrupts `wait`, and the job keeps running.
+- **`fg j`** hands `j` the terminal, continues it, and waits. A stopped job
+  resumes where it stopped.
+- `&` jobs join the table, so `jobs`, `fg 2` and `bg 2` work on them too.
+  `fg 2` is the command, and `fg j`, with an expression, is the function.
+- A job that nobody waited for is reported at the next prompt, with its
+  result. One that `wait` or `fg` collected is not.
+- A job that starts in the background never takes the terminal or its modes.
+  If a process in it reads the terminal, the job stops and is reported, as
+  after `bg`.
+- `a | b &` backgrounds the whole pipeline. `&` ends a bareword, so
+  `echo a&b` is `echo a &` followed by `b`: quote it.
+
 ## What a job is
 
 A job is a whole line, not only its processes. Each line runs on its own
@@ -89,5 +129,4 @@ orphaned. A running job keeps running.
 
 ## Not yet
 
-- `&` to start a line in the background.
 - Notices wait for the next prompt. They do not interrupt a line being typed.

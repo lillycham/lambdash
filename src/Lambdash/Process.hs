@@ -4,6 +4,7 @@ module Lambdash.Process
   ( Status (..)
   , setupTerminal
   , saveShellTerminal
+  , shellModes
   , traceTerminal
   , giveTerminal
   , readModes
@@ -16,6 +17,8 @@ module Lambdash.Process
 
 import Control.Concurrent (isCurrentThreadBound, myThreadId)
 import Control.Exception (IOException, try)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad (unless, void, when)
 import Data.Map.Strict qualified as Map
 import Foreign hiding (void)
@@ -64,10 +67,23 @@ saveShellTerminal = do
   tty <- queryTerminal stdInput
   if not tty then pure (pure ()) else do
     modes <- readModes "save shell modes"
+    writeIORef savedModes modes
     group <- getProcessGroupID
     pure $ do
       giveTerminal "shell takes the terminal" group
       mapM_ (writeModes "shell restores its modes") modes
+
+-- | The shell's own modes, from before the line editor: cooked, with echo.
+-- Nothing until 'saveShellTerminal' runs.
+savedModes :: IORef (Maybe TerminalAttributes)
+savedModes = unsafePerformIO (newIORef Nothing)
+{-# NOINLINE savedModes #-}
+
+-- | The modes a job should have when it has none of its own yet. A job that
+-- starts in the background must not read the terminal's modes then: the line
+-- editor may already have the terminal in raw mode for the next prompt.
+shellModes :: IO (Maybe TerminalAttributes)
+shellModes = readIORef savedModes
 
 -- | With @LAMBDASH_TRACE_TTY@ set, each terminal and job-control call, its
 -- result and the thread that made it go to stderr.

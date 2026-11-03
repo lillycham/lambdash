@@ -11,6 +11,7 @@
 -- > source | stage | stage      pipeline, below application precedence
 -- > do x <- e; f x end           a block of statements, run in order
 -- > with o do e end              a block with one more environment layer
+-- > sleep 10 &                   a background job; gives its handle
 -- > nixpkgs#ffmpeg  .#dev        a flake reference: a String
 -- > use nixpkgs#ffmpeg           means do o <- pkg "nixpkgs#ffmpeg"; use o end
 -- > with .#bench do e end        means do o <- pkg ".#bench"; with o do e end end
@@ -209,7 +210,7 @@ stringLiteral = char '"' *> manyTill L.charLiteral (char '"')
 wordChar :: Parser Char
 wordChar = do
   comma <- asks commaDelimiter
-  satisfy (\c -> not (isSpace c) && c `notElem` (")}]|\"$;" :: String) && not (comma && c == ','))
+  satisfy (\c -> not (isSpace c) && c `notElem` (")}]|\"$;&" :: String) && not (comma && c == ','))
 
 -- | The head of an external command: a path, or a word that starts with a name
 -- that nothing binds. A bound name is left for 'application'.
@@ -376,13 +377,18 @@ withBlock = do
     _ -> EWith overlay body
 
 -- | Any expression.
+--
+-- A trailing @&@ starts the whole pipeline before it as a background job:
+-- @a | b &@ is @(a | b) &@.
 expr :: Parser Expr
 expr = letIn <|> lambda <|> pipeline
  where
   pipeline = do
     firstStage <- application
     rest <- many (symbol "|" *> (lambda <|> application))
-    pure (foldl EPipe firstStage rest)
+    let whole = foldl EPipe firstStage rest
+    background <- optional (try (symbol "&" <* notFollowedBy (char '&')))
+    pure (maybe whole (const (EBg whole)) background)
 
 -- | Parse one whole expression, or give a readable error.
 parseExpr :: String -> Either String Expr
