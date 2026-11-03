@@ -59,9 +59,13 @@ data Bound
   = -- | Every name is bound, so nothing is an external command.
     AllBound
   | BoundNames (Set Name)
+  | -- | Bound names, and the builtins that still have their builtin value,
+    -- whose signatures guide parsing. A rebound @ls@ is an ordinary function.
+    BoundWith (Set Name) (Set Name)
 
 isBound :: Name -> Bound -> Bool
 isBound _ AllBound = True
+isBound name (BoundWith names _) = Set.member name names
 isBound name (BoundNames names) = Set.member name names
 
 -- | Add names for the length of a parser.
@@ -70,6 +74,8 @@ binding names = local (\context -> context {contextBound = add (contextBound con
  where
   add AllBound = AllBound
   add (BoundNames bound) = BoundNames (Set.union (Set.fromList names) bound)
+  -- A local name hides a builtin's signature.
+  add (BoundWith bound builtin) = BoundWith (Set.union (Set.fromList names) bound) (Set.difference builtin (Set.fromList names))
 
 data ParseContext = ParseContext
   { contextBound :: Bound
@@ -243,13 +249,61 @@ external = do
 application :: Parser Expr
 application = external <|> do
   fun <- postfix
+  slotted <- case fun of
+    EVar name -> do
+      signature <- asks (signatureOf name . contextBound)
+      maybe (pure []) slotArgs signature
+    _ -> pure []
   args <- many postfix
-  pure (useRef (foldl EApp fun args))
+  pure (useRef (foldl EApp fun (slotted <> args)))
  where
   -- A bare reference means pkg, as in the plan. This names the builtins, so it
   -- follows a rebinding of use, pkg or andThen.
   useRef (EApp (EVar "use") (ELit (LRef ref))) = andThenPkg ref (EVar "use")
+  useRef (EApp (EVar "useLocal") (ELit (LRef ref))) = andThenPkg ref (EVar "useLocal")
   useRef e = e
+
+-- | One argument position of a builtin, for parsing.
+data Slot
+  = -- | A bareword here is a String, as in an external command. With a
+    -- default, the argument may be left out.
+    PathSlot (Maybe String)
+
+-- | The builtins whose arguments are paths, so that @ls src@ and @cd ..@ need
+-- no quotes. Other builtins take expressions: @filter .ok@ still works. This
+-- is Nushell's signature-directed parsing.
+signatures :: [(Name, [Slot])]
+signatures =
+  [ ("cd", [PathSlot (Just "~")])
+  , ("ls", [PathSlot (Just ".")])
+  ]
+
+signatureOf :: Name -> Bound -> Maybe [Slot]
+signatureOf name (BoundWith _ builtin)
+  | Set.member name builtin = lookup name signatures
+signatureOf _ _ = Nothing
+
+-- | Arguments for path slots. A missing argument with a default ends the
+-- slots: @ls | filter f@ is @ls "." | filter f@.
+slotArgs :: [Slot] -> Parser [Expr]
+slotArgs [] = pure []
+slotArgs (PathSlot fallback : rest) = do
+  given <- optional pathArg
+  case given of
+    Just arg -> (arg :) <$> slotArgs rest
+    Nothing -> pure (maybe [] (\path -> [ELit (LStr path)]) fallback)
+
+-- | A path: @$x@, a string, a parenthesised expression or a bareword.
+pathArg :: Parser Expr
+pathArg = do
+  block <- asks inBlock
+  when block (notFollowedBy (keyword "end"))
+  arg <- (EVar <$> (char '$' *> identifier))
+    <|> (ELit . LStr <$> stringLiteral)
+    <|> between (symbol "(") (char ')') (withComma False expr)
+    <|> (ELit . LStr <$> some wordChar)
+  sc
+  pure arg
 
 andThenPkg :: String -> Expr -> Expr
 andThenPkg ref next = EApp (EApp (EVar "andThen") (EApp (EVar "pkg") (ELit (LStr ref)))) next

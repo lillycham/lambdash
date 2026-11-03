@@ -14,6 +14,9 @@ module Lambdash.Overlay
   , Overlay (..)
   , ShellState (..)
   , emptyState
+  , inScope
+  , withLayers
+  , useOverlayIn
   , applyPatch
   , applyOverlay
   , effective
@@ -29,7 +32,7 @@ module Lambdash.Overlay
   , prompt
   ) where
 
-import Data.List (intercalate, nub)
+import Data.List (intercalate, isPrefixOf, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 
@@ -59,11 +62,31 @@ data Overlay = Overlay
 
 -- | The session's environments, oldest first. The base is not stored: it is
 -- the process environment, read when something spawns.
-newtype ShellState = ShellState {overlays :: [Overlay]}
+data ShellState = ShellState
+  { overlays :: [Overlay]
+  , -- | Overlays active only inside a directory tree, by name.
+    scopes :: Map String FilePath
+  }
   deriving (Eq, Show)
 
 emptyState :: ShellState
-emptyState = ShellState []
+emptyState = ShellState [] Map.empty
+
+-- | The overlays active in a directory. Activation is a pure function of the
+-- state and the directory, so leaving a tree and coming back restores its
+-- overlays with no hooks:
+--
+-- > active cwd = filter (inScope cwd) overlays
+inScope :: FilePath -> ShellState -> ShellState
+inScope cwd state = state {overlays = filter visible (overlays state)}
+ where
+  visible overlay = maybe True (`contains` cwd) (Map.lookup (overlayName overlay) (scopes state))
+  contains "/" _ = True
+  contains dir path = path == dir || (dir <> "/") `isPrefixOf` path
+
+-- | Layers on top, for the extent of a @with@ block.
+withLayers :: [Overlay] -> ShellState -> ShellState
+withLayers layers state = state {overlays = overlays state <> layers}
 
 applyPatch :: Patch -> Environ -> Environ
 applyPatch (Patch name op) env = case op of
@@ -118,13 +141,24 @@ shadows state = reverse (snd (foldl layer (Map.empty, []) (overlays state)))
 -- | Activate an overlay. Using a name that is already active replaces it, and
 -- the new one goes on top, because the newest overlay should win.
 useOverlay :: Overlay -> ShellState -> ShellState
-useOverlay overlay (ShellState active) =
-  ShellState (filter ((/= overlayName overlay) . overlayName) active <> [overlay])
+useOverlay overlay state = ShellState
+  { overlays = filter ((/= name) . overlayName) (overlays state) <> [overlay]
+  , scopes = Map.delete name (scopes state)
+  }
+ where
+  name = overlayName overlay
+
+-- | Activate an overlay only inside a directory tree.
+useOverlayIn :: FilePath -> Overlay -> ShellState -> ShellState
+useOverlayIn dir overlay state =
+  let next = useOverlay overlay state
+  in next {scopes = Map.insert (overlayName overlay) dir (scopes next)}
 
 -- | Deactivate an overlay by name.
 unuseOverlay :: String -> ShellState -> Either String ShellState
-unuseOverlay name (ShellState active)
-  | any ((== name) . overlayName) active = Right (ShellState (filter ((/= name) . overlayName) active))
+unuseOverlay name state
+  | any ((== name) . overlayName) (overlays state) =
+      Right (ShellState (filter ((/= name) . overlayName) (overlays state)) (Map.delete name (scopes state)))
   | otherwise = Left ("no active environment: " <> name)
 
 -- | One layer's part in a variable's value.

@@ -24,7 +24,10 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.List (isInfixOf, isPrefixOf)
 import Data.IORef
-import Control.Exception (throwIO)
+import Control.Exception (IOException, throwIO, try)
+import Data.List (sort)
+import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
+import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), Stmt (..), mono)
 import Lambdash.Nix (resolveDev, resolvePkg)
@@ -219,6 +222,51 @@ eval env expression =
       Just (VStr s) -> s
       _ -> error "eval: the checker passed a non-String argument"
 
+-- | What @ls@ gives for each entry. @ext@ is the part after the last dot, or
+-- empty.
+entryTy :: Ty
+entryTy = TRecord (RExtend "name" TString (RExtend "type" TString (RExtend "size" TInt (RExtend "ext" TString REmpty))))
+
+expandPath :: String -> IO FilePath
+expandPath "~" = getHomeDirectory
+expandPath ('~' : '/' : rest) = (<> "/" <> rest) <$> getHomeDirectory
+expandPath path = pure path
+
+-- | @cd path@. @cd -@ goes back. @PWD@ and @OLDPWD@ follow, as in other
+-- shells, and later spawns inherit the new directory.
+--
+-- Note: this changes the process at once, so a line that fails after a @cd@
+-- keeps the new directory.
+changeDirectory :: String -> IO ()
+changeDirectory path = do
+  old <- getCurrentDirectory
+  target <- if path == "-" then maybe old id <$> lookupEnv "OLDPWD" else expandPath path
+  result <- try (setCurrentDirectory target) :: IO (Either IOException ())
+  case result of
+    Left _ -> throwIO (StreamError ("cd: no such directory: " <> path))
+    Right () -> do
+      new <- getCurrentDirectory
+      setEnv "OLDPWD" old
+      setEnv "PWD" new
+
+listEntries :: String -> IO [Value]
+listEntries path = do
+  directory <- expandPath path
+  listed <- try (listDirectory directory) :: IO (Either IOException [FilePath])
+  names <- either (const (throwIO (StreamError ("ls: cannot read: " <> path)))) (pure . sort) listed
+  mapM (entry directory) names
+ where
+  entry directory name = do
+    let full = directory <> "/" <> name
+    link <- pathIsSymbolicLink full
+    isDirectory <- doesDirectoryExist full
+    size <- if isDirectory then pure 0 else either (const 0) fromIntegral <$> (try (getFileSize full) :: IO (Either IOException Integer))
+    let kind | link = "link" | isDirectory = "dir" | otherwise = "file"
+        ext = case break (== '.') (reverse name) of
+          (rest, '.' : stem) | not (null stem) && not (null rest) -> reverse rest
+          _ -> ""
+    pure (VRecord [("name", VStr name), ("type", VStr kind), ("size", VInt size), ("ext", VStr ext)])
+
 -- | Run a block's statements in order. Each statement sees the names that
 -- earlier ones bound.
 runStmts :: Runtime -> Scope -> [Stmt] -> IO Value
@@ -236,8 +284,9 @@ runStmts runtime env (stmt : rest) = case stmt of
 warnShadows :: Runtime -> Overlay -> IO ()
 warnShadows runtime layer = do
   state <- readIORef (runtimeState runtime)
-  let outer = ShellState (overlays state <> runtimeLocal runtime)
-      inner = ShellState (overlays outer <> [layer])
+  cwd <- getCurrentDirectory
+  let outer = withLayers (runtimeLocal runtime) (inScope cwd state)
+      inner = withLayers [layer] outer
       fresh = [shadow | shadow <- shadows inner, shadow `notElem` shadows outer]
   mapM_ (\(Shadow var earlier later) -> hPutStrLn stderr ("warning: " <> later <> " shadows " <> var <> " from " <> earlier)) fresh
 
@@ -270,10 +319,13 @@ builtins =
     ("appendWith", mono (TFun TString (TFun TString (TFun TString TPatch))), VBuiltin "appendWith" (\sep -> string2 "appendWith" (\name value -> VPatch (Patch name (Append (str sep) value))))),
     ("overlay", mono (TFun TString (TFun (TList TPatch) TOverlay)), VBuiltin "overlay" overlayV),
     ("use", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "use" useV),
+    ("useLocal", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "useLocal" useLocalV),
     ("unuse", mono (TFun TString (TComp (effect Environment) TUnit)), VBuiltin "unuse" unuseV),
     ( "pipefail",
       Forall [t, u, effA] (TFun (TStream (effectVar effA) (TVar t) (TVar u) TStatus) (TStream (effectVar effA) (TVar t) (TVar u) TStatus)),
       VBuiltin "pipefail" pipefailV ),
+    ("cd", mono (TFun TString (TComp (effect WorkingDirectory) TUnit)), VBuiltin "cd" (\path -> VComp (const (VUnit <$ changeDirectory (str path))))),
+    ("ls", mono (TFun TString (TStream (effect Filesystem) TBytes entryTy TUnit)), VBuiltin "ls" lsV),
     ("environments", mono (TComp (effect Environment) (TList TString)), VComp environmentsV),
     ("pkg", mono (TFun TString (TComp (effect (Exec "nix")) TOverlay)), VBuiltin "pkg" (\ref -> VComp (\runtime -> VOverlay <$> resolvePkg runtime (str ref)))),
     ("dev", mono (TFun TString (TComp (unionEffects (effect (Exec "nix")) (effect (Exec "bash"))) TOverlay)), VBuiltin "dev" (\ref -> VComp (\runtime -> VOverlay <$> resolveDev runtime (str ref)))),
@@ -286,6 +338,7 @@ builtins =
     u = Var 1
     effA = Var 2
     effB = Var 3
+    lsV path = VStream [TransformStage (\_ emit -> listEntries (str path) >>= mapM_ emit)] ReturnUnit
     pipefailV (VStream stages _) = VStream stages ReturnPipefail
     pipefailV _ = error "pipefail: the checker passed a non-stream"
     -- Run the first, then the computation that its result chooses.
@@ -333,6 +386,12 @@ builtins =
       modifyIORef' (runtimeState runtime) (useOverlay overlay)
       pure VUnit
     useV _ = error "use: the checker passed a non-Overlay"
+    -- Active in this directory and below, for the rest of the session.
+    useLocalV (VOverlay overlay) = VComp $ \runtime -> do
+      cwd <- getCurrentDirectory
+      modifyIORef' (runtimeState runtime) (useOverlayIn cwd overlay)
+      pure VUnit
+    useLocalV _ = error "useLocal: the checker passed a non-Overlay"
     unuseV name = VComp $ \runtime -> do
       state <- readIORef (runtimeState runtime)
       case unuseOverlay (str name) state of

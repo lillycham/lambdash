@@ -11,7 +11,7 @@ import Lambdash.Parser (Bound (..))
 import Lambdash.Repl
 import Lambdash.Unify
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.Directory (removeFile)
+import System.Directory (getCurrentDirectory, removeFile)
 import System.Exit (exitFailure)
 import System.IO (hClose, hFlush, openTempFile, stdout)
 import System.Environment (lookupEnv)
@@ -34,7 +34,7 @@ sessionIO = go initial
 promptAfter :: [String] -> String
 promptAfter = unsafePerformIO . go initial
  where
-  go s [] = pure (sessionPrompt s)
+  go s [] = sessionPrompt <$> getCurrentDirectory <*> pure s
   go s (l : ls) = do
     result <- step s l
     case result of
@@ -71,6 +71,10 @@ final = last . session
 
 names :: Bound
 names = BoundNames (Set.fromList ["f", "x", "y"])
+
+-- | With the builtins whose signatures guide parsing.
+sigs :: Bound
+sigs = BoundWith (Set.fromList ["f", "x", "y", "ls", "cd", "collect"]) (Set.fromList ["ls", "cd", "collect"])
 
 ty :: String -> String -> Bool
 ty input expected = session [":t " <> input] == [expected]
@@ -277,6 +281,26 @@ tests =
   , ("ref: dev takes one", ty "dev .#bench" "Comp {exec bash, exec nix} Overlay")
   , ("ref: an external argument is still a word", parseCommand names "nix build nixpkgs#jq" == Right (Run (ECmd "nix" [AWord "build", AWord "nixpkgs#jq"])))
   , ("ref: unuse by reference", final ["use (overlay \"nixpkgs#jq\" [])", "unuse nixpkgs#jq", "environments"] == "[]")
+  , ("paths: ls takes a bareword", parseCommand sigs "ls src" == Right (Run (EApp (EVar "ls") (ELit (LStr "src")))))
+  , ("paths: ls alone lists here", parseCommand sigs "ls" == Right (Run (EApp (EVar "ls") (ELit (LStr ".")))))
+  , ("paths: ls before a pipe lists here", parseCommand sigs "ls | collect" == Right (Run (EPipe (EApp (EVar "ls") (ELit (LStr "."))) (EVar "collect"))))
+  , ("paths: cd alone goes home", parseCommand sigs "cd" == Right (Run (EApp (EVar "cd") (ELit (LStr "~")))))
+  , ("paths: .. and / are paths", parseCommand sigs "cd .." == Right (Run (EApp (EVar "cd") (ELit (LStr "..")))) && parseCommand sigs "cd /tmp" == Right (Run (EApp (EVar "cd") (ELit (LStr "/tmp")))))
+  , ("paths: $x is a variable", parseCommand sigs "cd $d" == Right (Run (EApp (EVar "cd") (EVar "d"))))
+  , ("paths: a string", parseCommand sigs "cd \"a b\"" == Right (Run (EApp (EVar "cd") (ELit (LStr "a b")))))
+  , ("paths: parentheses hold an expression", parseCommand sigs "cd (f x)" == Right (Run (EApp (EVar "cd") (EApp (EVar "f") (EVar "x")))))
+  , ("paths: a rebound builtin has no signature", parseCommand (BoundWith (Set.fromList ["ls", "f"]) Set.empty) "ls f" == Right (Run (EApp (EVar "ls") (EVar "f"))))
+  , ("paths: a lambda parameter hides a signature", parseCommand sigs "ls -> ls f" == Right (Run (ELam "ls" (EApp (EVar "ls") (EVar "f")))))
+  , ("paths: other builtins take expressions", parseCommand sigs "f .size" == Right (Run (EApp (EVar "f") (ELam "r" (ESelect (EVar "r") "size")))))
+  , ("cd: a type", ty "x -> cd $x" "String -> Comp {cwd} ()")
+  , ("cd: alone, it is applied to its default", ty "cd" "Comp {cwd} ()")
+  , ("ls: a stream of records", ty "ls" "Stream {fs} Bytes {name : String, type : String, size : Int, ext : String} ()")
+  , ("ls: a missing directory", final ["ls /lsh-nowhere"] == "ls: cannot read: /lsh-nowhere")
+  , ("cd: a missing directory", final ["cd /lsh-nowhere"] == "cd: no such directory: /lsh-nowhere")
+  , ("ls: entries are records", final ["r <- ls / | filter (e -> startsWith \"tmp\" e.name) | .name | collect", "r.items"] == "[\"tmp\"]")
+  , ("useLocal: a type", ty "useLocal" "Overlay -> Comp {env} ()")
+  , ("useLocal: active here", promptAfter ["useLocal (overlay \"l\" [])"] == "λ [l]> ")
+  , ("allow: no flake here", take 1 (drop 1 (session ["cd /", "allow", "cd -"])) == ["no flake.nix here"])
   , (":env: nothing active", final [":env"] == "no active environments")
   , (":env: lists patches", final [devLine, "use dev", ":env"] == "dev\n  set \"LSH_A\" \"1\"\n  set \"LSH_B\" \"x\"")
   , (":env: marks shadowing", ("⚠ shadows dev" `isInfixOf`) (final [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", ":env"]))

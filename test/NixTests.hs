@@ -7,6 +7,7 @@ import Data.ByteString.Char8 qualified as B8
 import Data.Map.Strict qualified as Map
 import Lambdash.Nix
 import Lambdash.Overlay
+import Lambdash.Trust (autoName, parseAllowed, renderAllowed)
 import System.Exit (exitFailure)
 
 env :: [(String, String)] -> Environ
@@ -52,6 +53,9 @@ tests =
   , ("hook: other lines are untouched", take 1 (lines (markHook "/t/before" script)) == ["export X=1"])
   , ("hook: no marker, no change", markHook "/t/before" "echo hi\n" == "echo hi\n")
   , ("hook: new functions", newFunctions "declare -f a\ndeclare -f b\n" "declare -f a\ndeclare -f b\ndeclare -f mine\ndeclare -f also\n" == ["also", "mine"])
+  , ("trust: the allowed file round-trips", parseAllowed (renderAllowed (Map.fromList [("/a b", "h1"), ("/c", "h2")])) == Map.fromList [("/a b", "h1"), ("/c", "h2")])
+  , ("trust: a malformed line is skipped", parseAllowed "junk\nh1 /a\n" == Map.fromList [("/a", "h1")])
+  , ("trust: an automatic overlay is named for its directory", autoName "/home/l/akyuu" == "akyuu#" && autoName "/" == "/#")
   , ("hook: no new functions", null (newFunctions "declare -f a\n" "declare -f a\n"))
   ]
 

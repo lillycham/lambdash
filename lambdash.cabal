@@ -11,15 +11,15 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Eval, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Trust, Lambdash.Unify
   c-sources:       cbits/spawn.c
-  build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, stm, text, transformers, unix
+  build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, process, stm, text, transformers, unix
 
 executable lambdash
   import:         shared
   hs-source-dirs: app
   main-is:        Main.hs
-  build-depends:  base, haskeline, lambdash
+  build-depends:  base, directory, haskeline, lambdash
   ghc-options:    -threaded
 
 -- Job-control spike. The threaded RTS is the point of the test.

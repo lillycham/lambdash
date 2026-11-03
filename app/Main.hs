@@ -4,8 +4,9 @@ import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (setupTerminal)
-import Lambdash.Repl (Session (..), Step (..), initial, needsMore, sessionPrompt, step)
+import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, sessionPrompt, step)
 import System.Console.Haskeline
+import System.Directory (getCurrentDirectory)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
 
 main :: IO ()
@@ -13,8 +14,12 @@ main = do
   -- Computations print straight to stdout, beside the output of haskeline.
   hSetBuffering stdout LineBuffering
   setupTerminal
-  withRootDirectory $ \roots ->
-    runInputT defaultSettings (loop initial {sessionRoots = roots})
+  withRootDirectory $ \roots -> do
+    -- Starting in a directory is arriving in it.
+    cwd <- getCurrentDirectory
+    (start, messages) <- arrive cwd initial {sessionRoots = roots}
+    mapM_ putStrLn messages
+    runInputT defaultSettings (loop start)
 
 -- | Read continuation lines while a @do@ block is open. End of input stops
 -- reading, and the parser reports the unclosed block.
@@ -28,7 +33,8 @@ more input
 -- | All of the meaning is in 'step'. This only moves text.
 loop :: Session -> InputT IO ()
 loop session = do
-  line <- getInputLine (sessionPrompt session) >>= traverse more
+  cwd <- liftIO getCurrentDirectory
+  line <- getInputLine (sessionPrompt cwd session) >>= traverse more
   case line of
     Nothing -> pure ()
     Just input -> do

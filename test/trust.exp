@@ -1,0 +1,84 @@
+#!/usr/bin/env expect
+# Usage: expect test/trust.exp path/to/lambdash
+# Directory-scoped devshells and approval. Uses a copy of test/nix-fixture, so
+# that the test can change flake.nix. Run it from the repository root, with
+# XDG_STATE_HOME pointing somewhere disposable.
+set timeout 300
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+
+set work [exec mktemp -d]
+exec cp test/nix-fixture/flake.nix test/nix-fixture/flake.lock $work/
+file mkdir $work/sub
+set name [file tail $work]
+
+spawn [lindex $argv 0]
+see {λ> $} "prompt"
+
+send "cd $work\r"
+see {flake.nix here is not allowed} "an unapproved flake does not activate"
+see {λ> $} "and the prompt stays plain"
+send "cd /\r"
+send "cd $work\r"
+send "print 1\r"
+expect {
+  -re {not allowed} { fail "it is reported once" }
+  -re {1\r\n} { puts "\nPASS: it is reported once" }
+}
+
+send "allow\r"
+see {lsh fixture hook ran} "allow runs the hook"
+see "$name# activated" "and activates the devshell"
+see "λ \\\[$name#\\\]> $" "the prompt shows it"
+send "printenv LSH_HOOK\r"
+see {ran\r\n} "its environment reaches programs"
+
+send "cd sub\r"
+see "λ \\\[$name#\\\]> $" "it stays active below the directory"
+send "cd /\r"
+see "$name# deactivated" "leaving the tree deactivates it"
+send "printenv LSH_HOOK\r"
+see {exit 1} "and its environment is gone"
+
+send "cd $work\r"
+expect {
+  -re {hook ran} { fail "coming back does not run the hook" }
+  -re "$name# restored" { puts "\nPASS: coming back restores it without the hook" }
+}
+
+# A changed flake.nix needs approval again.
+send "cd /\r"
+exec sh -c "echo '# changed' >> $work/flake.nix"
+send "cd $work\r"
+see "$name#: flake.nix or flake.lock changed" "a changed flake is noticed"
+see {not allowed} "and needs approval again"
+see {λ> $} "and is not active"
+
+send "allow\r"
+see "$name# activated" "allow again"
+send "deny\r"
+see "$name# deactivated" "deny deactivates it"
+see {λ> $} "prompt"
+send "cd /\r"
+send "cd $work\r"
+send "print 2\r"
+expect {
+  -re {activated} { fail "a denied flake stays off" }
+  -re {2\r\n} { puts "\nPASS: a denied flake stays off" }
+}
+
+send "cd /\r"
+send "allow\r"
+see {no flake.nix here} "allow needs a flake"
+
+send ":q\r"
+expect eof
+exec rm -rf $work
+puts "\nALL PASSED"

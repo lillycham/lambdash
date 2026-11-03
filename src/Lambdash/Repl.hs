@@ -6,6 +6,7 @@ module Lambdash.Repl
   , initial
   , sessionPrompt
   , needsMore
+  , arrive
   , Command (..)
   , command
   , parseCommand
@@ -36,11 +37,15 @@ import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
 import Data.IORef (readIORef)
+import Lambdash.Nix (resolveDev)
 import Lambdash.Overlay
+import Lambdash.Trust (autoName, flakeHash, isAllowed)
+import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), programExists)
 import Lambdash.Unify
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, satisfy, try)
+import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
 
 -- | What persists between lines. A name has its type in one and its value in
@@ -56,6 +61,10 @@ data Session = Session
     sessionJobs :: [Job]
   , -- | Whether @:q@ has already warned about stopped jobs.
     sessionWarned :: Bool
+  , -- | Directories whose flake activated on arrival, with the hash approved.
+    sessionFlakes :: Map.Map FilePath String
+  , -- | Directories and hashes already reported as not allowed.
+    sessionNotified :: Set.Set (FilePath, String)
   }
 
 -- | A line that Ctrl-Z stopped. It is still running, parked on its own
@@ -73,7 +82,7 @@ data Event = Finished (Either SomeException Value) | Suspended
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing [] False
+initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty
 
 -- | Does this input open more @do@ blocks than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals.
@@ -94,8 +103,9 @@ needsMore input = depth (tokens (withoutStrings input)) > 0
     _ -> n) (0 :: Int)
 
 -- | What the prompt should say: the active environments, and any shadowing.
-sessionPrompt :: Session -> String
-sessionPrompt = prompt . sessionShell
+-- Only the overlays active in this directory appear.
+sessionPrompt :: FilePath -> Session -> String
+sessionPrompt cwd = prompt . inScope cwd . sessionShell
 
 -- | What one line asks for.
 data Command
@@ -118,6 +128,11 @@ data Command
     ListJobs
   | -- | @fg@, or @fg 2@, when nothing binds it.
     Foreground (Maybe Int)
+  | -- | @allow@: activate this directory's flake now and on every arrival,
+    -- while @flake.nix@ and @flake.lock@ stay as they are.
+    Allow
+  | -- | @deny@: withdraw that.
+    Deny
   deriving (Eq, Show)
 
 -- | One line.
@@ -147,6 +162,8 @@ optionalName = do
 parseCommand :: Bound -> String -> Either String Command
 parseCommand bound input = case words input of
   ["jobs"] | free "jobs" -> Right ListJobs
+  ["allow"] | free "allow" -> Right Allow
+  ["deny"] | free "deny" -> Right Deny
   ["fg"] | free "fg" -> Right (Foreground Nothing)
   ["fg", number] | free "fg", Just n <- jobNumberOf number -> Right (Foreground (Just n))
   _ -> first errorBundlePretty (runIn bound (sc *> command <* eof) input)
@@ -154,6 +171,7 @@ parseCommand bound input = case words input of
   free name = case bound of
     AllBound -> False
     BoundNames names -> Set.notMember name names
+    BoundWith names _ -> Set.notMember name names
   jobNumberOf ('%' : digits) = jobNumberOf digits
   jobNumberOf digits
     | not (null digits) && all isDigit digits = Just (read digits)
@@ -264,6 +282,8 @@ renderEffects row@(EffRow labels vars)
       let label Console = "console"
           label (Exec name) = "exec " <> name
           label Environment = "env"
+          label Filesystem = "fs"
+          label WorkingDirectory = "cwd"
           fixed = intercalate ", " (map label (Set.toList labels))
           open = if null tails then "" else " | " <> intercalate " + " tails
       pure (" {" <> fixed <> open <> "}")
@@ -330,8 +350,9 @@ renderPair message left right = flip evalState Map.empty $ do
 committed :: Runtime -> ShellState -> Session -> String -> IO Step
 committed runtime start next text = do
   state <- readIORef (runtimeState runtime)
-  let before = shadows (sessionShell next)
-      warnings = [renderShadow shadow | shadow <- shadows state, shadow `notElem` before]
+  cwd <- getCurrentDirectory
+  let before = shadows (inScope cwd (sessionShell next))
+      warnings = [renderShadow shadow | shadow <- shadows (inScope cwd state), shadow `notElem` before]
       output extra = intercalate "\n" (filter (not . null) (extra <> [text]))
   pure $ if state == start then Continue next (output [])
     else if sessionShell next /= start
@@ -368,15 +389,20 @@ describeJob job = "[" <> show (jobNumber job) <> "] stopped  " <> jobLine job
 renderShadow :: Shadow -> String
 renderShadow (Shadow var earlier later) = "warning: " <> later <> " shadows " <> var <> " from " <> earlier
 
--- | @:env@: each active environment and its patches, oldest first.
-describeEnvironments :: ShellState -> String
-describeEnvironments state = case overlays state of
+-- | @:env@: each environment and its patches, oldest first. A local one says
+-- where it applies, and whether that is here.
+describeEnvironments :: FilePath -> ShellState -> String
+describeEnvironments cwd state = case overlays state of
   [] -> "no active environments"
   active -> intercalate "\n" (concatMap describe active)
  where
-  flagged = shadows state
+  here = map overlayName (overlays (inScope cwd state))
+  flagged = shadows (inScope cwd state)
+  scopeOf overlay = case Map.lookup (overlayName overlay) (scopes state) of
+    Nothing -> ""
+    Just dir -> "  (local to " <> dir <> (if overlayName overlay `elem` here then ")" else ", inactive here)")
   describe overlay =
-    overlayName overlay
+    (overlayName overlay <> scopeOf overlay)
       : [ "  " <> renderPatch patch <> note (overlayName overlay) patch
         | patch <- overlayPatches overlay ]
   note owner (Patch var _) =
@@ -394,6 +420,45 @@ describeVariable base name state =
   header = name <> maybe " is unset" (\value -> " = " <> show value) final
   layers = ["  " <> layer <> "  " <> renderOp name op | Touch layer op <- touches name state]
 
+-- | Entering a directory with a @flake.nix@. An allowed flake activates its
+-- devshell for this tree, once: coming back restores it from its scope, and
+-- the hook does not run again. A flake that changed since is dropped and has
+-- to be allowed again. A flake that is not allowed is reported once.
+arrive :: FilePath -> Session -> IO (Session, [String])
+arrive dir session = do
+  found <- flakeHash dir
+  case found of
+    Nothing -> pure (session, [])
+    Just hash
+      | Map.lookup dir (sessionFlakes session) == Just hash -> pure (session, [])
+      | otherwise -> do
+          let name = autoName dir
+              stale = Map.member dir (sessionFlakes session)
+              cleared = session
+                { sessionShell = either (const (sessionShell session)) id (unuseOverlay name (sessionShell session))
+                , sessionFlakes = Map.delete dir (sessionFlakes session)
+                }
+              staleMessage = [name <> ": flake.nix or flake.lock changed" | stale]
+          allowed <- isAllowed dir hash
+          if allowed then activate name hash cleared staleMessage
+          else if Set.member (dir, hash) (sessionNotified session) then pure (cleared, staleMessage)
+          else pure
+            ( cleared {sessionNotified = Set.insert (dir, hash) (sessionNotified cleared)}
+            , staleMessage <> ["flake.nix here is not allowed: allow activates it here and on return"] )
+ where
+  activate name hash current messages = do
+    runtime <- newRuntimeWith (sessionRoots current) (sessionShell current)
+    result <- Exception.try (resolveDev runtime ".")
+    case result of
+      Left (StreamError message) -> pure (current, messages <> [message])
+      Right overlay -> do
+        let named = overlay {overlayName = name}
+        pure ( current
+                 { sessionShell = useOverlayIn dir named (sessionShell current)
+                 , sessionFlakes = Map.insert dir hash (sessionFlakes current)
+                 }
+             , messages <> [name <> " activated"] )
+
 -- | The result of one line.
 data Step
   = -- | The next session, and text to show. No text means show nothing.
@@ -404,18 +469,54 @@ data Step
 -- computation at the prompt, or on the right of @<-@, has any effect.
 --
 -- A unit result shows nothing, so that @print 1@ shows only @1@.
+--
+-- A line that changes directory can activate or deactivate local overlays,
+-- and that is reported after its output.
 step :: Session -> String -> IO Step
-step session input = stepLine session input `catch` \(StreamError message) -> pure (Continue session message)
+step session input = do
+  before <- getCurrentDirectory
+  result <- stepLine session input `catch` \(StreamError message) -> pure (Continue session message)
+  after <- getCurrentDirectory
+  case result of
+    Continue next output | before /= after -> do
+      (arrived, messages) <- arrive after next
+      -- Only overlays that were local before the line are reported here: a
+      -- new one reports itself, and a stale one is dropped, not restored.
+      let was = map overlayName (overlays (inScope before (sessionShell session)))
+          now = map overlayName (overlays (inScope after (sessionShell arrived)))
+          local = Map.keys (scopes (sessionShell session))
+          off = [name <> " deactivated" | name <- was, name `notElem` now, name `elem` local]
+          on = [name <> " restored" | name <- now, name `notElem` was, name `elem` local]
+      pure (Continue arrived (intercalate "\n" (filter (not . null) (output : off <> on <> messages))))
+    other -> pure other
 
 stepLine :: Session -> String -> IO Step
 stepLine session input =
-  case parseCommand (BoundNames (Map.keysSet types)) input of
+  case parseCommand (BoundWith (Map.keysSet types) builtinNames) input of
     Left err -> pure (Continue session err)
     Right Blank -> pure (Continue session "")
     Right Exit
       | null (sessionJobs session) || sessionWarned session -> pure Quit
       | otherwise -> pure (Continue session {sessionWarned = True}
           "there are stopped jobs: :q again to quit, and they get SIGHUP")
+    Right Allow -> do
+      cwd <- getCurrentDirectory
+      found <- flakeHash cwd
+      case found of
+        Nothing -> pure (Continue session "no flake.nix here")
+        Just hash -> do
+          Trust.allow cwd hash
+          (next, messages) <- arrive cwd session
+          pure (Continue next (intercalate "\n" messages))
+    Right Deny -> do
+      cwd <- getCurrentDirectory
+      Trust.deny cwd
+      let shell = sessionShell session
+          name = autoName cwd
+          kept = either (const shell) id (unuseOverlay name shell)
+          active = Map.member cwd (sessionFlakes session)
+      pure (Continue session {sessionShell = if active then kept else shell, sessionFlakes = Map.delete cwd (sessionFlakes session)}
+        (if active then name <> " deactivated" else ""))
     Right ListJobs -> pure (Continue session (intercalate "\n" (map describeJob (sessionJobs session))))
     Right (Foreground wanted) ->
       let jobs = sessionJobs session
@@ -430,10 +531,13 @@ stepLine session input =
           awaitJob rest job
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
-    Right (ShowEnv Nothing) -> pure (Continue session (describeEnvironments (sessionShell session)))
+    Right (ShowEnv Nothing) -> do
+      cwd <- getCurrentDirectory
+      pure (Continue session (describeEnvironments cwd (sessionShell session)))
     Right (ShowEnv (Just name)) -> do
       base <- lookupEnv name
-      pure (Continue session (describeVariable base name (sessionShell session)))
+      cwd <- getCurrentDirectory
+      pure (Continue session (describeVariable base name (inScope cwd (sessionShell session))))
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
       case snd (unqualify ty) of
         TComp _ _ -> preflight ty $ \runtime ->
@@ -458,6 +562,8 @@ stepLine session input =
     types = sessionTypes session
     values = sessionValues session
     start = sessionShell session
+    -- A builtin's signature guides parsing only while it is still the builtin.
+    builtinNames = Map.keysSet (Map.filterWithKey (\name scheme -> Map.lookup name typeEnv == Just scheme) types)
     checked result onSuccess = case result of
       Left err -> pure (Continue session (renderError err))
       Right ty -> onSuccess ty

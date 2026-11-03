@@ -89,7 +89,9 @@ data Ty
 
 -- | @Environment@ is reading or changing the session's environments: @use@,
 -- @unuse@ and @environments@.
-data Effect = Exec String | Console | Environment deriving (Eq, Ord, Show)
+-- @Filesystem@ is reading the filesystem, and @WorkingDirectory@ is changing
+-- the current directory. Both are provisional, and the preflight ignores them.
+data Effect = Exec String | Console | Environment | Filesystem | WorkingDirectory deriving (Eq, Ord, Show)
 
 -- | A finite set of labels and a union of open effect rows. Multiple tails
 -- preserve independent requirements when higher-order streams compose.

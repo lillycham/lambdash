@@ -11,6 +11,7 @@ module Lambdash.Runtime
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Lambdash.Overlay
+import System.Directory (getCurrentDirectory)
 import System.Environment (getEnvironment)
 
 data Runtime = Runtime
@@ -42,4 +43,5 @@ runtimeEnviron :: Runtime -> IO Environ
 runtimeEnviron runtime = do
   base <- Map.fromList <$> getEnvironment
   state <- readIORef (runtimeState runtime)
-  pure (effective base (ShellState (overlays state <> runtimeLocal runtime)))
+  cwd <- getCurrentDirectory
+  pure (effective base (withLayers (runtimeLocal runtime) (inScope cwd state)))
