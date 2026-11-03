@@ -10,13 +10,53 @@ the desugar pass it depends on.
 | --- | --- |
 | Class kind | **Open**: users declare classes and instances |
 | Mechanism | **Dictionary passing**: inference elaborates core, inserting instances as hidden arguments (Wadler–Blott) |
-| Built-in classes | `Eq`, `Ord`, `Num`, `Show`, written as ordinary classes in a prelude |
+| Built-in classes | `Eq`, `Ord`, `Num`, `Show`, `Semigroup`, written as ordinary classes in a prelude |
 | Open records | **A row constraint**, `EqRow r`, pending until the tail is known |
 | `Ord` | **Designed with `Eq`**. `Ord` implies `Eq` |
-| Operators | **A general operator table**, not only comparisons |
+| Operators | **A general operator table**, below; `<>` (Semigroup) instead of `++`, and composition |
+| User operators | **Yes, Haskell-style**: symbol names, with `infixl`/`infixr`/`infix` declarations; default `infixl 9` |
+| Externals | **Operator characters stay words** in external arguments. Only `\|`, `&` and `;` end a word |
 | Minus | **Spacing decides**: `a - b`, `a-b`, `x-1` subtract; `-1` after a space or bracket, with a digit after, is a literal |
-| Sections | **Plain and accessor sections**: `(== 1)`, `(1 <)`, and `(.size > 1mb)` for `r -> r.size > 1mb` |
+| Sections | **Plain and accessor sections**: `(== 1)`, `(1 <)`, and `(.size > 1mb)` for `r -> r.size > 1mb`. `(- 1)` is the section `x -> x - 1` |
 | Pipeline | parse → surface (spans) → desugar → core → infer and elaborate → core with dictionaries → eval |
+
+## The operator table
+
+Loosest first. Every operator binds tighter than `|` and looser than
+application, so `ls | filter (.size > 1mb) | sort .name` reads as expected.
+
+| Level | Operators | Associativity |
+| --- | --- | --- |
+| — | `x -> …` lambda body, trailing `&`, `\|` pipeline | as before |
+| 1 | `>>>` `<<<` composition | right |
+| 2 | `\|\|` | right |
+| 3 | `&&` | right |
+| 4 | `==` `!=` `<` `<=` `>` `>=` | none: `a == b == c` is an error |
+| 5 | `<>` | right |
+| 6 | `+` `-` | left |
+| 7 | `*` `/` `%` | left |
+| 9 | user operators, by default | left |
+| 10 | application | left |
+| — | `.` select and accessor, with no spaces | |
+
+- `-1`, after a space or a bracket and before a digit, is a negative literal:
+  `f -1` is `f (-1)`. Otherwise `-` is subtraction: `x-1`, `x - 1`.
+- `.` cannot be composition, because it is select.
+- `--` starts a comment, so no operator begins with it.
+- `$` stays out of expression syntax: it is the variable sigil in external
+  arguments.
+
+Proposed, not yet confirmed:
+
+- **Operator characters**: `! % & * + - / < = > ? @ ^ | ~ :`. Not `#`
+  (flake references), `$` (variables) or `.` (select). Reserved: `=`, `->`,
+  `<-`, `|`, `&`, `::`, a lone `:`, and anything that starts with `--`.
+- **Definitions**: `(<+>) = a b -> …`, and a fixity line `infixl 6 <+>` that
+  lasts for the session and affects later lines, as bindings affect head
+  resolution now.
+- **Semigroup instances**: `String`, lists, `Bytes`, and `Overlay`: the plan
+  calls overlays an ordered, non-commutative monoid, so `dev <> bench` is one
+  overlay whose later patches win.
 
 ## Consequences
 
@@ -35,18 +75,15 @@ the desugar pass it depends on.
 
 ## Still to decide
 
-1. **The operator table**: which operators, their precedence and
-   associativity, and where `|`, `&`, application and `->` sit. Whether users
-   can declare operators and fixities.
-2. **Defaulting**: what an ambiguous `Num a` or `Eq a` becomes at the prompt,
+1. **Defaulting**: what an ambiguous `Num a` or `Eq a` becomes at the prompt,
    as `[] == []` would be.
-3. **Declaration syntax** for `class` and `instance`, at the prompt and in a
+2. **Declaration syntax** for `class` and `instance`, at the prompt and in a
    startup file, and what redeclaring one in a session means.
-4. **Coherence**: overlapping instances, and instances that a later line
+3. **Coherence**: overlapping instances, and instances that a later line
    adds after a binding already chose one.
-5. **Display**: how `:t` shows class constraints beside effect
+4. **Display**: how `:t` shows class constraints beside effect
    qualifications, as in `(Eq a, {| r} = {exec ls}) => …`.
-6. **Instances for built-in types that users may want to replace**, such as
+5. **Instances for built-in types that users may want to replace**, such as
    `Show` for records.
 
 ## Slices
@@ -56,5 +93,7 @@ the desugar pass it depends on.
 2. Class and instance core, dictionary-passing elaboration, the prelude's
    `Eq` and `Ord` for built-in types, with functions such as `eq` before any
    operator syntax.
-3. The operator table, minus by spacing, sections and accessor sections.
-4. `Num` and literal defaulting, `Show`, and user declarations at the prompt.
+3. The operator table, minus by spacing, sections and accessor sections,
+   user operators and fixity lines.
+4. `Num` and literal defaulting, `Show`, `Semigroup`, and class and
+   instance declarations at the prompt.
