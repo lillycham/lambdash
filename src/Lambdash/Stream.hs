@@ -11,6 +11,7 @@ import Control.Monad (forM, forM_, void, when)
 import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Map.Strict qualified as Map
+import Lambdash.Overlay (Environ, Runtime, runtimeEnviron)
 import Lambdash.Process (Status (..), programExists, spawnStage)
 import System.Exit (ExitCode (..))
 import System.IO
@@ -24,7 +25,8 @@ import System.Posix.Types
 data Stage a
   = External String [String]
   | MapStage (a -> a)
-  | SourceStage (IO a)
+  | -- | A source runs with the session, because it can be any computation.
+    SourceStage (Runtime -> IO a)
   | SourceListStage [a]
   | TransformStage (IO (Maybe a) -> (a -> IO ()) -> IO ())
 
@@ -133,21 +135,21 @@ closeOutput :: Output a -> IO ()
 closeOutput (RawOutput _ close) = close
 closeOutput (Output _ close) = close
 
-worker :: Stage a -> Input a -> Output a -> IO ()
-worker stage (Input receive closeIn) (Output emit closeOut) =
+worker :: Runtime -> Stage a -> Input a -> Output a -> IO ()
+worker runtime stage (Input receive closeIn) (Output emit closeOut) =
   (work `catches`
     [ Handler (\PipeClosed -> pure ())
     , Handler (\err -> if isResourceVanishedError err then pure () else throwIO (err :: IOException))
     ]) `finally` (closeIn >> closeOut)
  where
   work = case stage of
-    SourceStage action -> action >>= emit
+    SourceStage action -> action runtime >>= emit
     SourceListStage values -> mapM_ emit values
     TransformStage transform -> transform receive emit
     MapStage f -> loop f
     External _ _ -> error "worker: external stage"
   loop f = receive >>= maybe (pure ()) (\value -> emit (f value) >> loop f)
-worker _ _ _ = error "worker: raw endpoint"
+worker _ _ _ _ = error "worker: raw endpoint"
 
 -- Polling keeps wait cancellable when a worker fails. Every stopped child is
 -- continued because there is no job table yet, as for a standalone command.
@@ -194,30 +196,35 @@ withTerminal action = do
 
 -- | Run a plan once. The final external's status is the return value. Output
 -- items are streamed to the sink; they are never accumulated or decoded here.
-runStages :: (BS.ByteString -> a) -> (a -> BS.ByteString) -> (a -> IO ())
+--
+-- Every external in one plan sees the environment as it was when the plan
+-- started, so a source that changes the session cannot split a pipeline.
+runStages :: Runtime -> (BS.ByteString -> a) -> (a -> BS.ByteString) -> (a -> IO ())
           -> [Stage a] -> IO Status
-runStages _ _ _ [] = pure (ExitedWith 0)
-runStages fromBytes toBytes sink stages@(firstStage : restStages) = do
+runStages _ _ _ _ [] = pure (ExitedWith 0)
+runStages runtime fromBytes toBytes sink stages@(firstStage : restStages) = do
   hFlush stdout
+  env <- runtimeEnviron runtime
   -- This also sees commands hidden in bound stages. Resolve the entire plan
   -- before the first spawn, so a missing downstream program runs nothing.
-  missing <- firstMissing [name | External name _ <- stages]
+  missing <- firstMissing env [name | External name _ <- stages]
   case missing of
     Just name -> throwIO (StreamError ("command not found: " <> name))
     Nothing -> do
       outcome <- try $ do
         when (any (any (elem '\0')) [name : args | External name args <- stages]) $
           ioError (userError "a command or argument contains NUL")
-        execute
+        execute env
       case outcome of
         Left err -> throwIO (StreamError ("pipeline failed: " <> show (err :: IOException)))
         Right status -> hFlush stdout >> pure status
  where
-  firstMissing [] = pure Nothing
-  firstMissing (name : rest) = do
-    found <- programExists name
-    if found then firstMissing rest else pure (Just name)
-  execute = withTerminal $ \giveTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
+  firstMissing :: Environ -> [String] -> IO (Maybe String)
+  firstMissing _ [] = pure Nothing
+  firstMissing env (name : rest) = do
+    found <- programExists env name
+    if found then firstMissing env rest else pure (Just name)
+  execute env = withTerminal $ \giveTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
     edges <- sequence [edge resources fromBytes toBytes l r | (l, r) <- zip stages (drop 1 stages)]
     let lastStage = foldl (\_ next -> next) firstStage restStages
         start = if isExternal firstStage
@@ -232,7 +239,7 @@ runStages fromBytes toBytes sink stages@(firstStage : restStages) = do
     pids <- fmap concat $ forM nodes $ \(stage, input, output) -> case (stage, input, output) of
       (External name args, RawInput inputFd _, RawOutput outputFd _) -> mask_ $ do
         group <- readIORef groupRef
-        pid <- spawnStage name args inputFd outputFd (maybe 0 id group)
+        pid <- spawnStage env name args inputFd outputFd (maybe 0 id group)
         modifyIORef' children (pid :)
         when (group == Nothing) (writeIORef groupRef (Just pid))
         pure [pid]
@@ -242,7 +249,7 @@ runStages fromBytes toBytes sink stages@(firstStage : restStages) = do
     group <- readIORef groupRef
     giveTerminal group
     forM_ group (quietly . signalProcessGroup sigCONT)
-    let workers = [worker stage input output | (stage, input, output) <- nodes, not (isExternal stage)]
+    let workers = [worker runtime stage input output | (stage, input, output) <- nodes, not (isExternal stage)]
         wait = maybe (pure Map.empty) (waitStages children) group
     (statuses, _) <- concurrently wait (mapConcurrently_ id workers)
     pure $ case reverse pids of

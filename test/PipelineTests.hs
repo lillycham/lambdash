@@ -15,6 +15,7 @@ import Lambdash.Infer
 import Lambdash.Parser
 import Lambdash.Process (Status (..))
 import Lambdash.Repl hiding (command)
+import Lambdash.Overlay (Runtime, emptyState, newRuntime)
 import Lambdash.Stream
 import Lambdash.Unify
 import System.Directory
@@ -23,7 +24,13 @@ import System.IO
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Process (ProcessStatus, getAnyProcessStatus, getProcessStatus)
 import System.Posix.Types (ProcessID)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
+
+-- | A session with no environments, for running plans directly.
+runtime :: Runtime
+runtime = unsafePerformIO (newRuntime emptyState)
+{-# NOINLINE runtime #-}
 
 -- Strict binary capture, with stdout restored even if an action fails.
 capture :: IO a -> IO (BS.ByteString, a)
@@ -140,7 +147,7 @@ tests =
   , ("collect: a plain item collects once", gives ["42 | collect"] "" ["{items = [42], status = ()}"])
   , ("collect: pure computation effects are retained", gives ["print 1 | collect"] "1\n" ["{items = [()], status = ()}"])
   , ("collect: source failures cannot become a unit success", do
-      result <- try (runComp (VStream [SourceStage (ioError (userError "source failed")), MapStage id] ReturnUnit)) :: IO (Either StreamError Value)
+      result <- try (runComp runtime (VStream [SourceStage (const (ioError (userError "source failed"))), MapStage id] ReturnUnit)) :: IO (Either StreamError Value)
       pure $ case result of Left (StreamError _) -> True; _ -> False)
   , ("collect: a pure right stream retains its own return type", gives ["sh -c \"exit 7\" | each [1, 2] | collect"] ""
       ["{items = [1, 2], status = ()}"])
@@ -172,7 +179,7 @@ tests =
       let row = unionEffects (effect (Exec "cat")) (effectVar (Var 0))
           qualified = qualify [EffEqual row (effect (Exec "cat"))] (TStream row TBytes TBytes TStatus)
           session = Session (Map.singleton "job" (Forall [Var 0] qualified))
-            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]] ReturnStatus))
+            (Map.singleton "job" (VStream [External "cat" ["/dev/null"]] ReturnStatus)) emptyState
       (output, result) <- capture (step session "job")
       pure $ BS.null output && case result of Continue _ "" -> True; _ -> False)
   , ("constraints: proved requirements still get preflight", do
@@ -180,7 +187,7 @@ tests =
           row = unionEffects missing (effectVar (Var 0))
           qualified = qualify [EffEqual row missing] (TStream row TBytes TBytes TStatus)
           session = Session (Map.singleton "job" (Forall [Var 0] qualified))
-            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []] ReturnStatus))
+            (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []] ReturnStatus)) emptyState
       (output, result) <- capture (step session "job")
       pure $ BS.null output && case result of Continue _ "command not found: missing-constraint-command-xyz" -> True; _ -> False)
   , ("constraints: a binding retains and resolves its bound", gives
@@ -258,13 +265,13 @@ tests =
       pure (BS.length output == 200000 && BS.all (== 0) output))
   , ("cleanup: cancellation kills and reaps the child", withPath $ \path -> do
       let command = "echo $$ > \"$1\"; exec sleep 100"
-          action = void (runStages id id (BS.hPut stdout) [External "sh" ["-c", command, "test", path]])
+          action = void (runStages runtime id id (BS.hPut stdout) [External "sh" ["-c", command, "test", path]])
       withAsync action $ \task -> awaitFile path >> cancel task
       done <- reaped path
       pure done)
   , ("cleanup: a failed worker kills and reaps the child", withPath $ \path -> do
       let command = "echo $$ > \"$1\"; printf ready; exec sleep 100"
-      result <- try (runStages id id (void . evaluate)
+      result <- try (runStages runtime id id (void . evaluate)
         [External "sh" ["-c", command, "test", path], MapStage (\_ -> error "worker failed"), MapStage BS.copy]) :: IO (Either SomeException Status)
       done <- reaped path
       pure (either (const True) (const False) result && done))
@@ -276,7 +283,7 @@ tests =
       writeFile path "#!/no-such-pipeline-interpreter\n"
       permissions <- getPermissions path
       setPermissions path permissions {executable = True}
-      outcomes <- mapM (\_ -> try (runStages id id (BS.hPut stdout)
+      outcomes <- mapM (\_ -> try (runStages runtime id id (BS.hPut stdout)
         [External "sleep" ["100"], External path []]) :: IO (Either StreamError Status)) [1 :: Int .. 3]
       children <- try (getAnyProcessStatus False False) :: IO (Either IOException (Maybe (ProcessID, ProcessStatus)))
       pure (all (either (const True) (const False)) outcomes && either isDoesNotExistError (const False) children))

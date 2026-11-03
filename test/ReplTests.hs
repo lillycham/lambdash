@@ -14,6 +14,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (removeFile)
 import System.Exit (exitFailure)
 import System.IO (hClose, hFlush, openTempFile, stdout)
+import System.Environment (lookupEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
 
@@ -28,6 +29,17 @@ sessionIO = go initial
     case result of
       Quit -> pure ["<quit>"]
       Continue next out -> (out :) <$> go next ls
+
+-- | The prompt after some lines.
+promptAfter :: [String] -> String
+promptAfter = unsafePerformIO . go initial
+ where
+  go s [] = pure (sessionPrompt s)
+  go s (l : ls) = do
+    result <- step s l
+    case result of
+      Quit -> pure "<quit>"
+      Continue next _ -> go next ls
 
 -- | Tests are plain values, so this hides the 'IO'. Each call is one session.
 session :: [String] -> [String]
@@ -187,7 +199,43 @@ tests =
   , ("preflight: effects survive a binding", final ["g = nope-xyz", "g"] == "command not found: nope-xyz")
   , ("string: a value", session ["\"a\""] == ["\"a\""])
   , ("string: print shows it plain", fst (prints ["print \"a\""]) == "a\n")
+  , ("env: an overlay is a value", session [devLine] == ["dev : Overlay"])
+  , ("env: it shows as its own source", final [devLine, "dev"] == "overlay \"dev\" [set \"LSH_A\" \"1\", set \"LSH_B\" \"x\"]")
+  , ("env: use is a computation with the env effect", ty "use" "Overlay -> Comp {env} ()")
+  , ("env: unuse takes a name", ty "unuse" "String -> Comp {env} ()")
+  , ("env: environments", ty "environments" "Comp {env} [String]")
+  , ("env: a patch", ty "prepend \"PATH\" \"/x\"" "Patch")
+  , ("env: = does not activate", promptAfter [devLine] == "λ> ")
+  , ("env: use activates", promptAfter [devLine, "use dev"] == "λ [dev]> ")
+  , ("env: use shows nothing", session [devLine, "use dev"] == ["dev : Overlay", ""])
+  , ("env: a program sees it", fst (prints [devLine, "use dev", "printenv LSH_A"]) == "1\n")
+  , ("env: the process environment does not change", fst (prints [devLine, "use dev", "print 1"]) == "1\n" && unsafePerformIO (lookupEnv "LSH_A") == Nothing)
+  , ("env: unuse removes it", fst (prints [devLine, "use dev", "unuse \"dev\"", "printenv LSH_A"]) == "")
+  , ("env: unuse clears the prompt", promptAfter [devLine, "use dev", "unuse \"dev\""] == "λ> ")
+  , ("env: a failed unuse reports", final ["unuse \"nope\""] == "no active environment: nope")
+  , ("env: a failed unuse changes nothing", promptAfter [devLine, "use dev", "unuse \"nope\""] == "λ [dev]> ")
+  , ("env: <- commits too", promptAfter [devLine, "u <- use dev"] == "λ [dev]> ")
+  , ("env: a later overlay wins", fst (prints [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "printenv LSH_A"]) == "2\n")
+  , ("env: shadowing warns once", session [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "print 1"] == ["dev : Overlay", "", "warning: b shadows LSH_A from dev", ""])
+  , ("env: shadowing shows in the prompt", promptAfter [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])"] == "λ [dev b ⚠ LSH_A]> ")
+  , ("env: the same value does not warn", session [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"1\"])"] == ["dev : Overlay", "", ""])
+  , ("env: unuse clears the flag", promptAfter [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", "unuse \"b\""] == "λ [dev]> ")
+  , ("env: use again replaces, on top", final [devLine, "use dev", "use (overlay \"b\" [])", "use dev", "environments"] == "[\"b\", \"dev\"]")
+  , ("env: prepend reaches PATH", fst (prints ["use (overlay \"p\" [prepend \"PATH\" \"/lsh-nowhere\"])", "sh -c \"printf %s \\\"$PATH\\\" | cut -d: -f1\""]) == "/lsh-nowhere\n")
+  , ("env: the preflight resolves in the effective PATH", final ["use (overlay \"p\" [set \"PATH\" \"/lsh-nowhere\"])", "echo hi"] == "command not found: echo")
+  , ("env: and unuse restores it", fst (prints ["use (overlay \"p\" [set \"PATH\" \"/lsh-nowhere\"])", "unuse \"p\"", "echo hi"]) == "hi\n")
+  , ("env: unset hides a variable", fst (prints ["use (overlay \"u\" [unset \"HOME\"])", "sh -c \"printf %s ${HOME-unset}\""]) == "unset")
+  , ("env: a pipeline sees it", final [devLine, "use dev", "x <- printenv LSH_B | lines | collect", "x.items"] == "[\"x\"]")
+  , ("env: a value captured before use still sees the session when it runs", fst (prints ["g = printenv LSH_A", devLine, "use dev", "g"]) == "1\n")
+  , (":env: nothing active", final [":env"] == "no active environments")
+  , (":env: lists patches", final [devLine, "use dev", ":env"] == "dev\n  set \"LSH_A\" \"1\"\n  set \"LSH_B\" \"x\"")
+  , (":env: marks shadowing", ("⚠ shadows dev" `isInfixOf`) (final [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", ":env"]))
+  , (":env: a variable and its layers", final [devLine, "use dev", "use (overlay \"b\" [set \"LSH_A\" \"2\"])", ":env LSH_A"] == "LSH_A = \"2\"\n  base  unset\n  dev  set \"LSH_A\" \"1\"\n  b  set \"LSH_A\" \"2\"")
+  , (":env: an unset variable", final [":env LSH_NOPE"] == "LSH_NOPE is unset\n  base  unset")
+  , (":env: a prepend shows the base", ("/lsh-x:" `isInfixOf`) (final ["use (overlay \"p\" [prepend \"PATH\" \"/lsh-x\"])", ":env PATH"]))
   ]
+ where
+  devLine = "dev = overlay \"dev\" [set \"LSH_A\" \"1\", set \"LSH_B\" \"x\"]"
 
 runTest :: (String, Bool) -> IO Bool
 runTest (name, result) = do

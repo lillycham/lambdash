@@ -1,0 +1,44 @@
+#!/usr/bin/env expect
+# Usage: expect test/environments.exp path/to/lambdash
+# The prompt shows active environments and shadowing, and a job started inside
+# an environment still owns the terminal.
+set timeout 5
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+
+spawn [lindex $argv 0]
+see {λ> $} "prompt"
+
+send "use (overlay \"dev\" \[set \"LSH_X\" \"1\"\])\r"
+see {λ \[dev\]> $} "the prompt shows an environment"
+
+send "printenv LSH_X\r"
+see {1\r\n} "a program sees it"
+see {λ \[dev\]> $} "prompt"
+
+send "use (overlay \"bench\" \[set \"LSH_X\" \"2\"\])\r"
+see {warning: bench shadows LSH_X from dev} "shadowing warns"
+see {λ \[dev bench ⚠ LSH_X\]> $} "the prompt shows shadowing"
+
+send "sleep 100\r"
+after 300
+send "\003"
+see {signal 2} "Ctrl-C reaches a job inside an environment"
+see {λ \[dev bench ⚠ LSH_X\]> $} "prompt"
+
+send "unuse \"bench\"\r"
+see {λ \[dev\]> $} "unuse clears the flag"
+
+send "unuse \"dev\"\r"
+see {λ> $} "the plain prompt returns"
+
+send ":q\r"
+expect eof
+puts "\nALL PASSED"

@@ -31,6 +31,8 @@ module Lambdash.Unify
     pattern TString,
     pattern TStatus,
     pattern TBytes,
+    pattern TOverlay,
+    pattern TPatch,
     Label,
     Row (..),
     Subst (..),
@@ -85,7 +87,9 @@ data Ty
   | TCollector Ty Ty
   deriving (Eq, Show)
 
-data Effect = Exec String | Console deriving (Eq, Ord, Show)
+-- | @Environment@ is reading or changing the session's environments: @use@,
+-- @unuse@ and @environments@.
+data Effect = Exec String | Console | Environment deriving (Eq, Ord, Show)
 
 -- | A finite set of labels and a union of open effect rows. Multiple tails
 -- preserve independent requirements when higher-order streams compose.
@@ -148,13 +152,15 @@ data Row
   | RVar Var
   deriving (Eq, Show)
 
-pattern TInt, TBool, TUnit, TString, TStatus, TBytes :: Ty
+pattern TInt, TBool, TUnit, TString, TStatus, TBytes, TOverlay, TPatch :: Ty
 pattern TInt = TCon "Int"
 pattern TBool = TCon "Bool"
 pattern TUnit = TCon "()"
 pattern TString = TCon "String"
 pattern TStatus = TCon "Status"
 pattern TBytes = TCon "Bytes"
+pattern TOverlay = TCon "Overlay"
+pattern TPatch = TCon "Patch"
 
 -- | Unknowns that stand for types, and unknowns that stand for rows.
 data Subst = Subst

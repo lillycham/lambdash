@@ -24,9 +24,12 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.List (isInfixOf, isPrefixOf)
 import Data.IORef
+import Control.Exception (throwIO)
 import Control.Monad (when)
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
+import Lambdash.Overlay
 import Lambdash.Process (Status (..))
+import Lambdash.Stream (StreamError (..))
 import Lambdash.Stream (Stage (..), runStages)
 import Lambdash.Lines (runLines)
 import Lambdash.Unify
@@ -47,8 +50,11 @@ data Value
   | -- | The name identifies the builtin.
     VBuiltin Name (Value -> Value)
   | VClosure Name Expr Scope
-  | -- | An action. Building one runs nothing: only 'runComp' does.
-    VComp (IO Value)
+  | -- | An action. Building one runs nothing: only 'runComp' does. It gets the
+    -- session's environments when it runs, not when it is built.
+    VComp (Runtime -> IO Value)
+  | VOverlay Overlay
+  | VPatch Patch
   | VStream [Stage Value] Return
   | VStage [Stage Value]
   | VCollector [Stage Value]
@@ -78,6 +84,8 @@ render (VComp _) = "<computation>"
 render (VStream _ _) = "<stream>"
 render (VStage _) = "<stage>"
 render (VCollector _) = "<collector>"
+render (VOverlay overlay) = renderOverlay overlay
+render (VPatch patch) = renderPatch patch
 
 commaSep :: [String] -> String
 commaSep = foldr step ""
@@ -104,31 +112,31 @@ select _ _ = error "select: the checker passed a non-record"
 
 -- | Run a computation or stream. Output goes to stdout. Commands return a
 -- status; pure sources return unit. Adapters preserve the source return.
-runComp :: Value -> IO Value
-runComp (VComp action) = action
-runComp (VStream stages result) = runPlan result stages output
+runComp :: Runtime -> Value -> IO Value
+runComp runtime (VComp action) = action runtime
+runComp runtime (VStream stages result) = runPlan runtime result stages output
  where
   output (VBytes value) = BS.hPut stdout value
   output (VStr value) = putStrLn value
   output value = putStrLn (render value)
-runComp _ = error "runComp: the checker passed a non-computation"
+runComp _ _ = error "runComp: the checker passed a non-computation"
 
 bytes :: Value -> BS.ByteString
 bytes (VBytes value) = value
 bytes _ = error "stream: the checker passed non-Bytes to an external"
 
-runPlan :: Return -> [Stage Value] -> (Value -> IO ()) -> IO Value
-runPlan result stages output = do
-  status <- runStages VBytes bytes output stages
+runPlan :: Runtime -> Return -> [Stage Value] -> (Value -> IO ()) -> IO Value
+runPlan runtime result stages output = do
+  status <- runStages runtime VBytes bytes output stages
   pure $ case result of
     ReturnStatus -> VStatus status
     ReturnUnit -> VUnit
 
 collectPlan :: Return -> [Stage Value] -> Value
-collectPlan result stages = VComp $ do
+collectPlan result stages = VComp $ \runtime -> do
   values <- newIORef []
   -- The final bridge routes even a raw external's stdout through the sink.
-  status <- runPlan result (stages <> [MapStage id]) (\value -> modifyIORef' values (value :))
+  status <- runPlan runtime result (stages <> [MapStage id]) (\value -> modifyIORef' values (value :))
   items <- reverse <$> readIORef values
   pure (VRecord [("items", VList items), ("status", status)])
 
@@ -136,17 +144,17 @@ pipeValue :: Value -> Value -> Value
 pipeValue (VStream left result) (VCollector right) = collectPlan result (left <> right)
 pipeValue (VStage left) (VCollector right) = VCollector (left <> right)
 pipeValue (VComp action) (VCollector right) = collectPlan ReturnUnit (SourceStage action : right)
-pipeValue value (VCollector right) = collectPlan ReturnUnit (SourceStage (pure value) : right)
+pipeValue value (VCollector right) = collectPlan ReturnUnit (SourceStage (const (pure value)) : right)
 pipeValue (VStream left result) (VStage right) = VStream (left <> right) result
 pipeValue (VStage left) (VStage right) = VStage (left <> right)
 pipeValue (VComp action) (VStage right) = VStream (SourceStage action : right) ReturnUnit
-pipeValue value (VStage right) = VStream (SourceStage (pure value) : right) ReturnUnit
+pipeValue value (VStage right) = VStream (SourceStage (const (pure value)) : right) ReturnUnit
 pipeValue (VStage left) function = VStage (left <> [MapStage (applyValue function)])
 pipeValue (VStream left _) (VStream right result) = VStream (left <> right) result
 pipeValue (VStream left result) function = VStream (left <> [MapStage (applyValue function)]) result
 pipeValue (VComp action) (VStream right result) = VStream (SourceStage action : right) result
-pipeValue value (VStream right result) = VStream (SourceStage (pure value) : right) result
-pipeValue (VComp action) function = VComp (applyValue function <$> action)
+pipeValue value (VStream right result) = VStream (SourceStage (const (pure value)) : right) result
+pipeValue (VComp action) function = VComp (fmap (applyValue function) . action)
 pipeValue value function = applyValue function value
 
 -- | Evaluate an expression that passed the checker.
@@ -183,7 +191,7 @@ builtins =
   [ ("not", mono (TFun TBool TBool), VBuiltin "not" notV),
     ("add", mono (TFun TInt (TFun TInt TInt)), VBuiltin "add" add),
     ("print", Forall [t] (TFun (TVar t) (TComp (effect Console) TUnit)), VBuiltin "print" printV),
-    ("pure", Forall [t] (TFun (TVar t) (TComp noEffects (TVar t))), VBuiltin "pure" (VComp . pure)),
+    ("pure", Forall [t] (TFun (TVar t) (TComp noEffects (TVar t))), VBuiltin "pure" (\value -> VComp (const (pure value)))),
     ("encodeUtf8", mono (TFun TString TBytes), VBuiltin "encodeUtf8" encode),
     ("byteLength", mono (TFun TBytes TInt), VBuiltin "byteLength" byteLength),
     ("lines", mono (TStage TBytes TString), VStage [TransformStage lineStage]),
@@ -196,7 +204,17 @@ builtins =
     ("startsWith", mono (TFun TString (TFun TString TBool)), VBuiltin "startsWith" (stringPredicate isPrefixOf)),
     ("isEmpty", mono (TFun TString TBool), VBuiltin "isEmpty" isEmptyV),
     ("stringLength", mono (TFun TString TInt), VBuiltin "stringLength" stringLength),
-    ("encodeLine", mono (TFun TString TBytes), VBuiltin "encodeLine" encodeLine)
+    ("encodeLine", mono (TFun TString TBytes), VBuiltin "encodeLine" encodeLine),
+    ("set", mono (TFun TString (TFun TString TPatch)), string2 "set" (\name value -> VPatch (Patch name (Set value)))),
+    ("unset", mono (TFun TString TPatch), VBuiltin "unset" (\name -> VPatch (Patch (str name) Unset))),
+    ("prepend", mono (TFun TString (TFun TString TPatch)), string2 "prepend" (\name value -> VPatch (Patch name (Prepend ":" value)))),
+    ("append", mono (TFun TString (TFun TString TPatch)), string2 "append" (\name value -> VPatch (Patch name (Append ":" value)))),
+    ("prependWith", mono (TFun TString (TFun TString (TFun TString TPatch))), VBuiltin "prependWith" (\sep -> string2 "prependWith" (\name value -> VPatch (Patch name (Prepend (str sep) value))))),
+    ("appendWith", mono (TFun TString (TFun TString (TFun TString TPatch))), VBuiltin "appendWith" (\sep -> string2 "appendWith" (\name value -> VPatch (Patch name (Append (str sep) value))))),
+    ("overlay", mono (TFun TString (TFun (TList TPatch) TOverlay)), VBuiltin "overlay" overlayV),
+    ("use", mono (TFun TOverlay (TComp (effect Environment) TUnit)), VBuiltin "use" useV),
+    ("unuse", mono (TFun TString (TComp (effect Environment) TUnit)), VBuiltin "unuse" unuseV),
+    ("environments", mono (TComp (effect Environment) (TList TString)), VComp environmentsV)
   ]
   where
     t = Var 0
@@ -228,8 +246,28 @@ builtins =
     encode _ = error "encodeUtf8: the checker passed a non-String"
     byteLength (VBytes value) = VInt (BS.length value)
     byteLength _ = error "byteLength: the checker passed non-Bytes"
-    printV (VStr s) = VComp (VUnit <$ putStrLn s)
-    printV value = VComp (VUnit <$ putStrLn (render value))
+    printV (VStr s) = VComp (const (VUnit <$ putStrLn s))
+    printV value = VComp (const (VUnit <$ putStrLn (render value)))
+    str (VStr text) = text
+    str _ = error "overlay: the checker passed a non-String"
+    string2 name f = VBuiltin name (\a -> VBuiltin name (\b -> f (str a) (str b)))
+    overlayV name = VBuiltin "overlay" $ \patches -> case patches of
+      VList items -> VOverlay (Overlay (str name) [patch | VPatch patch <- items])
+      _ -> error "overlay: the checker passed a non-list"
+    -- The change goes to the runtime's reference. The REPL keeps it only if
+    -- the whole line succeeds, so a failure later in the line undoes it.
+    useV (VOverlay overlay) = VComp $ \runtime -> do
+      modifyIORef' (runtimeState runtime) (useOverlay overlay)
+      pure VUnit
+    useV _ = error "use: the checker passed a non-Overlay"
+    unuseV name = VComp $ \runtime -> do
+      state <- readIORef (runtimeState runtime)
+      case unuseOverlay (str name) state of
+        Left message -> throwIO (StreamError message)
+        Right next -> VUnit <$ writeIORef (runtimeState runtime) next
+    environmentsV runtime = do
+      state <- readIORef (runtimeState runtime)
+      pure (VList (map (VStr . overlayName) (overlays state)))
     notV (VBool b) = VBool (not b)
     notV _ = error "not: the checker passed a non-Bool"
     add (VInt a) = VBuiltin "add" (addTo a)

@@ -4,6 +4,7 @@
 module Lambdash.Repl
   ( Session (..)
   , initial
+  , sessionPrompt
   , Command (..)
   , command
   , parseCommand
@@ -26,20 +27,29 @@ import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
+import Data.IORef (readIORef)
+import Lambdash.Overlay
 import Lambdash.Process (Status (..), programExists)
 import Lambdash.Unify
-import Text.Megaparsec ((<|>), eof, errorBundlePretty, try)
+import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, satisfy, try)
+import System.Environment (lookupEnv)
 
 -- | What persists between lines. A name has its type in one and its value in
 -- the other, so an update has to change both.
 data Session = Session
   { sessionTypes :: Env
   , sessionValues :: Scope
+  , -- | The active environments.
+    sessionShell :: ShellState
   }
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope
+initial = Session typeEnv scope emptyState
+
+-- | What the prompt should say: the active environments, and any shadowing.
+sessionPrompt :: Session -> String
+sessionPrompt = prompt . sessionShell
 
 -- | What one line asks for.
 data Command
@@ -49,6 +59,9 @@ data Command
     Exit
   | -- | @:t expr@.
     TypeOf Expr
+  | -- | @:env@ lists the active environments and their patches. @:env NAME@
+    -- shows a variable, and each layer that touched it.
+    ShowEnv (Maybe String)
   | -- | @x = expr@.
     Bind Name Expr
   | -- | @x <- expr@.
@@ -66,9 +79,16 @@ command =
       (Blank <$ eof)
   <|> (Exit <$ lexeme (keyword ":q"))
   <|> (TypeOf <$> (lexeme (keyword ":t") *> expr))
+  <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> (Bind <$> try (lexeme identifier <* symbol "=") <*> expr)
   <|> (BindRun <$> try (lexeme identifier <* symbol "<-") <*> expr)
   <|> (Run <$> expr)
+
+-- A variable name is any run of characters up to a space.
+optionalName :: Parser (Maybe String)
+optionalName = do
+  name <- lexeme (many (satisfy (\c -> c /= ' ' && c /= '\t')))
+  pure (if null name then Nothing else Just name)
 
 -- | Parse one whole line, or give a readable error.
 parseCommand :: Bound -> String -> Either String Command
@@ -178,6 +198,7 @@ renderEffects row@(EffRow labels vars)
       tails <- mapM renderVar (Set.toList vars)
       let label Console = "console"
           label (Exec name) = "exec " <> name
+          label Environment = "env"
           fixed = intercalate ", " (map label (Set.toList labels))
           open = if null tails then "" else " | " <> intercalate " + " tails
       pure (" {" <> fixed <> open <> "}")
@@ -232,6 +253,48 @@ renderPair message left right = flip evalState Map.empty $ do
   rightText <- renderTy right
   pure (message <> leftText <> " and " <> rightText)
 
+-- | Keep what a line did to the environments. Only a line that succeeded gets
+-- here: a failure returns the old session, so activation is transactional.
+--
+-- Shadowing that the line introduced is reported once here, and stays in the
+-- prompt for as long as it lasts.
+committed :: Runtime -> Session -> String -> IO Step
+committed runtime next text = do
+  state <- readIORef (runtimeState runtime)
+  let before = shadows (sessionShell next)
+      warnings = [renderShadow shadow | shadow <- shadows state, shadow `notElem` before]
+      output = intercalate "\n" (filter (not . null) (warnings <> [text]))
+  pure (Continue next {sessionShell = state} output)
+
+renderShadow :: Shadow -> String
+renderShadow (Shadow var earlier later) = "warning: " <> later <> " shadows " <> var <> " from " <> earlier
+
+-- | @:env@: each active environment and its patches, oldest first.
+describeEnvironments :: ShellState -> String
+describeEnvironments state = case overlays state of
+  [] -> "no active environments"
+  active -> intercalate "\n" (concatMap describe active)
+ where
+  flagged = shadows state
+  describe overlay =
+    overlayName overlay
+      : [ "  " <> renderPatch patch <> note (overlayName overlay) patch
+        | patch <- overlayPatches overlay ]
+  note owner (Patch var _) =
+    case [earlier | Shadow v earlier later <- flagged, v == var, later == owner] of
+      [] -> ""
+      earlier -> "  ⚠ shadows " <> unwords earlier
+
+-- | @:env NAME@: the effective value, then the base and each layer that touched
+-- it, oldest first.
+describeVariable :: Maybe String -> String -> ShellState -> String
+describeVariable base name state =
+  intercalate "\n" (header : ("  base  " <> maybe "unset" show base) : layers)
+ where
+  final = Map.lookup name (effective (maybe Map.empty (Map.singleton name) base) state)
+  header = name <> maybe " is unset" (\value -> " = " <> show value) final
+  layers = ["  " <> layer <> "  " <> renderOp name op | Touch layer op <- touches name state]
+
 -- | The result of one line.
 data Step
   = -- | The next session, and text to show. No text means show nothing.
@@ -253,21 +316,29 @@ stepLine session input =
     Right Exit -> pure Quit
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
+    Right (ShowEnv Nothing) -> pure (Continue session (describeEnvironments (sessionShell session)))
+    Right (ShowEnv (Just name)) -> do
+      base <- lookupEnv name
+      pure (Continue session (describeVariable base name (sessionShell session)))
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
       case snd (unqualify ty) of
-        TComp _ _ -> preflight ty $ do
-          result <- runComp (eval values expression)
-          pure (Continue session (showResult result))
+        TComp _ _ -> preflight ty $ \runtime -> do
+          result <- runComp runtime (eval values expression)
+          committed runtime session (showResult result)
         TStream _ _ _ _ -> checked (inferRunIn types expression) $ \_ ->
-          preflight ty $ do
-            result <- runComp (eval values expression)
-            pure (Continue session (showResult result))
+          preflight ty $ \runtime -> do
+            result <- runComp runtime (eval values expression)
+            committed runtime session (showResult result)
         _ -> pure (Continue session (render (eval values expression)))
     Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
       pure (bound name ty (eval values expression))
     Right (BindRun name expression) -> checked (inferIn types expression) $ \actionTy ->
       checked (inferRunIn types expression) $ \ty ->
-        preflight actionTy (bound name ty <$> runComp (eval values expression))
+        preflight actionTy $ \runtime -> do
+          value <- runComp runtime (eval values expression)
+          case bound name ty value of
+            Continue next text -> committed runtime next text
+            other -> pure other
   where
     types = sessionTypes session
     values = sessionValues session
@@ -277,19 +348,23 @@ stepLine session input =
     -- Generalising after a run is sound while no value can be mutable. A
     -- mutable reference would need a value restriction here.
     bound name ty value =
-      let next = Session
+      let next = session
             { sessionTypes = Map.insert name (generalise types ty) types
             , sessionValues = Map.insert name value values
             }
       in Continue next (name <> " : " <> renderType ty)
+    -- Commands resolve in the effective environment, so an overlay that
+    -- prepends to PATH changes what the preflight finds.
     preflight ty action = do
       let (constraints, _) = unqualify ty
       case closeEffects constraints (actionEffects ty) of
         Nothing -> pure (Continue session "cannot run an action with an unresolved effect row")
         Just (EffRow labels _) -> do
-          missing <- filterM (fmap not . programExists) [name | Exec name <- Set.toList labels]
+          runtime <- newRuntime (sessionShell session)
+          env <- runtimeEnviron runtime
+          missing <- filterM (fmap not . programExists env) [name | Exec name <- Set.toList labels]
           case missing of
-            [] -> action
+            [] -> action runtime
             name : _ -> pure (Continue session ("command not found: " <> name))
     showResult VUnit = ""
     showResult (VStatus (ExitedWith 0)) = ""
