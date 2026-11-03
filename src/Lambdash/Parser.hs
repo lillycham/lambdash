@@ -50,6 +50,8 @@ module Lambdash.Parser
     runWith,
     operatorName,
     parenOperator,
+    typeExpr,
+    declaration,
   )
 where
 
@@ -65,7 +67,7 @@ import Lambdash.Desugar (desugar, stripLocations)
 import Lambdash.Infer (Expr)
 import Lambdash.Syntax
 import Text.Megaparsec
-import Text.Megaparsec.Char (alphaNumChar, char, hspace, letterChar, space1, string)
+import Text.Megaparsec.Char (alphaNumChar, char, hspace, letterChar, lowerChar, space1, string, upperChar)
 import Text.Megaparsec.Char.Lexer qualified as L
 
 -- | The names that an unbound head is told apart from. Parsing never reads
@@ -561,3 +563,74 @@ parseExprIn bound = fmap (stripLocations . desugar) . parseSurfaceIn bound
 -- | Parse one whole expression to surface syntax.
 parseSurfaceIn :: Bound -> String -> Either String Surface
 parseSurfaceIn bound = first errorBundlePretty . runIn bound (sc *> expr <* eof)
+
+-- | A type, as in a class's method signatures:
+--
+-- > a -> b                      a function, to the right
+-- > Int  String  ()  [a]        constructors, lists
+-- > {name : String | r}         a record, open with a tail
+-- > Comp a  Job a  Stream i o r  Stage i o  Collector i o
+typeExpr :: Parser SType
+typeExpr = do
+  t <- appliedType
+  option t (STFun t <$> (symbol "->" *> typeExpr))
+ where
+  appliedType = do
+    name <- lookAhead (optional (try (upperName <* notFollowedBy identifierChar)))
+    case name >>= (`lookup` arities) of
+      Just n -> do
+        _ <- lexeme upperName
+        STApp (maybe "" id name) <$> count n typeAtom
+      Nothing -> typeAtom
+  arities = [("Comp", 1), ("Job", 1), ("Stream", 3), ("Stage", 2), ("Collector", 2)]
+
+-- | A type that needs no parentheses.
+typeAtom :: Parser SType
+typeAtom =
+      (STCon "()" <$ try (symbol "(" *> symbol ")"))
+  <|> between (symbol "(") (symbol ")") typeExpr
+  <|> (STList <$> between (symbol "[") (symbol "]") typeExpr)
+  <|> recordType
+  <|> (STVar <$> lexeme lowerName)
+  <|> (STCon <$> lexeme upperName)
+ where
+  recordType = between (symbol "{") (symbol "}") $ do
+    fields <- ((,) <$> lexeme identifier <*> (symbol ":" *> typeExpr)) `sepBy` symbol ","
+    rest <- optional (symbol "|" *> lexeme lowerName)
+    pure (STRecord fields rest)
+
+lowerName :: Parser Name
+lowerName = try (lookAhead lowerChar *> identifier)
+
+upperName :: Parser Name
+upperName = try (lookAhead upperChar *> identifier)
+
+-- | @class ... where ...@ or @instance ... where ...@. Several methods go in
+-- a block: @where do m : t; n : u end@.
+declaration :: Parser Declaration
+declaration = classDeclaration <|> instanceDeclaration
+ where
+  start word = try (lexeme (keyword word) <* lookAhead (upperChar <|> char '('))
+  classDeclaration = do
+    start "class"
+    supers <- context
+    cls <- lexeme upperName
+    var <- lexeme lowerName
+    lexeme (keyword "where")
+    DeclClass supers cls var <$> members signature
+  instanceDeclaration = do
+    start "instance"
+    requires <- context
+    cls <- lexeme upperName
+    headTy <- typeAtom
+    lexeme (keyword "where")
+    DeclInstance requires cls headTy <$> members definition
+  context = option [] (try (predicates <* symbol "=>"))
+  predicates = between (symbol "(") (symbol ")") (predicate `sepBy1` symbol ",") <|> ((: []) <$> predicate)
+  predicate = SPred <$> lexeme upperName <*> typeAtom
+  name = lexeme identifier <|> lexeme parenOperator
+  signature = (,) <$> try (name <* symbol ":" <* notFollowedBy (char ':')) <*> typeExpr
+  definition = (,) <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> local (\c -> c {inBlock = True}) expr
+  members item =
+        (lexeme (keyword "do") *> (item `sepEndBy1` symbol ";") <* lexeme (keyword "end"))
+    <|> ((: []) <$> item)

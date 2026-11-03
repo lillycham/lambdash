@@ -15,11 +15,13 @@ module Lambdash.Eval
     typeEnv,
     scope,
     summarise,
+    methodValue,
   )
 where
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Map.Lazy qualified as Map.Lazy
 import Data.ByteString qualified as BS
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -211,7 +213,8 @@ eval env expression =
     ERecord fields -> VRecord [(label, eval env value) | (label, value) <- fields]
     EList items -> VList (map (eval env) items)
     ESelect record label -> select label (eval env record)
-    ELet name value body -> eval (Map.insert name (eval env value) env) body
+    -- Lazy, so that an instance's dictionary can refer to itself.
+    ELet name value body -> eval (Map.Lazy.insert name (eval env value) env) body
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
     ELoc _ e -> eval env e
     EBind name e body -> VComp $ \runtime -> do
@@ -498,6 +501,9 @@ methods =
   , alias "div" "Integral" "/" (\a -> TFun a (TFun a a))
   , alias "mod" "Integral" "%" (\a -> TFun a (TFun a a))
   , method "<>" "Semigroup" (\a -> TFun a (TFun a a))
+  , method "show" "Show" (\a -> TFun a TString)
+  -- What the prompt shows a value through, whatever the session binds.
+  , alias "%show" "Show" "show" (\a -> TFun a TString)
   , (fromIntName, Forall [Var 0] (TClass [IsIn "Num" (TVar (Var 0))] (TFun TInt (TVar (Var 0)))), VBuiltin fromIntName (select "fromInt"))
   -- Lazy in the second argument, as the evaluator is.
   , ("&&", mono (TFun TBool (TFun TBool TBool)), fn2 "&&" (\a b -> if truth a then b else VBool False))
@@ -532,6 +538,7 @@ dictionaries :: [(Name, Value)]
 dictionaries =
   [(instanceName "Eq" key, eqDictionary structuralEq) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [(instanceName "Ord" key, ordDictionary (eqDictionary structuralEq) structuralLt) | key <- ["Int", "Bool", "String", "()"]]
+    <> [(instanceName "Show" key, showDictionary render) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [ (instanceName "Num" "Int", numInt)
        , (instanceName "Integral" "Int", VRecord
            [ (superField "Num", numInt)
@@ -547,6 +554,18 @@ dictionaries =
        , (instanceName "Eq" "List", VBuiltin "Eq List" listEq)
        , (instanceName "Ord" "List", VBuiltin "Ord List" listOrd)
        , (instanceName "Eq" "Record", VBuiltin "Eq Record" recordEq)
+       , (instanceName "Show" "List", VBuiltin "Show List" (\d -> showDictionary (\v -> case v of
+           VList xs -> "[" <> commaSep [shown d x | x <- xs] <> "]"
+           _ -> error "Show List: the checker passed a non-list")))
+       -- A record shows each field through its own dictionary, so that a
+       -- declared instance for a field's type shows there too.
+       , (instanceName "Show" "Record", VBuiltin "Show Record" (\fields -> case fields of
+           VRecord ds -> case showDictionary (\v -> case v of
+               VRecord values -> "{" <> commaSep [label <> " = " <> maybe (render x) (`shown` x) (lookup label ds) | (label, x) <- values] <> "}"
+               _ -> error "Show Record: the checker passed a non-record") of
+             VRecord methods' -> VRecord ((recordFields, fields) : methods')
+             other -> other
+           _ -> error "Show Record: the elaborator passed a non-record"))
        , (extendFields, fn2 extendFields extend) ]
  where
   numInt = VRecord
@@ -586,6 +605,20 @@ dictionaries =
       | truth (call2 (select "lt" d) y x) = False
       | otherwise = go xt yt
   listLess _ _ _ = error "Ord List: the checker passed a non-list"
+
+-- | A dictionary for Show from a way to show.
+showDictionary :: (Value -> String) -> Value
+showDictionary f = VRecord [("show", VBuiltin "show" (VStr . f))]
+
+-- | A value shown through a Show dictionary.
+shown :: Value -> Value -> String
+shown d x = case applyValue (select "show" d) x of
+  VStr text -> text
+  _ -> error "show: a method passed a non-String"
+
+-- | A method: the field of its class's dictionary.
+methodValue :: Name -> Value
+methodValue field = VBuiltin field (select field)
 
 -- | A dictionary for Eq from an equality.
 eqDictionary :: (Value -> Value -> Bool) -> Value

@@ -33,9 +33,15 @@ module Lambdash.Infer
   , Mode (..)
   , elaborateIn
   , elaborateRunIn
+  , inferWith
+  , inferRunWith
+  , elaborateWith
+  , elaborateRunWith
+  , elaborateInstance
   ) where
 
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put, runStateT)
+import Control.Monad.Trans.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad (foldM)
 import Data.Map.Strict (Map)
@@ -99,11 +105,22 @@ data InferError
   | -- | A class predicate on an unknown that nothing chooses, and that
     -- @()@ does not satisfy either.
     Ambiguous Pred
+  | -- | A class or instance declaration that cannot stand.
+    BadDeclaration String
+  | -- | An instance needs this, and neither an instance nor its context
+    -- gives it.
+    Unentailed Pred
   deriving (Eq, Show)
 
--- | The state is the next unused unknown. Failure is 'InferError'. Use @lift@
--- from "Control.Monad.Trans.Class" to run an @Either InferError a@ in here.
-type Infer = StateT Int (Either InferError)
+-- | The state is the next unused unknown, and the classes and instances in
+-- scope are read-only. Failure is 'InferError': see 'failWith'.
+type Infer = StateT Int (ReaderT ClassEnv (Either InferError))
+
+failWith :: InferError -> Infer a
+failWith = lift . lift . Left
+
+classEnv :: Infer ClassEnv
+classEnv = lift ask
 
 -- | Make an unknown that nothing has used yet.
 fresh :: Infer Ty
@@ -114,7 +131,7 @@ fresh = do
 
 -- | Run unification in here.
 unifying :: Unifier a -> Infer a
-unifying = mapStateT (either (Left . Unify) Right)
+unifying = mapStateT (lift . either (Left . Unify) Right)
 
 -- | The unknowns that appear in a type.
 --
@@ -205,9 +222,9 @@ connectedConstraints seed constraints =
 
 -- | Replace each bound unknown with a fresh one, so that each use of a name is
 -- its own copy.
-instantiate :: Scheme -> Infer Ty
+instantiate :: Scheme -> Unifier Ty
 instantiate (Forall bound ty) = do
-  freshVars <- mapM (const (unifying freshVar)) bound
+  freshVars <- mapM (const freshVar) bound
   let renaming = Map.fromList (zip bound freshVars)
       sub = Subst
         { getSubst = TVar <$> renaming
@@ -229,9 +246,9 @@ instantiate (Forall bound ty) = do
 infer :: Env -> Expr -> Infer (Subst, Ty, Expr)
 infer env (EVar name) =
   case Map.lookup name env of
-    Nothing -> lift (Left (Unbound name))
+    Nothing -> failWith ((Unbound name))
     Just sc -> do
-      t <- instantiate sc
+      t <- unifying (instantiate sc)
       let (constraints, qualified) = unqualify t
           (preds, bare) = unclass qualified
       evidence <- mapM (const freshEvidence) preds
@@ -471,6 +488,7 @@ freshEvidence = do
 -- an unknown of the environment stay pending, for an enclosing binding.
 generaliseBinding :: Env -> Subst -> Ty -> Expr -> Infer (Scheme, Expr, [(Name, Pred)])
 generaliseBinding env s1 t1 e1 = do
+  env' <- classEnv
   let Forall bound qualified = generalise env (qualify (effectConstraints s1) (apply s1 t1))
       preds = [(n, applyPred s1 p) | (n, p) <- classPreds s1]
   (bindings, residual) <- simplify preds
@@ -485,7 +503,7 @@ generaliseBinding env s1 t1 e1 = do
       ownedBy (_, p) = not restricted && let vs = predVars p in not (Set.null vs) && vs `Set.isSubsetOf` generalised
       mine = filter ownedBy residual
       deferred = filter (not . ownedBy) residual
-      (context, reduced) = reduceContext mine
+      (context, reduced) = reduceContext env' mine
       scheme = Forall bound' (if null context then qualified else TClass (map snd context) qualified)
   -- Reduced evidence comes first: an instance's dictionary can refer to it.
   pure (scheme, foldr ELam (wrapLets (reduced <> bindings) e1) (map fst context), deferred)
@@ -498,12 +516,13 @@ simplify :: [(Name, Pred)] -> Infer ([(Name, Expr)], [(Name, Pred)])
 simplify [] = pure ([], [])
 simplify ((evidence, IsIn cls ty) : rest) = do
   (bindings, residual) <- simplify rest
+  env <- classEnv
   case ty of
     TVar _ -> pure (bindings, (evidence, IsIn cls ty) : residual)
     -- A record is an instance when every field is, and an open tail is a
     -- predicate on the tail: Eq {a : Int | r} needs Eq Int and Eq { | r}.
-    TRecord row -> case lookupInstance cls "Record" of
-      Nothing -> lift (Left (NoInstance (IsIn cls ty)))
+    TRecord row -> case lookupInstance env cls "Record" of
+      Nothing -> failWith ((NoInstance (IsIn cls ty)))
       Just _ -> case flatten row of
         ([], RVar _) -> pure (bindings, (evidence, IsIn cls ty) : residual)
         (fields, tailRow) -> do
@@ -519,9 +538,9 @@ simplify ((evidence, IsIn cls ty) : rest) = do
               dictionary = EApp (EVar (instanceName cls "Record")) (EApp (EApp (EVar extendFields) known) base)
           pure (inner <> [(evidence, dictionary)] <> bindings, innerResidual <> residual)
     _ -> case tyKey ty of
-      Nothing -> lift (Left (NoInstance (IsIn cls ty)))
-      Just (key, args) -> case lookupInstance cls key of
-        Nothing -> lift (Left (NoInstance (IsIn cls ty)))
+      Nothing -> failWith ((NoInstance (IsIn cls ty)))
+      Just (key, args) -> case lookupInstance env cls key of
+        Nothing -> failWith ((NoInstance (IsIn cls ty)))
         Just inst -> do
           required <- sequence
             [ (\n -> (n, IsIn c arg)) <$> freshEvidence
@@ -532,22 +551,24 @@ simplify ((evidence, IsIn cls ty) : rest) = do
 
 -- | Drop a predicate that another one provides: a duplicate, or a
 -- superclass, whose dictionary is a field of its subclass's dictionary.
-reduceContext :: [(Name, Pred)] -> ([(Name, Pred)], [(Name, Expr)])
-reduceContext preds = go [] [] preds
+reduceContext :: ClassEnv -> [(Name, Pred)] -> ([(Name, Pred)], [(Name, Expr)])
+reduceContext env preds = go [] [] preds
  where
   go kept bindings [] = (reverse kept, bindings)
   go kept bindings ((evidence, p@(IsIn cls ty)) : rest) =
     case [n | (n, q) <- kept <> rest, q == p, n /= evidence, n `elem` map fst kept] of
       same : _ -> go kept (bindings <> [(evidence, EVar same)]) rest
-      [] -> case [ (n, sub) | (n, IsIn sub ty') <- kept <> rest, ty' == ty, cls `elem` superclassesOf sub ] of
-        (n, sub) : _ -> go kept (bindings <> [(evidence, superPath sub cls (EVar n))]) rest
+      [] -> case [ (n, sub) | (n, IsIn sub ty') <- kept <> rest, ty' == ty, cls `elem` superclassesOf env sub ] of
+        (n, sub) : _ -> go kept (bindings <> [(evidence, superPath env sub cls (EVar n))]) rest
         [] -> go ((evidence, p) : kept) bindings rest
-  -- The dictionary of a superclass, found through the fields of a subclass's.
-  superPath from to dictionary
-    | from == to = dictionary
-    | otherwise = case [s | ClassInfo name supers <- classes, name == from, s <- supers, s == to || to `elem` superclassesOf s] of
-        next : _ -> superPath next to (ESelect dictionary (superField next))
-        [] -> dictionary
+
+-- | The dictionary of a superclass, found through the fields of a subclass's.
+superPath :: ClassEnv -> String -> String -> Expr -> Expr
+superPath env from to dictionary
+  | from == to = dictionary
+  | otherwise = case [s | ClassInfo name supers _ _ <- envClasses env, name == from, s <- supers, s == to || to `elem` superclassesOf env s] of
+      next : _ -> superPath env next to (ESelect dictionary (superField next))
+      [] -> dictionary
 
 -- | Whether an expression is a function as written: the monomorphism
 -- restriction applies to the others.
@@ -583,9 +604,10 @@ resolveClasses requested solved ty code = do
   let mode = if requested == Generalising && not (isLambda code) then Defaulting else requested
   let preds = [(n, applyPred solved p) | (n, p) <- classPreds solved]
   (bindings, residual) <- simplify preds
+  env <- classEnv
   let inType = ftv ty
       keeps (_, p) = mode /= Defaulting && predVars p `Set.isSubsetOf` inType
-      (context, reduced) = reduceContext (filter keeps residual)
+      (context, reduced) = reduceContext env (filter keeps residual)
       ambiguous = filter (not . keeps) residual
   (defaulted, chosen) <- defaultPreds ambiguous
   -- Defaulted and reduced evidence comes first: an instance's dictionary,
@@ -600,10 +622,11 @@ resolveClasses requested solved ty code = do
 -- accepts, and each unknown row to the empty row, and resolve again.
 defaultPreds :: [(Name, Pred)] -> Infer ([(Name, Expr)], Subst)
 defaultPreds preds = do
+  env <- classEnv
   let vars = Set.toList (Set.unions [predVars p | (_, p) <- preds])
       classesOn v = [cls | (_, IsIn cls (TVar v')) <- preds, v' == v]
       accepts t cls = case tyKey t of
-        Just (key, _) -> maybe False (const True) (lookupInstance cls key)
+        Just (key, _) -> maybe False (const True) (lookupInstance env cls key)
         Nothing -> False
       choose v = case [t | t <- defaultCandidates, all (accepts t) (classesOn v)] of
         t : _ -> t
@@ -613,16 +636,17 @@ defaultPreds preds = do
   (bindings, residual) <- simplify defaulted `orElse` preds
   case residual of
     [] -> pure (bindings, fill)
-    (_, p) : _ -> lift (Left (Ambiguous p))
+    (_, p) : _ -> failWith ((Ambiguous p))
  where
   -- A candidate that fails gives an ambiguity, not a missing instance.
   orElse action original = do
     state <- get
-    case runStateT action state of
+    env <- classEnv
+    case runReaderT (runStateT action state) env of
       Left (NoInstance _) -> case original of
-        (_, p) : _ -> lift (Left (Ambiguous p))
+        (_, p) : _ -> failWith ((Ambiguous p))
         [] -> pure ([], [])
-      Left err -> lift (Left err)
+      Left err -> failWith (err)
       Right (result, next) -> put next >> pure result
 
 -- | The external commands that an expression names, also under lambdas.
@@ -645,11 +669,17 @@ commands _ = []
 -- | Infer in a starting environment, with the final solution applied. Class
 -- predicates on unknowns that the type mentions appear as its context.
 inferIn :: Env -> Expr -> Either InferError Ty
-inferIn env expr = fst <$> elaborateIn Showing env expr
+inferIn = inferWith prelude
+
+inferWith :: ClassEnv -> Env -> Expr -> Either InferError Ty
+inferWith classes env expr = fst <$> elaborateWith classes Showing env expr
 
 -- | The type of a line, and the line elaborated with its dictionaries.
 elaborateIn :: Mode -> Env -> Expr -> Either InferError (Ty, Expr)
-elaborateIn mode env expr = evalStateT go (nextUnknown env)
+elaborateIn = elaborateWith prelude
+
+elaborateWith :: ClassEnv -> Mode -> Env -> Expr -> Either InferError (Ty, Expr)
+elaborateWith classes mode env expr = runReaderT (evalStateT go (nextUnknown env)) classes
  where
   go = do
     (s, t, code) <- infer env expr
@@ -657,7 +687,7 @@ elaborateIn mode env expr = evalStateT go (nextUnknown env)
     resolveClasses mode solved ty code
 
 checkedConstraints :: Subst -> Infer Subst
-checkedConstraints = lift . either (Left . Unify) Right . solveConstraints
+checkedConstraints = lift . lift . either (Left . Unify) Right . solveConstraints
 
 finish :: Env -> Subst -> Ty -> Infer (Subst, Ty)
 finish env raw ty = do
@@ -671,12 +701,18 @@ finish env raw ty = do
 -- | The return type of a computation or stream. A stream's output items are
 -- separate from its return value. An unknown action defaults to @TComp a@.
 inferRunIn :: Env -> Expr -> Either InferError Ty
-inferRunIn env expr = (\(_, result, _) -> result) <$> elaborateRunIn env expr
+inferRunIn = inferRunWith prelude
+
+inferRunWith :: ClassEnv -> Env -> Expr -> Either InferError Ty
+inferRunWith classes env expr = (\(_, result, _) -> result) <$> elaborateRunWith classes env expr
 
 -- | For @x <- e@: the type of the action, the type of what running it gives,
 -- and the action elaborated, with its class predicates defaulted.
 elaborateRunIn :: Env -> Expr -> Either InferError (Ty, Ty, Expr)
-elaborateRunIn env expr = evalStateT go (nextUnknown env)
+elaborateRunIn = elaborateRunWith prelude
+
+elaborateRunWith :: ClassEnv -> Env -> Expr -> Either InferError (Ty, Ty, Expr)
+elaborateRunWith classes env expr = runReaderT (evalStateT go (nextUnknown env)) classes
  where
   go = do
     (s1, t, code) <- infer env expr
@@ -699,6 +735,72 @@ elaborateRunIn env expr = evalStateT go (nextUnknown env)
     pure $ case both of
       TFun actionTy' result' -> (actionTy', result', code')
       _ -> (actionTy, result, code')
+
+-- | Check an instance declaration, and elaborate its dictionary: a record of
+-- its methods and of its superclasses' dictionaries, under a lambda for each
+-- dictionary its context requires. The class environment already holds the
+-- instance, so a method can use the instance itself, as a list's method uses
+-- the list instance on the elements' lists.
+--
+-- The head's unknowns are rigid: a method may not need them to be anything
+-- in particular, and a method's own unknowns stay as general as its class
+-- says. Every predicate a method needs must follow from an instance or from
+-- the context, as must each superclass of the head.
+elaborateInstance :: ClassEnv -> Env -> Instance -> Ty -> [(String, Expr)] -> Either InferError Expr
+elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT go start) classes
+ where
+  cls = instClass inst
+  start = maximum (nextUnknown env : [n + 1 | Var n <- Set.toList (ftv headTy)])
+  headArgs = maybe [] snd (tyKey headTy)
+  go = do
+    info <- maybe (failWith (BadDeclaration ("no class " <> cls))) pure (lookupClass classes cls)
+    let wanted = map fst (classMethods info)
+        given = map fst definitions
+        problem = case ([m | m <- wanted, m `notElem` given], [m | m <- given, m `notElem` wanted], duplicates given) of
+          (m : _, _, _) -> Just ("the instance has no " <> m)
+          (_, m : _, _) -> Just (m <> " is not a method of " <> cls)
+          (_, _, m : _) -> Just (m <> " is defined twice")
+          _ -> Nothing
+    maybe (pure ()) (failWith . BadDeclaration) problem
+    -- Each method's type at the head, with its own unknowns fresh.
+    expected <- mapM (\(m, mty) -> do
+      let atHead = apply emptySubst {getSubst = Map.singleton (classVar info) headTy} mty
+          own = Set.toList (Set.delete (classVar info) (ftv mty))
+      t <- unifying (instantiate (Forall own atHead))
+      pure (m, t)) (classMethods info)
+    let ordered = [(m, e) | (m, _) <- expected, Just e <- [lookup m definitions]]
+    (s1, recordTy, record') <- infer env (ERecord ordered)
+    let expectedTy = TRecord (foldr (\(m, t) r -> RExtend m t r) REmpty expected)
+    s2 <- unifying (unify (apply s1 recordTy) (apply s1 expectedTy))
+    solved <- checkedConstraints (s2 `compose` s1)
+    -- Rigid: the head's unknowns and each method's own must stay distinct
+    -- unknowns.
+    let rigid = Set.toList (Set.unions (ftv headTy : [ftv t | (_, t) <- expected]))
+        images = [apply solved (TVar v) | v <- rigid]
+    if all isVar images && length (nubOrd images) == length images
+      then pure ()
+      else failWith (BadDeclaration "a method is less general than the class says")
+    superEvidence <- mapM (\sup -> (,) sup <$> freshEvidence) (classSupers info)
+    let headTy' = apply solved headTy
+        preds = [(n, applyPred solved p) | (n, p) <- classPreds solved]
+          <> [(n, IsIn sup headTy') | (sup, n) <- superEvidence]
+    (bindings, residual) <- simplify preds
+    givens <- sequence
+      [ (\n -> (n, IsIn c (apply solved arg))) <$> freshEvidence
+      | (arg, needs) <- zip headArgs (instRequires inst), c <- needs ]
+    resolved <- mapM (\(n, p@(IsIn c t)) ->
+      case [(g, c') | (g, IsIn c' t') <- givens, t' == t, c' == c || c `elem` superclassesOf classes c'] of
+        (g, c') : _ -> pure (n, superPath classes c' c (EVar g))
+        [] -> failWith (Unentailed p)) residual
+    let fields = case record' of
+          ERecord fs -> fs
+          _ -> []
+        dictionary = ERecord (fields <> [(superField sup, EVar n) | (sup, n) <- superEvidence])
+    pure (foldr ELam (wrapLets (resolved <> bindings) dictionary) (map fst givens))
+  isVar (TVar _) = True
+  isVar _ = False
+  nubOrd = Set.toList . Set.fromList . map show
+  duplicates names = [n | (i, n) <- zip [0 :: Int ..] names, n `elem` take i names]
 
 -- Include bound names too: a fresh substitution range must not capture a
 -- quantified variable when that substitution reaches another scheme.

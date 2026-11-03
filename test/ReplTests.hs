@@ -418,8 +418,53 @@ tests =
   , ("op: infix is still a name", final ["infix = x -> x", "infix 3"] == "3")
   , (":core: operators read infix", session [":core 1 + 2 * 3", ":core (.size > 1)", ":core (+)"] == ["1 + (2 * 3)", "%1 -> %1.size > 1", "(+)"])
   , (":elab: an operator with its dictionary reads as a function", ("(+) %d" `isInfixOf`) (final [":elab 1 + 2"]))
+  , ("class: declare and use", session [prettyClass, ":t pretty", prettyInt, "pretty 3"] == ["class Pretty", "Pretty a => a -> String", "instance Pretty Int", "\"#3\""])
+  , ("class: no instance yet", final [prettyClass, "pretty true"] == "no instance: Pretty Bool")
+  , ("class: a binding abstracts over it", final [prettyClass, "f = x -> pretty x"] == "f : Pretty a => a -> String")
+  , ("class: an instance with a context", session [prettyClass, prettyInt, prettyList, "pretty [1, 2]", "pretty [true]"]
+      == ["class Pretty", "instance Pretty Int", "instance Pretty [a]", "\"2 items\"", "no instance: Pretty Bool"])
+  , ("class: nested instances", final [sizeClass, "instance Size Int where size = n -> 1", "instance Size a => Size [a] where size = xs -> length xs + 100", "size [[1, 2], [3]]"] == "102")
+  , ("class: several methods in a block", final ["class Shape a where do area : a -> Int; name : a -> String end", "instance Shape Int where do area = n -> n * n; name = n -> \"sq\" end", "{a = area 3, n = name 3}"] == "{a = 9, n = \"sq\"}")
+  , ("class: a multi-line block", needsMore "class Shape a where do" && not (needsMore "class Shape a where do area : a -> Int end"))
+  , ("class: a function head", final ["class Tag a where tag : a -> String", "instance Tag (a -> b) where tag = f -> \"fn\"", "tag (x -> x)"] == "\"fn\"")
+  , ("class: an operator method", final ["class Join a where (<+>) : a -> a -> a", "instance Join Int where (<+>) = a b -> a * 10 + b", "1 <+> 2"] == "12")
+  , ("class: a record method type", final ["class Box a where open : {value : a | r} -> a", "instance Box Int where open = r -> r.value", "open {value = 4, extra = true}"] == "4")
+  , ("superclass: provides the superclass", ty' [hashClass, hashInt] "x -> {h = hash x, e = x == x}" "Hashable a => a -> {h : Int, e : Bool}")
+  , ("superclass: an instance needs it", final [hashClass, "instance Hashable (a -> b) where hash = f -> 1"] == "no instance: Eq (a -> b)")
+  , ("superclass: a context gives it", final [hashClass, hashInt, "instance Hashable a => Hashable [a] where hash = xs -> length xs", "hash [[1]]"] == "1")
+  , ("superclass: a context too weak", final ["class Ord a => Rank a where rank : a -> Int", "instance Rank [a] where rank = xs -> 1"] == "the instance needs Ord a, and its context does not give it")
+  , ("superclass: must be a class", final ["class Nope a => Rank a where rank : a -> Int"] == "no class Nope")
+  , ("instance: replaces for later lines", session [prettyClass, prettyInt, "instance Pretty Int where pretty = n -> \"new\"", "pretty 1"] == ["class Pretty", "instance Pretty Int", "instance Pretty Int", "\"new\""])
+  , ("instance: a prelude instance too", final ["instance Show Int where show = n -> \"int\"", "[1, 2]"] == "[int, int]")
+  , ("instance: a missing method", final ["class Shape a where do area : a -> Int; name : a -> String end", "instance Shape Int where area = n -> n"] == "the instance has no name")
+  , ("instance: an extra method", final ["instance Show Bool where do show = b -> \"B\"; extra = 1 end"] == "extra is not a method of Show")
+  , ("instance: a wrong method type", final [prettyClass, "instance Pretty Int where pretty = n -> n"] == "type mismatch: Int and String")
+  , ("instance: less general than the class", final ["class Container f where empty : f -> [f]", "instance Container [a] where empty = xs -> [[1]]"] == "the instance needs Num a, and its context does not give it")
+  , ("instance: a rigid head", ("less general" `isInfixOf`) (final ["class C a where c : a -> a", "instance C [a] where c = xs -> [1] <> xs <> [true]"]) || ("mismatch" `isInfixOf`) (final ["class C a where c : a -> a", "instance C [a] where c = xs -> [1] <> xs <> [true]"]))
+  , ("instance: distinct unknowns in the head", final [prettyClass, "instance Pretty [Int] where pretty = xs -> \"\""] == "an instance's head takes distinct unknowns: [a], not [Int]")
+  , ("instance: no such class", final ["instance Nope Int where x = 1"] == "no class Nope")
+  , ("instance: a context on the head", final [prettyClass, "instance Pretty b => Pretty [a] where pretty = xs -> \"\""] == "a context constrains the head's unknowns")
+  , ("instance: it may use itself", final [prettyClass, prettyInt, "instance Pretty a => Pretty [a] where pretty = xs -> \"[\" <> pretty (length xs) <> \"]\"", "pretty [[1]]"] == "\"[#1]\"")
+  , ("class: a prelude class stays", final ["class Eq a where foo : a -> a"] == "Eq is a prelude class")
+  , ("class: a method mentions the class's unknown", final ["class Bad a where bad : Int"] == "bad must mention a")
+  , ("class: no effect rows yet", ("cannot mention Comp" `isInfixOf`) (final ["class Run a where go : a -> Comp ()"]))
+  , ("class: redeclaring drops its instances", final [prettyClass, prettyInt, "class Pretty a where pretty : a -> Int", "pretty (length [])"] == "no instance: Pretty Int")
+  , ("show: values print through Show", session ["instance Show Int where show = n -> \"int\"", "1", "{a = 1, b = [true]}", "pure 3", "x -> x"] == ["instance Show Int", "int", "{a = int, b = [true]}", "int", "<function>"])
+  , ("show: as before for the prelude", session ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"] == ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"])
+  , ("show: the method", final ["show [1, 2] <> show true"] == "\"[1, 2]true\"")
+  , ("show: no instance for a function", final ["show (x -> x)"] == "no instance: Show (a -> a)")
+  , (":elab: an instance's dictionary", ("(%instance Show List) = %d" `isInfixOf`) (final [":elab instance Show a => Show [a] where show = xs -> \"n\""]))
+  , (":elab: a superclass field", ("%Eq = " `isInfixOf`) (final [hashClass, ":elab " <> hashInt]))
+  , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
   ]
  where
+  prettyClass = "class Pretty a where pretty : a -> String"
+  prettyInt = "instance Pretty Int where pretty = n -> \"#\" <> show n"
+  prettyList = "instance Pretty a => Pretty [a] where pretty = xs -> show (length xs) <> \" items\""
+  sizeClass = "class Size a where size : a -> Int"
+  hashClass = "class Eq a => Hashable a where hash : a -> Int"
+  hashInt = "instance Hashable Int where hash = n -> n * 31"
+  ty' setup input expected = last (session (setup <> [":t " <> input])) == expected
   withLine = "o = overlay \"o\" [set \"LSH_W\" \"inside\"]"
   devLine = "dev = overlay \"dev\" [set \"LSH_A\" \"1\", set \"LSH_B\" \"x\"]"
 

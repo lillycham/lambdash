@@ -48,6 +48,10 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
+import Lambdash.Classes (ClassEnv, prelude)
+import Lambdash.Declare (Declared (..), declare)
+import Lambdash.Syntax (Declaration)
+import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
 import System.Directory (getCurrentDirectory)
@@ -72,6 +76,9 @@ data Session = Session
     sessionNotified :: Set.Set (FilePath, String)
   , -- | Operator fixities: the table, and the session's fixity lines.
     sessionFixities :: Fixities
+  , -- | The classes and instances: the prelude's, and the session's
+    -- declarations.
+    sessionClasses :: ClassEnv
   }
 
 -- | A job in the table: a line that Ctrl-Z stopped, or a job that @&@
@@ -93,7 +100,7 @@ data Entry = Entry
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities
+initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude
 
 -- | Does this input open more @do@ blocks than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals.
@@ -153,6 +160,11 @@ data Command
     Deny
   | -- | @infixl 6 <+>@: how later lines parse an operator.
     SetFixity Fixity [Name]
+  | -- | @class ...@ or @instance ...@.
+    Declare Declaration
+  | -- | @:elab instance ...@: an instance's dictionary, as code. Nothing is
+    -- declared.
+    ShowElabDeclaration Declaration
   deriving (Eq, Show)
 
 -- | One line.
@@ -165,9 +177,11 @@ command =
   <|> (Exit <$ lexeme (keyword ":q"))
   <|> (TypeOf <$> (lexeme (keyword ":t") *> core))
   <|> (ShowCore <$> (lexeme (keyword ":core") *> core))
+  <|> try (lexeme (keyword ":elab") *> (ShowElabDeclaration <$> declaration))
   <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (name <* symbol "=" <* notFollowedBy (char '='))) <*> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> fixityLine
+  <|> (Declare <$> declaration)
   <|> (Bind <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> core)
   <|> (BindRun <$> try (name <* symbol "<-") <*> core)
   <|> (Run <$> core)
@@ -396,6 +410,8 @@ renderError :: InferError -> String
 renderError (Unbound name) = "unbound name: " <> name
 renderError (NoInstance p) = "no instance: " <> evalState (renderPred p) Map.empty
 renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.empty
+renderError (BadDeclaration message) = message
+renderError (Unentailed p) = "the instance needs " <> evalState (renderPred p) Map.empty <> ", and its context does not give it"
 renderError (Unify err) = case err of
   Mismatch left right -> renderPair "type mismatch: " left right
   Infinite var ty -> renderPair "infinite type: " (TVar var) ty
@@ -709,12 +725,22 @@ stepLine session input =
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
     Right (SetFixity fixity names) ->
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
+    Right (Declare declaration) -> case declare classes types values declaration of
+      Left err -> pure (Continue session (renderError err))
+      Right done -> pure (Continue session
+        { sessionClasses = declaredClasses done
+        , sessionTypes = foldr (uncurry Map.insert) types (declaredTypes done)
+        , sessionValues = foldr (uncurry Map.Lazy.insert) values (declaredValues done)
+        } (declaredMessage done))
+    Right (ShowElabDeclaration declaration) -> case declare classes types values declaration of
+      Left err -> pure (Continue session (renderError err))
+      Right done -> pure (Continue session (maybe (declaredMessage done) (\(name, code) -> "(" <> name <> ") = " <> renderCore code) (declaredCode done)))
     Right (ShowCore expression) -> pure (Continue session (renderCore expression))
     Right (ShowElab named expression) ->
       let mode = maybe Defaulting (const Generalising) named
-      in checked (elaborateIn mode types expression) $ \(_, code) ->
+      in checked (elaborateWith classes mode types expression) $ \(_, code) ->
         pure (Continue session (maybe "" ((<> " = ") . displayName) named <> renderCore code))
-    Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
+    Right (TypeOf expression) -> checked (inferWith classes types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do
       cwd <- getCurrentDirectory
@@ -725,20 +751,20 @@ stepLine session input =
       pure (Continue session (describeVariable base name (inScope cwd (sessionShell session))))
     -- What runs is the elaborated line: each class method gets its
     -- dictionary. A line that runs defaults its ambiguous unknowns to ().
-    Right (Run expression) -> checked (elaborateIn Defaulting types expression) $ \(ty, code) ->
-      case snd (unqualify ty) of
-        TComp _ _ -> preflight ty $ \runtime ->
+    Right (Run expression) -> checked (elaborateWith classes Defaulting types expression) $ \(ty, code) ->
+      case snd (unclass (snd (unqualify ty))) of
+        TComp _ resultTy -> preflight ty $ \runtime ->
           foreground session input runtime (eval values code) $ \done now result ->
-            committed done start now (showResult result)
-        TStream _ _ _ _ -> checked (inferRunIn types expression) $ \_ ->
+            committed done start now (showResult (Just resultTy) result)
+        TStream _ _ _ _ -> checked (inferRunWith classes types expression) $ \_ ->
           preflight ty $ \runtime ->
             foreground session input runtime (eval values code) $ \done now result ->
-              committed done start now (showResult result)
-        _ -> pure (Continue session (render (eval values code)))
+              committed done start now (showResult Nothing result)
+        valueTy -> pure (Continue session (showValue session valueTy (eval values code)))
     -- A binding abstracts over the dictionaries its type needs.
-    Right (Bind name expression) -> checked (elaborateIn Generalising types expression) $ \(ty, code) ->
+    Right (Bind name expression) -> checked (elaborateWith classes Generalising types expression) $ \(ty, code) ->
       pure (bound session name ty (eval values code))
-    Right (BindRun name expression) -> checked (elaborateRunIn types expression) $ \(actionTy, ty, code) ->
+    Right (BindRun name expression) -> checked (elaborateRunWith classes types expression) $ \(actionTy, ty, code) ->
       preflight actionTy $ \runtime ->
         -- A job stopped here binds when fg finishes it, in the session then.
         foreground session input runtime (eval values code) $ \done now value ->
@@ -775,13 +801,28 @@ stepLine session input =
           case missing of
             [] -> action runtime
             name : _ -> pure (Continue session ("command not found: " <> name))
-    showResult VUnit = ""
-    showResult (VStatus (ExitedWith 0)) = ""
-    showResult (VJob job _) = "[" <> show (jobNumber job) <> "] " <> jobLine job
-    showResult value = render value
+    classes = sessionClasses session
+    showResult _ VUnit = ""
+    showResult _ (VStatus (ExitedWith 0)) = ""
+    showResult _ (VJob job _) = "[" <> show (jobNumber job) <> "] " <> jobLine job
+    showResult (Just resultTy) value = showValue session resultTy value
+    showResult Nothing value = render value
 
 -- | A name as the prompt shows it: an operator in parentheses.
 displayName :: Name -> String
 displayName name
   | not (null name), all (`elem` ("!%&*+-/<=>?@^|~:" :: String)) name = "(" <> name <> ")"
   | otherwise = name
+
+-- | A value as the prompt shows it: through Show, where its type has an
+-- instance, so that a declared instance changes what the prompt prints.
+-- Other values, such as functions, show as before.
+showValue :: Session -> Ty -> Value -> String
+showValue session ty value =
+  case elaborateWith (sessionClasses session) Defaulting (Map.insert it (mono ty) (sessionTypes session)) (EApp (EVar "%show") (EVar it)) of
+    Right (_, code) -> case eval (Map.insert it value (sessionValues session)) code of
+      VStr text -> text
+      _ -> render value
+    Left _ -> render value
+ where
+  it = "%it"

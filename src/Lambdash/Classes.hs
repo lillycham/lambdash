@@ -1,16 +1,20 @@
 -- | The classes and instances that the checker resolves against.
 --
--- These are data, so that declarations at the prompt can extend them later.
--- For now they hold the prelude: 'Eq' and 'Ord' for the built-in types and
--- for lists. The dictionaries themselves are values in "Lambdash.Eval", under
--- the names that 'instanceName' gives.
+-- A 'ClassEnv' is data, so that declarations at the prompt extend it. The
+-- prelude's is 'prelude'. The dictionaries themselves are values, under the
+-- names that 'instanceName' gives: the prelude's are in "Lambdash.Eval", and
+-- a declared instance's is the code its declaration elaborates to.
 module Lambdash.Classes
   ( ClassInfo (..)
   , Instance (..)
-  , classes
-  , instances
+  , ClassEnv (..)
+  , prelude
+  , lookupClass
   , lookupInstance
   , superclassesOf
+  , addClass
+  , addInstance
+  , methodField
   , instanceName
   , tyKey
   , superField
@@ -28,6 +32,11 @@ data ClassInfo = ClassInfo
   , -- | Direct superclasses. A dictionary holds one for each, so @Ord a@
     -- provides @Eq a@.
     classSupers :: [String]
+  , -- | The unknown that stands for the instance type in 'classMethods'.
+    classVar :: Var
+  , -- | Each method's field in the dictionary, and its type. Other unknowns
+    -- in a method's type are its own, chosen at each use.
+    classMethods :: [(String, Ty)]
   }
 
 -- | An instance for a type constructor. Each argument of the constructor
@@ -38,17 +47,33 @@ data Instance = Instance
   , instRequires :: [[String]]
   }
 
-classes :: [ClassInfo]
-classes =
-  [ ClassInfo "Eq" []
-  , ClassInfo "Ord" ["Eq"]
-  , ClassInfo "Num" []
-  , ClassInfo "Integral" ["Num"]
-  , ClassInfo "Semigroup" []
-  ]
+-- | The classes and instances in scope.
+data ClassEnv = ClassEnv
+  { envClasses :: [ClassInfo]
+  , envInstances :: [Instance]
+  }
 
-instances :: [Instance]
-instances =
+-- | The prelude's classes and instances.
+prelude :: ClassEnv
+prelude = ClassEnv preludeClasses preludeInstances
+
+preludeClasses :: [ClassInfo]
+preludeClasses =
+  [ ClassInfo "Eq" [] a [("eq", a2 TBool), ("ne", a2 TBool)]
+  , ClassInfo "Ord" ["Eq"] a [(m, a2 TBool) | m <- ["lt", "le", "gt", "ge"]] `withMethods` [(m, a2 ta) | m <- ["min", "max"]]
+  , ClassInfo "Num" [] a ([(m, a2 ta) | m <- ["+", "-", "*"]] <> [("negate", TFun ta ta), ("fromInt", TFun TInt ta)])
+  , ClassInfo "Integral" ["Num"] a [(m, a2 ta) | m <- ["/", "%"]]
+  , ClassInfo "Semigroup" [] a [("<>", a2 ta)]
+  , ClassInfo "Show" [] a [("show", TFun ta TString)]
+  ]
+ where
+  a = Var 0
+  ta = TVar a
+  a2 result = TFun ta (TFun ta result)
+  withMethods info more = info {classMethods = classMethods info <> more}
+
+preludeInstances :: [Instance]
+preludeInstances =
   [Instance "Eq" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [Instance "Eq" "List" [["Eq"]]]
     -- Structural: a record is Eq when every field is. See 'recordFields'.
@@ -58,19 +83,47 @@ instances =
     <> [Instance "Num" "Int" [], Instance "Integral" "Int" []]
     <> [Instance "Semigroup" ty [] | ty <- ["String", "Bytes", "Overlay"]]
     <> [Instance "Semigroup" "List" [[]]]
+    <> [Instance "Show" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
+    <> [Instance "Show" "List" [["Show"]], Instance "Show" "Record" []]
 
 -- | The constructor of a type, for instance lookup, and its arguments.
 tyKey :: Ty -> Maybe (String, [Ty])
 tyKey (TCon name) = Just (name, [])
 tyKey (TList item) = Just ("List", [item])
+tyKey (TFun a b) = Just ("->", [a, b])
 tyKey _ = Nothing
 
-lookupInstance :: String -> String -> Maybe Instance
-lookupInstance cls key = find (\i -> instClass i == cls && instHead i == key) instances
+lookupClass :: ClassEnv -> String -> Maybe ClassInfo
+lookupClass env cls = find ((== cls) . className) (envClasses env)
+
+lookupInstance :: ClassEnv -> String -> String -> Maybe Instance
+lookupInstance env cls key = find (\i -> instClass i == cls && instHead i == key) (envInstances env)
 
 -- | Every superclass, transitively.
-superclassesOf :: String -> [String]
-superclassesOf cls = nub (concat [supers <> concatMap superclassesOf supers | ClassInfo name supers <- classes, name == cls])
+superclassesOf :: ClassEnv -> String -> [String]
+superclassesOf env cls = nub (concat [supers <> concatMap (superclassesOf env) supers | ClassInfo name supers _ _ <- envClasses env, name == cls])
+
+-- | Declare a class. A class declared again replaces the old one, and its
+-- instances go with it: they have the old methods.
+addClass :: ClassInfo -> ClassEnv -> ClassEnv
+addClass info env = ClassEnv
+  (filter ((/= className info) . className) (envClasses env) <> [info])
+  (filter ((/= className info) . instClass) (envInstances env))
+
+-- | Declare an instance. One for the same class and type replaces it, for
+-- the lines after.
+addInstance :: Instance -> ClassEnv -> ClassEnv
+addInstance inst env = env
+  { envInstances = filter (\i -> not (instClass i == instClass inst && instHead i == instHead inst)) (envInstances env) <> [inst] }
+
+-- | The dictionary field of a method, as an instance may name it: @(==)@
+-- is the prelude's @eq@, and @div@ is @/@.
+methodField :: String -> String
+methodField name = maybe name id (lookup name aliases)
+ where
+  aliases =
+    [ ("==", "eq"), ("!=", "ne"), ("<", "lt"), ("<=", "le"), (">", "gt"), (">=", "ge")
+    , ("div", "/"), ("mod", "%") ]
 
 -- | The name of an instance's dictionary. No identifier can spell it.
 instanceName :: String -> String -> String

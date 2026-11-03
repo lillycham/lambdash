@@ -168,8 +168,23 @@ in this rule only. A line may span several input lines while a `do` is open.
 
 ```ebnf
 line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
+              | ":elab" declaration | declaration
               | fixity | name "=" expr | name "<-" expr | expr ] EOF ;
 fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
+
+declaration = "class" [ context "=>" ] UPPER LOWER "where" members(signature)
+            | "instance" [ context "=>" ] UPPER tatom "where" members(definition) ;
+context     = pred | "(" pred { "," pred } ")" ;
+pred        = UPPER tatom ;
+members(x)  = x | "do" x { ";" x } [ ";" ] "end" ;
+signature   = name ":" type ;
+definition  = name "=" expr ;
+
+type        = btype [ "->" type ] ;
+btype       = "Comp" tatom | "Job" tatom | "Stream" tatom tatom tatom
+            | "Stage" tatom tatom | "Collector" tatom tatom | tatom ;
+tatom       = LOWER | UPPER | "(" ")" | "(" type ")" | "[" type "]"
+            | "{" [ IDENT ":" type { "," IDENT ":" type } ] [ "|" LOWER ] "}" ;
 command     = "jobs" | "fg" [ JOB ] | "bg" [ JOB ] | "allow" | "deny" ;
 JOB         = [ "%" ] DIGIT { DIGIT } ;
 ```
@@ -197,6 +212,10 @@ See [structured streams](streams.md) for lists, line framing, filters and collec
 - A bare `cd` means `cd ~`, also under `:t`. The function is `x -> cd $x`.
 - `--` starts a comment in expression position, which is why flags such as
   `--local` are not syntax.
+- `class` and `instance` start a declaration only before a capital or a
+  parenthesis, so either is still a name. `where` is not reserved. In a
+  type, a lowercase name is an unknown and a capitalised one a constructor.
+  See [classes](classes.md).
 - A `fixity` line sets how later lines parse its operators, for the rest of
   the session. `infixl`, `infixr` and `infix` are not reserved: the line is a
   fixity only with a digit and operators after the word.

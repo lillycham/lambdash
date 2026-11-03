@@ -11,6 +11,9 @@ module Lambdash.Syntax
   , Surface (..)
   , Node (..)
   , Statement (..)
+  , SType (..)
+  , SPred (..)
+  , Declaration (..)
   ) where
 
 import Lambdash.Unify (Label)
@@ -93,4 +96,31 @@ data Statement
     StmtLet Name Surface
   | -- | @e@.
     StmtRun Surface
+  deriving (Eq, Show)
+
+-- | A type as written. A lowercase name is an unknown, and each @Comp@,
+-- @Job@ and @Stream@ has an effect row of its own, unknown.
+data SType
+  = STVar Name
+  | STCon Name
+  | STList SType
+  | STFun SType SType
+  | -- | @{a : Int | r}@: the fields, and the tail if there is one.
+    STRecord [(Label, SType)] (Maybe Name)
+  | -- | @Comp a@, @Job a@, @Stream i o r@, @Stage i o@, @Collector i o@.
+    STApp Name [SType]
+  deriving (Eq, Show)
+
+-- | @Eq a@ in a context.
+data SPred = SPred Name SType
+  deriving (Eq, Show)
+
+-- | A line that declares a class or an instance.
+data Declaration
+  = -- | @class (Eq a) => Hashable a where hash : a -> Int@: the superclasses,
+    -- the class, its unknown, and its methods' types.
+    DeclClass [SPred] Name Name [(Name, SType)]
+  | -- | @instance Show a => Show [a] where show = ...@: the context, the
+    -- class, the head, and the methods.
+    DeclInstance [SPred] Name SType [(Name, Surface)]
   deriving (Eq, Show)

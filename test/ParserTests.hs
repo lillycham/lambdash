@@ -9,7 +9,7 @@ import Data.Set qualified as Set
 import Lambdash.Infer
 import Lambdash.Desugar (desugar, stripLocations)
 import Lambdash.Parser
-import Lambdash.Syntax (Surface)
+import Lambdash.Syntax (Declaration (..), SPred (..), SType (..), Surface)
 import Lambdash.Unify
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
@@ -162,7 +162,26 @@ tests =
   , ("op: a block binds an operator", is "do (%%) = f; x %% y end" (ELet "%%" (v "f") (ERun (op "%%" (v "x") (v "y")))))
   , ("op: externals keep operator characters", parseExprIn (BoundNames Set.empty) "git log -n 1 a+b" == Right (ECmd "git" (map AWord ["log", "-n", "1", "a+b"])))
   , ("op: an external ends at &&", parseExprIn (BoundNames (Set.fromList ["y"])) "make && y" == Right (op "&&" (ECmd "make" []) (v "y")))
+  , ("type: functions to the right", run typeExpr "a -> b -> Int" == Just (STFun (STVar "a") (STFun (STVar "b") (STCon "Int"))))
+  , ("type: lists, unit and parentheses", run typeExpr "[a] -> (a -> ()) -> String" == Just (STFun (STList (STVar "a")) (STFun (STFun (STVar "a") (STCon "()")) (STCon "String"))))
+  , ("type: records, open and closed", run typeExpr "{name : String | r}" == Just (STRecord [("name", STCon "String")] (Just "r")) && run typeExpr "{}" == Just (STRecord [] Nothing))
+  , ("type: applied constructors", run typeExpr "Stage a [a] -> Comp Int" == Just (STFun (STApp "Stage" [STVar "a", STList (STVar "a")]) (STApp "Comp" [STCon "Int"])))
+  , ("decl: a class", run declaration "class Pretty a where pretty : a -> String" == Just (DeclClass [] "Pretty" "a" [("pretty", STFun (STVar "a") (STCon "String"))]))
+  , ("decl: superclasses and a block", run declaration "class (Eq a, Show a) => H a where do h : a -> Int; (<+>) : a -> a -> a end"
+      == Just (DeclClass [SPred "Eq" (STVar "a"), SPred "Show" (STVar "a")] "H" "a" [("h", STFun (STVar "a") (STCon "Int")), ("<+>", STFun (STVar "a") (STFun (STVar "a") (STVar "a")))]))
+  , ("decl: an instance with a context", fmap strip (run declaration "instance Show a => Show [a] where show = xs -> \"l\"")
+      == Just (DeclInstance' [SPred "Show" (STVar "a")] "Show" (STList (STVar "a")) [("show", ELam "xs" (ELit (LStr "l")))]))
+  , ("decl: methods in a block", fmap strip (run declaration "instance Shape Int where do area = n -> n; name = n -> \"sq\"; end")
+      == Just (DeclInstance' [] "Shape" (STCon "Int") [("area", ELam "n" (v "n")), ("name", ELam "n" (ELit (LStr "sq")))]))
+  , ("decl: a function head", fmap strip (run declaration "instance Tag (a -> b) where tag = f -> 1") == Just (DeclInstance' [] "Tag" (STFun (STVar "a") (STVar "b")) [("tag", ELam "f" (int 1))]))
+  , ("decl: class needs a capital", run declaration "class pretty a where p : a" == Nothing)
   ]
+ where
+  strip (DeclInstance ctx cls ty defs) = DeclInstance' ctx cls ty [(m, stripLocations (desugar e)) | (m, e) <- defs]
+  strip (DeclClass a b c d) = DeclClass' a b c d
+
+data Strip = DeclInstance' [SPred] Name SType [(Name, Expr)] | DeclClass' [SPred] Name Name [(Name, SType)]
+  deriving (Eq, Show)
 
 op :: Name -> Expr -> Expr -> Expr
 op name l r = EApp (EApp (v name) l) r

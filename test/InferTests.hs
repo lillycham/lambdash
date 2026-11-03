@@ -10,6 +10,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromJust)
 import Data.Set qualified as Set
 import Lambdash.Infer
+import Lambdash.Classes qualified as Classes
+import Control.Monad.Trans.Reader (runReaderT)
 import Lambdash.Unify
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
@@ -71,7 +73,7 @@ first a b = app (lam ["a", "b"] (v "a")) [a, b]
 idE :: Expr
 idE = lam ["x"] (v "x")
 
-scheme :: Int -> Scheme -> Either InferError (Ty, Ty)
+scheme :: Int -> Scheme -> Either TypeError (Ty, Ty)
 scheme start sc = evalStateT ((,) <$> instantiate sc <*> instantiate sc) start
 
 prelude :: Env
@@ -98,7 +100,7 @@ infinite expr = case inferIn prelude expr of
 
 tests :: [(String, Bool)]
 tests =
-  [ ("fresh: counts up", evalStateT ((,) <$> fresh <*> fresh) 0 == Right (t0, t1))
+  [ ("fresh: counts up", runReaderT (evalStateT ((,) <$> fresh <*> fresh) 0) Classes.prelude == Right (t0, t1))
   , ("ftv: an unknown", ftv t0 == Set.fromList [Var 0])
   , ("ftv: both sides of a function", ftv (t0 ~> TInt ~> t1) == Set.fromList [Var 0, Var 1])
   , ("ftv: nothing in a concrete type", ftv (TInt ~> TBool) == Set.empty)

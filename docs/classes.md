@@ -52,6 +52,78 @@ true
 λ> sortOn (r -> r.size) files
 ```
 
+## Declaring classes and instances
+
+A class names its methods and their types. An instance gives them for one
+type.
+
+```text
+λ> class Pretty a where pretty : a -> String
+class Pretty
+λ> instance Pretty Int where pretty = n -> "#" <> show n
+instance Pretty Int
+λ> pretty 3
+"#3"
+λ> f = x -> pretty x
+f : Pretty a => a -> String
+```
+
+Several methods go in a block, which may span lines:
+
+```text
+λ> class Shape a where do
+..   area : a -> Int;
+..   name : a -> String
+.. end
+λ> instance Shape Int where do area = n -> n * n; name = n -> "square" end
+```
+
+- **Superclasses**: `class Eq a => Hashable a where …`. Every `Hashable`
+  type is `Eq`, a context shows only `Hashable a`, and an instance of
+  `Hashable` needs one of `Eq` for its type.
+- **Contexts**: `instance Pretty a => Pretty [a] where …`. The instance holds
+  for `[a]` when `Pretty a` does, and its methods can use `Pretty a`, and the
+  instance itself, as `pretty` on the elements and on nested lists.
+- **Heads** are a type constructor applied to distinct unknowns: `Int`,
+  `String`, `()`, `[a]`, `(a -> b)`. Not `[Int]`, and not a record: records
+  are `Eq` and `Show` structurally.
+- **A context** constrains only the head's unknowns, so resolution always
+  ends.
+- **Every method** must be defined; there are no defaults yet.
+- **Method types** use the type syntax of [the grammar](grammar.md). A
+  method's other unknowns stay as general as the class says, so an
+  instance cannot fix them. `Comp`, `Job` and `Stream` cannot appear yet,
+  because their effect rows have no syntax.
+- **Again**: an instance for the same class and type replaces the old one
+  for the lines after it. A binding that already chose a dictionary keeps
+  it. A user class declared again replaces the old one and drops its
+  instances. The prelude's classes cannot be declared again, but their
+  instances can: `instance Show Int where show = n -> "int"`.
+- **Prelude methods** are dictionary fields, and an instance may name them by
+  their operators: `(==)` is `eq` and `div` is `/`.
+
+`:elab` on a declaration shows the dictionary it would make, and declares
+nothing:
+
+```text
+λ> :elab instance Show a => Show [a] where show = xs -> "n"
+(%instance Show List) = %d5 -> {show = xs -> "n"}
+```
+
+## Show
+
+`show : Show a => a -> String`. The prompt prints a value through `Show`
+when its type has an instance, and as before otherwise, so a declared
+instance changes what the prompt prints:
+
+```text
+λ> instance Show Int where show = n -> "int"
+λ> {a = 1, b = [true]}
+{a = int, b = [true]}
+λ> x -> x
+<function>
+```
+
 ## Instances
 
 | Class | Instances |
@@ -60,6 +132,7 @@ true
 | `Ord` | `Int`, `Bool`, `String`, `()`, and `[a]` when `Ord a`, lexicographic |
 | `Num`, `Integral` | `Int`. `Integral` provides `Num` |
 | `Semigroup` | `String`, `Bytes`, `[a]`, and `Overlay`: `dev <> bench` is one overlay whose later patches win |
+| `Show` | `Int`, `Bool`, `String`, `()`, `Status`, `Bytes`, `Patch`, `Overlay`, `[a]` when `Show a`, and records when every field is `Show` |
 
 `Ord a` provides `Eq a`, so a function that uses both shows only `Ord a`.
 Functions, computations, streams, stages, collectors and jobs have no `Eq`.
@@ -131,5 +204,10 @@ f = %d6 x -> eq %d6 x x
 p = %d10 -> let %d6 = %d10.%Eq in x -> {a = eq %d6 x x, b = lt %d10 x x}
 ```
 
-Classes and instances are tables in `Lambdash.Classes`, so that declarations at the prompt can extend them later. See
+A declared instance's dictionary is code: a record of its methods and its
+superclasses' dictionaries, under a parameter for each dictionary its
+context needs. `Lambdash.Declare` checks a declaration, and
+`elaborateInstance` in `Lambdash.Infer` checks the methods and builds that
+code. The classes and instances in scope are a `ClassEnv`: the prelude's,
+from `Lambdash.Classes`, and the session's declarations. See
 [the design](equality.md).

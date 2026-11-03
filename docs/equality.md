@@ -1,7 +1,7 @@
 # Classes, equality and operators: design
 
 This records the design decided with Lilly on 2026-11-04, so that it can be
-built in slices. Slices 1, 2a, 2b and 3 are built: see [classes](classes.md)
+built in slices. Slices 1 to 4 are built: see [classes](classes.md)
 and [the grammar](grammar.md).
 
 ## Decisions
@@ -77,12 +77,16 @@ Confirmed with slice 3:
 
 1. ~~Defaulting for `Num`~~: decided. An ambiguous unknown takes the first of
    `()` and `Int` that has every class on it, so `Num` defaults to `Int`.
-2. **Declaration syntax** for `class` and `instance`, at the prompt and in a
-   startup file, and what redeclaring one in a session means.
-3. **Coherence**: overlapping instances, and instances that a later line
-   adds after a binding already chose one.
-4. **Instances for built-in types that users may want to replace**, such as
-   `Show` for records.
+2. ~~Declaration syntax~~: decided. Haskell-like, one line, with
+   `where do … end` for several members. A startup file is still open.
+3. ~~Coherence~~: decided. A redeclared instance replaces the old one for
+   later lines; a binding that already chose a dictionary keeps it.
+   Overlap cannot arise: a head is a constructor on distinct unknowns.
+4. **Replaceable built-in instances**: any prelude instance can be
+   replaced. Records stay structural, since no head can name a record.
+5. **Default methods**: not yet. Every instance defines every method.
+6. **Effect rows in method types**: `Comp`, `Job` and `Stream` need a row
+   syntax first.
 
 ## Slices
 
@@ -98,4 +102,6 @@ Confirmed with slice 3:
    user operators and fixity lines. **Done**, with `Num`, `Integral` and
    `Semigroup`, and literals as `Num a => a` under the monomorphism
    restriction, brought forward from slice 4.
-4. `Show`, and class and instance declarations at the prompt.
+4. `Show`, and class and instance declarations at the prompt, with
+   superclasses and instance contexts. **Done**: `Lambdash.Declare`, and a
+   `ClassEnv` that the session extends. The prompt prints through `Show`.
