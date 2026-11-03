@@ -12,7 +12,7 @@ import Lambdash.Parser (Bound (..))
 import Lambdash.Repl
 import Lambdash.Unify
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile, setCurrentDirectory)
 import System.Exit (exitFailure)
 import System.IO (IOMode (..), hClose, hFlush, openFile, openTempFile, stdin, stdout)
 import System.Environment (lookupEnv, setEnv)
@@ -372,7 +372,7 @@ tests =
   , ("record: an open row is a context", ty "r -> {x = r.name, y = eq r r}" "(Eq a, Eq { | b}) => {name : a | b} -> {x : a, y : Bool}")
   , ("record: and the caller supplies the rest", final ["f = r -> {x = r.name, y = eq r r}", "f {name = \"n\", size = 3, tags = [\"t\"]}"] == "{x = \"n\", y = true}")
   , ("record: the rest is compared too", final ["f = r s -> {x = r.name, y = eq r s}", "f {name = \"n\", size = 3} {name = \"n\", size = 4}"] == "{x = \"n\", y = false}")
-  , ("record: ls entries", final ["r <- ls / | filter (e -> eq {t = e.type, n = e.name} {t = \"dir\", n = \"tmp\"}) | .name | collect", "r.items"] == "[\"tmp\"]")
+  , ("record: ls entries", final ["r <- ls / | filter (e -> eq {t = e.type, n = e.name} {t = \"dir\", n = \"usr\"}) | .name | collect", "r.items"] == "[\"usr\"]")
   , ("record: :elab shows the row evidence", let code = final [":elab f = r -> {x = r.name, y = eq r r}"]
       in all (`isInfixOf` code) ["(%instance Eq Record) (%extendFields {name = %d", ".%fields)"])
   , ("class: a computation has no Eq", final ["eq (pure true) (pure true)"] == "no instance: Eq (Comp Bool)")
@@ -450,6 +450,12 @@ main = do
   when exists (removeDirectoryRecursive scratch)
   createDirectoryIfMissing True scratch
   setEnv "XDG_STATE_HOME" scratch
+  -- Nor may they depend on the directory they start in: arriving back in a
+  -- directory with a flake.nix runs nix to hash it, which can be slow. An
+  -- empty directory has nothing to activate.
+  let work = scratch <> "/work"
+  createDirectoryIfMissing True work
+  setCurrentDirectory work
   results <- mapM runTest tests
   putStrLn (show (length (filter id results)) <> "/" <> show (length results) <> " passed")
   unless (and results) exitFailure
