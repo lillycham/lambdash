@@ -16,7 +16,10 @@ proc see {pattern what} {
 }
 proc prompt {} { see {> $} "prompt" }
 
-spawn env LANG=C LC_ALL=C [lindex $argv 0]
+# λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
+# in this directory from activating, and the tests from touching real state.
+set state [exec mktemp -d]
+spawn env LANG=C LC_ALL=C XDG_STATE_HOME=$state [lindex $argv 0]
 prompt
 
 # A typed é is decoded by the locale, so check only that the shell survives.
@@ -34,4 +37,5 @@ prompt
 
 send ":q\r"
 expect eof
+exec rm -rf $state
 puts "\nALL PASSED"

@@ -1,8 +1,7 @@
 #!/usr/bin/env expect
 # Usage: expect test/trust.exp path/to/lambdash
 # Directory-scoped devshells and approval. Uses a copy of test/nix-fixture, so
-# that the test can change flake.nix. Run it from the repository root, with
-# XDG_STATE_HOME pointing somewhere disposable.
+# that the test can change flake.nix. Run it from the repository root.
 set timeout 300
 set stty_init "sane"
 proc fail {what} { puts "\nFAIL: $what"; exit 1 }
@@ -19,7 +18,10 @@ exec cp test/nix-fixture/flake.nix test/nix-fixture/flake.lock $work/
 file mkdir $work/sub
 set name [file tail $work]
 
-spawn [lindex $argv 0]
+# λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
+# in this directory from activating, and the tests from touching real state.
+set state [exec mktemp -d]
+spawn env XDG_STATE_HOME=$state [lindex $argv 0]
 see {λ> $} "prompt"
 
 send "cd $work\r"
@@ -81,4 +83,5 @@ see {no flake.nix here} "allow needs a flake"
 send ":q\r"
 expect eof
 exec rm -rf $work
+exec rm -rf $state
 puts "\nALL PASSED"

@@ -14,7 +14,10 @@ proc see {pattern what} {
 }
 set fixture "./test/nix-fixture"
 
-spawn [lindex $argv 0]
+# λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
+# in this directory from activating, and the tests from touching real state.
+set state [exec mktemp -d]
+spawn env XDG_STATE_HOME=$state [lindex $argv 0]
 see {λ> $} "prompt"
 
 send "lsh-hello\r"
@@ -64,4 +67,5 @@ see {command not found: x} "and binds nothing"
 
 send ":q\r"
 expect eof
+exec rm -rf $state
 puts "\nALL PASSED"
