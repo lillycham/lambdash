@@ -27,17 +27,11 @@ module Lambdash.Overlay
   , renderPatch
   , renderOverlay
   , prompt
-  , Runtime (..)
-  , newRuntime
-  , newRuntimeWith
-  , runtimeEnviron
   ) where
 
-import Data.IORef
 import Data.List (intercalate, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import System.Environment (getEnvironment)
 
 -- | Variable names to values.
 type Environ = Map String String
@@ -184,26 +178,3 @@ prompt state = case overlays state of
         more = if length flagged > 3 then " +" <> show (length flagged - 3) else ""
         flag = if null flagged then "" else " ⚠ " <> unwords shown <> more
     in "λ [" <> names <> flag <> "]> "
-
--- | What a running computation can reach: the session's environments, and
--- where the session keeps its Nix GC roots. A computation that changes the
--- environments changes this reference, and the REPL commits it only when the
--- line succeeds.
-data Runtime = Runtime
-  { runtimeState :: IORef ShellState
-  , -- | No directory means that nothing is rooted.
-    runtimeRoots :: Maybe FilePath
-  }
-
--- | A runtime with no GC root directory.
-newRuntime :: ShellState -> IO Runtime
-newRuntime = newRuntimeWith Nothing
-
-newRuntimeWith :: Maybe FilePath -> ShellState -> IO Runtime
-newRuntimeWith roots state = (`Runtime` roots) <$> newIORef state
-
--- | The effective environment now.
-runtimeEnviron :: Runtime -> IO Environ
-runtimeEnviron runtime = do
-  base <- Map.fromList <$> getEnvironment
-  effective base <$> readIORef (runtimeState runtime)

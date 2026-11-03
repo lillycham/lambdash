@@ -29,6 +29,7 @@ import Control.Monad (when)
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
 import Lambdash.Nix (resolveDev, resolvePkg)
 import Lambdash.Overlay
+import Lambdash.Runtime
 import Lambdash.Process (Status (..))
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Stream (Stage (..), runStages)

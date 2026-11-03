@@ -32,6 +32,7 @@ import Data.Text.Encoding qualified as Text
 import Data.Text.Encoding.Error qualified as Text
 import GHC.Clock (getMonotonicTimeNSec)
 import Lambdash.Overlay
+import Lambdash.Runtime
 import Lambdash.Process (Status (..))
 import Lambdash.Stream (Stage (..), StreamError (..), runStages)
 import System.Directory

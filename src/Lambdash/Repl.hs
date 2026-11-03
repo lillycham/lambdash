@@ -13,6 +13,9 @@ module Lambdash.Repl
   , renderError
   , Step (..)
   , step
+  , Job
+  , jobNumber
+  , jobLine
   ) where
 
 import Control.Monad (filterM)
@@ -22,13 +25,18 @@ import Data.Char (chr, ord)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.List (intercalate)
-import Control.Exception (catch)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar
+import Control.Exception (SomeException, catch, fromException, throwIO)
+import Control.Exception qualified as Exception
+import Data.Char (isDigit)
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Parser
 import Data.IORef (readIORef)
 import Lambdash.Overlay
+import Lambdash.Runtime
 import Lambdash.Process (Status (..), programExists)
 import Lambdash.Unify
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, satisfy, try)
@@ -43,11 +51,28 @@ data Session = Session
     sessionShell :: ShellState
   , -- | Where Nix GC roots go. Without one, @pkg@ and @dev@ root nothing.
     sessionRoots :: Maybe FilePath
+  , -- | Stopped jobs, oldest first.
+    sessionJobs :: [Job]
+  , -- | Whether @:q@ has already warned about stopped jobs.
+    sessionWarned :: Bool
   }
+
+-- | A line that Ctrl-Z stopped. It is still running, parked on its own
+-- thread, and holds its processes, pipes and workers as they were.
+data Job = Job
+  { jobNumber :: Int
+  , jobLine :: String
+  , jobEvents :: MVar Event
+  , jobResume :: MVar ()
+  , -- | What the line does with its result, given the session at that time.
+    jobFinish :: Session -> Value -> IO Step
+  }
+
+data Event = Finished (Either SomeException Value) | Suspended
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing
+initial = Session typeEnv scope emptyState Nothing [] False
 
 -- | What the prompt should say: the active environments, and any shadowing.
 sessionPrompt :: Session -> String
@@ -70,6 +95,10 @@ data Command
     BindRun Name Expr
   | -- | @expr@.
     Run Expr
+  | -- | @jobs@, when nothing binds it.
+    ListJobs
+  | -- | @fg@, or @fg 2@, when nothing binds it.
+    Foreground (Maybe Int)
   deriving (Eq, Show)
 
 -- | One line.
@@ -93,8 +122,23 @@ optionalName = do
   pure (if null name then Nothing else Just name)
 
 -- | Parse one whole line, or give a readable error.
+--
+-- @jobs@ and @fg@ are commands only when nothing binds them, like an external
+-- command. They act on the shell, so they cannot be ordinary values.
 parseCommand :: Bound -> String -> Either String Command
-parseCommand bound = first errorBundlePretty . runIn bound (sc *> command <* eof)
+parseCommand bound input = case words input of
+  ["jobs"] | free "jobs" -> Right ListJobs
+  ["fg"] | free "fg" -> Right (Foreground Nothing)
+  ["fg", number] | free "fg", Just n <- jobNumberOf number -> Right (Foreground (Just n))
+  _ -> first errorBundlePretty (runIn bound (sc *> command <* eof) input)
+ where
+  free name = case bound of
+    AllBound -> False
+    BoundNames names -> Set.notMember name names
+  jobNumberOf ('%' : digits) = jobNumberOf digits
+  jobNumberOf digits
+    | not (null digits) && all isDigit digits = Just (read digits)
+    | otherwise = Nothing
 
 -- | Show a type. Unknowns get letters in first-seen order, so the numbers from
 -- the checker never reach the user: @a -> a@, @(a -> b) -> a -> b@,
@@ -260,13 +304,47 @@ renderPair message left right = flip evalState Map.empty $ do
 --
 -- Shadowing that the line introduced is reported once here, and stays in the
 -- prompt for as long as it lasts.
-committed :: Runtime -> Session -> String -> IO Step
-committed runtime next text = do
+--
+-- A job resumed with @fg@ started from the environments of its own line. If
+-- they have changed since, its changes are dropped rather than undoing the
+-- later ones.
+committed :: Runtime -> ShellState -> Session -> String -> IO Step
+committed runtime start next text = do
   state <- readIORef (runtimeState runtime)
   let before = shadows (sessionShell next)
       warnings = [renderShadow shadow | shadow <- shadows state, shadow `notElem` before]
-      output = intercalate "\n" (filter (not . null) (warnings <> [text]))
-  pure (Continue next {sessionShell = state} output)
+      output extra = intercalate "\n" (filter (not . null) (extra <> [text]))
+  pure $ if state == start then Continue next (output [])
+    else if sessionShell next /= start
+      then Continue next (output ["warning: the environments changed while this job was stopped, so its changes to them are dropped"])
+      else Continue next {sessionShell = state} (output warnings)
+
+-- | Run a line's computation on its own thread, so that Ctrl-Z can park it.
+-- Then wait for it, as 'awaitJob' does.
+foreground :: Session -> String -> Runtime -> Value -> (Runtime -> Session -> Value -> IO Step) -> IO Step
+foreground session line runtime0 value finish = do
+  events <- newEmptyMVar
+  resume <- newEmptyMVar
+  let runtime = runtime0 {runtimePark = Just (putMVar events Suspended >> takeMVar resume)}
+      number = 1 + maximum (0 : map jobNumber (sessionJobs session))
+  _ <- forkIO (Exception.try (runComp runtime value) >>= putMVar events . Finished)
+  awaitJob session (Job number line events resume (finish runtime))
+
+-- | Wait until a job ends or stops. A stopped job joins the table.
+awaitJob :: Session -> Job -> IO Step
+awaitJob session job = do
+  event <- takeMVar (jobEvents job)
+  case event of
+    Finished (Right value) -> jobFinish job session value
+    Finished (Left err) -> case fromException err of
+      Just (StreamError message) -> pure (Continue session message)
+      Nothing -> throwIO err
+    Suspended ->
+      pure (Continue session {sessionJobs = sessionJobs session <> [job], sessionWarned = False}
+        (describeJob job))
+
+describeJob :: Job -> String
+describeJob job = "[" <> show (jobNumber job) <> "] stopped  " <> jobLine job
 
 renderShadow :: Shadow -> String
 renderShadow (Shadow var earlier later) = "warning: " <> later <> " shadows " <> var <> " from " <> earlier
@@ -315,7 +393,22 @@ stepLine session input =
   case parseCommand (BoundNames (Map.keysSet types)) input of
     Left err -> pure (Continue session err)
     Right Blank -> pure (Continue session "")
-    Right Exit -> pure Quit
+    Right Exit
+      | null (sessionJobs session) || sessionWarned session -> pure Quit
+      | otherwise -> pure (Continue session {sessionWarned = True}
+          "there are stopped jobs: :q again to quit, and they get SIGHUP")
+    Right ListJobs -> pure (Continue session (intercalate "\n" (map describeJob (sessionJobs session))))
+    Right (Foreground wanted) ->
+      let jobs = sessionJobs session
+          chosen = case wanted of
+            Nothing -> reverse jobs
+            Just n -> filter ((== n) . jobNumber) jobs
+      in case chosen of
+        [] -> pure (Continue session (maybe "no stopped jobs" (\n -> "no job " <> show n) wanted))
+        job : _ -> do
+          let rest = session {sessionJobs = filter ((/= jobNumber job) . jobNumber) jobs}
+          putMVar (jobResume job) ()
+          awaitJob rest job
     Right (TypeOf expression) -> checked (inferIn types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> pure (Continue session (describeEnvironments (sessionShell session)))
@@ -324,35 +417,37 @@ stepLine session input =
       pure (Continue session (describeVariable base name (sessionShell session)))
     Right (Run expression) -> checked (inferIn types expression) $ \ty ->
       case snd (unqualify ty) of
-        TComp _ _ -> preflight ty $ \runtime -> do
-          result <- runComp runtime (eval values expression)
-          committed runtime session (showResult result)
+        TComp _ _ -> preflight ty $ \runtime ->
+          foreground session input runtime (eval values expression) $ \done now result ->
+            committed done start now (showResult result)
         TStream _ _ _ _ -> checked (inferRunIn types expression) $ \_ ->
-          preflight ty $ \runtime -> do
-            result <- runComp runtime (eval values expression)
-            committed runtime session (showResult result)
+          preflight ty $ \runtime ->
+            foreground session input runtime (eval values expression) $ \done now result ->
+              committed done start now (showResult result)
         _ -> pure (Continue session (render (eval values expression)))
     Right (Bind name expression) -> checked (inferIn types expression) $ \ty ->
-      pure (bound name ty (eval values expression))
+      pure (bound session name ty (eval values expression))
     Right (BindRun name expression) -> checked (inferIn types expression) $ \actionTy ->
       checked (inferRunIn types expression) $ \ty ->
-        preflight actionTy $ \runtime -> do
-          value <- runComp runtime (eval values expression)
-          case bound name ty value of
-            Continue next text -> committed runtime next text
-            other -> pure other
+        preflight actionTy $ \runtime ->
+          -- A job stopped here binds when fg finishes it, in the session then.
+          foreground session input runtime (eval values expression) $ \done now value ->
+            case bound now name ty value of
+              Continue next text -> committed done start next text
+              other -> pure other
   where
     types = sessionTypes session
     values = sessionValues session
+    start = sessionShell session
     checked result onSuccess = case result of
       Left err -> pure (Continue session (renderError err))
       Right ty -> onSuccess ty
     -- Generalising after a run is sound while no value can be mutable. A
     -- mutable reference would need a value restriction here.
-    bound name ty value =
-      let next = session
-            { sessionTypes = Map.insert name (generalise types ty) types
-            , sessionValues = Map.insert name value values
+    bound now name ty value =
+      let next = now
+            { sessionTypes = Map.insert name (generalise (sessionTypes now) ty) (sessionTypes now)
+            , sessionValues = Map.insert name value (sessionValues now)
             }
       in Continue next (name <> " : " <> renderType ty)
     -- Commands resolve in the effective environment, so an overlay that

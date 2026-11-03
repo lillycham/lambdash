@@ -36,9 +36,12 @@ prompt
 send "sleep 100\r"
 after 500
 send "\032"
+see {\[1\] stopped  sleep 100} "Ctrl-Z stops the program"
+prompt
+send "fg\r"
 after 500
 send "\003"
-see {signal 2} "Ctrl-Z leaves the program running, so Ctrl-C still ends it"
+see {signal 2} "fg resumes it, so Ctrl-C ends it"
 prompt
 
 send "cat\r"

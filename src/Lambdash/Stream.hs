@@ -11,7 +11,8 @@ import Control.Monad (forM, forM_, void, when)
 import Data.ByteString qualified as BS
 import Data.IORef
 import Data.Map.Strict qualified as Map
-import Lambdash.Overlay (Environ, Runtime, runtimeEnviron)
+import Lambdash.Overlay (Environ)
+import Lambdash.Runtime (Runtime (..), runtimeEnviron)
 import Lambdash.Process (Status (..), programExists, spawnStage)
 import System.Exit (ExitCode (..))
 import System.IO
@@ -151,14 +152,22 @@ worker runtime stage (Input receive closeIn) (Output emit closeOut) =
   loop f = receive >>= maybe (pure ()) (\value -> emit (f value) >> loop f)
 worker _ _ _ _ = error "worker: raw endpoint"
 
--- Polling keeps wait cancellable when a worker fails. Every stopped child is
--- continued because there is no job table yet, as for a standalone command.
-waitStages :: IORef [ProcessID] -> ProcessGroupID -> IO (Map.Map ProcessID Status)
-waitStages children group = go Map.empty
+-- Polling keeps wait cancellable when a worker fails.
+--
+-- A job is stopped when every live child has stopped, as after Ctrl-Z. Then
+-- the park action hands the terminal back and blocks until the job should
+-- continue. A child that stopped for reading or writing the terminal before
+-- it owned it is continued at once, as in the spike.
+waitStages :: IO () -> IORef [ProcessID] -> ProcessGroupID -> IO (Map.Map ProcessID Status)
+waitStages park children group = go Map.empty []
  where
-  go statuses = do
+  go statuses stopped = do
     live <- readIORef children
-    if null live then pure statuses else do
+    if null live then pure statuses
+    else if all (`elem` stopped) live then do
+      park
+      go statuses []
+    else do
       status <- mask_ $ do
         next <- getGroupProcessStatus False True group
         case next of
@@ -167,24 +176,39 @@ waitStages children group = go Map.empty
           Nothing -> pure ()
         pure next
       case status of
-        Nothing -> threadDelay 5000 >> go statuses
-        Just (_, Stopped _) -> do
-          quietly (signalProcessGroup sigCONT group)
-          go statuses
+        Nothing -> threadDelay 5000 >> go statuses stopped
+        Just (_, Stopped sig)
+          | sig == sigTTIN || sig == sigTTOU -> do
+              quietly (signalProcessGroup sigCONT group)
+              go statuses stopped
+        Just (pid, Stopped _) -> go statuses (pid : stopped)
         Just (pid, outcome) -> do
           let result = case outcome of
                 Exited ExitSuccess -> ExitedWith 0
                 Exited (ExitFailure n) -> ExitedWith n
                 Terminated sig _ -> KilledBy (fromIntegral sig)
-          go (Map.insert pid result statuses)
+          go (Map.insert pid result statuses) (filter (/= pid) stopped)
 
-withTerminal :: ((Maybe ProcessGroupID -> IO ()) -> IO a) -> IO a
+-- | Give a job the terminal, and take it back on every path. The second
+-- function is for a stopped job: it hands the terminal back to the shell, runs
+-- the wait, then returns the terminal to the job with the job's own modes,
+-- because a stopped editor has its own raw mode.
+withTerminal :: ((Maybe ProcessGroupID -> IO ()) -> (ProcessGroupID -> IO () -> IO ()) -> IO a) -> IO a
 withTerminal action = do
   tty <- queryTerminal stdInput
-  if not tty then action (const (pure ())) else
-    bracket acquire restore $ \_ ->
-      action (\job -> forM_ job (quietly . setTerminalProcessGroupID stdInput))
+  if not tty then action (const (pure ())) (\_ wait -> wait) else
+    bracket acquire restore $ \saved ->
+      action give (suspend saved)
  where
+  give job = forM_ job (quietly . setTerminalProcessGroupID stdInput)
+  suspend :: (ProcessGroupID, TerminalAttributes, System.Posix.Signals.Handler) -> ProcessGroupID -> IO () -> IO ()
+  suspend (group, attrs, _) job wait = do
+    jobAttrs <- getTerminalAttributes stdInput
+    quietly (setTerminalProcessGroupID stdInput group)
+    setTerminalAttributes stdInput attrs Immediately
+    wait
+    setTerminalAttributes stdInput jobAttrs Immediately
+    give (Just job)
   acquire = do
     attrs <- getTerminalAttributes stdInput
     group <- getProcessGroupID
@@ -224,7 +248,7 @@ runStages runtime fromBytes toBytes sink stages@(firstStage : restStages) = do
   firstMissing env (name : rest) = do
     found <- programExists env name
     if found then firstMissing env rest else pure (Just name)
-  execute env = withTerminal $ \giveTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
+  execute env = withTerminal $ \giveTerminal suspendTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
     edges <- sequence [edge resources fromBytes toBytes l r | (l, r) <- zip stages (drop 1 stages)]
     let lastStage = foldl (\_ next -> next) firstStage restStages
         start = if isExternal firstStage
@@ -250,7 +274,13 @@ runStages runtime fromBytes toBytes sink stages@(firstStage : restStages) = do
     giveTerminal group
     forM_ group (quietly . signalProcessGroup sigCONT)
     let workers = [worker runtime stage input output | (stage, input, output) <- nodes, not (isExternal stage)]
-        wait = maybe (pure Map.empty) (waitStages children) group
+        -- Without a way to resume it later, a stopped job continues at once.
+        park job = case runtimePark runtime of
+          Nothing -> quietly (signalProcessGroup sigCONT job)
+          Just resume -> do
+            suspendTerminal job resume
+            quietly (signalProcessGroup sigCONT job)
+        wait = maybe (pure Map.empty) (\job -> waitStages (park job) children job) group
     (statuses, _) <- concurrently wait (mapConcurrently_ id workers)
     pure $ case reverse pids of
       pid : _ -> Map.findWithDefault (ExitedWith 127) pid statuses

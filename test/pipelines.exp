@@ -33,9 +33,12 @@ prompt
 send "sleep 100 | (x -> x) | cat\r"
 after 500
 send "\032"
+see {\[1\] stopped  sleep 100 \| \(x -> x\) \| cat} "Ctrl-Z stops the whole pipeline"
+prompt
+send "fg\r"
 after 500
 send "\003"
-see {signal 2} "Ctrl-Z resumes the whole group, including across pure stages"
+see {signal 2} "fg resumes the whole group, including across pure stages"
 prompt
 
 send "cat | (x -> x) | cat\r"

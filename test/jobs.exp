@@ -1,0 +1,113 @@
+#!/usr/bin/env expect
+# Usage: expect test/jobs.exp path/to/lambdash
+# Ctrl-Z stops a job, which then waits in the table, parked with its pipes and
+# workers, until fg.
+set timeout 5
+set stty_init "sane"
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {λ> $} "prompt" }
+
+spawn [lindex $argv 0]
+prompt
+
+send "fg\r"
+see {no stopped jobs} "fg with no jobs"
+prompt
+
+# A stopped reader gives the terminal back, and gets it back with fg.
+send "cat\r"
+after 300
+send "\032"
+see {\[1\] stopped  cat} "Ctrl-Z stops a terminal reader"
+prompt
+send "print 7\r"
+see {7\r\n} "the shell works while a job is stopped"
+prompt
+send "jobs\r"
+see {\[1\] stopped  cat} "jobs lists it"
+prompt
+send "fg\r"
+after 300
+send "after fg\r"
+see {after fg\r\nafter fg} "fg gives the terminal back to the job"
+send "\004"
+prompt
+send "jobs\r"
+see {λ> $} "a finished job leaves the table"
+
+# A stopped <- binds when fg finishes it.
+send "s <- sh -c \"read x; exit 3\"\r"
+after 300
+send "\032"
+see {\[1\] stopped} "Ctrl-Z stops a binding"
+prompt
+send "s\r"
+see {command not found: s} "nothing is bound yet"
+prompt
+send "fg 1\r"
+after 300
+send "go\r"
+see {s : Status} "fg finishes the binding"
+prompt
+send "s\r"
+see {exit 3} "with the job's result"
+prompt
+
+# Two jobs, resumed by number.
+send "sleep 100\r"
+after 300
+send "\032"
+see {\[1\] stopped  sleep 100} "first job"
+prompt
+send "sleep 200\r"
+after 300
+send "\032"
+see {\[2\] stopped  sleep 200} "second job"
+prompt
+send "fg %1\r"
+after 300
+send "\003"
+see {signal 2} "fg %1 resumes the first"
+prompt
+send "jobs\r"
+see {\[2\] stopped  sleep 200\r\n} "the second remains"
+prompt
+
+# :q warns once about stopped jobs.
+send ":q\r"
+see {there are stopped jobs} ":q warns"
+prompt
+
+# A stopped job's changes to the environments are dropped if they changed.
+send "andThen (sh -c \"read x\" | collect) (r -> use (overlay \"late\" \[\]))\r"
+after 300
+send "\032"
+see {\[3\] stopped} "a job that will change the environments"
+prompt
+send "use (overlay \"early\" \[\])\r"
+see {λ \[early\]> $} "the environments change meanwhile"
+send "fg 3\r"
+after 300
+send "go\r"
+see {the environments changed while this job was stopped} "the stale change is dropped"
+see {λ \[early\]> $} "and the later one kept"
+
+send "andThen (sh -c \"read x\" | collect) (r -> use (overlay \"late\" \[\]))\r"
+after 300
+send "\032"
+see {\[3\] stopped} "again, without a change meanwhile"
+send "fg\r"
+after 300
+send "go\r"
+see {λ \[early late\]> $} "the job's change is kept"
+
+send ":q\r"
+expect eof
+puts "\nALL PASSED"
