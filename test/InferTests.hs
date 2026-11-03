@@ -55,8 +55,10 @@ app = foldl EApp
 v :: Name -> Expr
 v = EVar
 
+-- | An Int. A bare literal is any Num type, and these tests are about
+-- inference, not about numbers, so they pin it down.
 int :: Int -> Expr
-int = ELit . LInt
+int = EApp (EVar "toInt") . ELit . LInt
 
 true :: Expr
 true = ELit (LBool True)
@@ -77,6 +79,7 @@ prelude =
   Map.fromList
     [ ("not", mono (TBool ~> TBool))
     , ("add", mono (TInt ~> TInt ~> TInt))
+    , ("toInt", mono (TInt ~> TInt))
     ]
 
 -- | Infer with the prelude in scope, and compare up to renaming.
@@ -113,6 +116,7 @@ tests =
         Right (TFun a b, TFun c d) -> a == b && c == d && a /= c && a /= t0 && c /= t0
         _ -> False)
   , ("lit: int", typed (int 1) TInt)
+  , ("lit: a bare literal is any Num type", fmap normalise (inferIn prelude (ELit (LInt 1))) == Right (TClass [IsIn "Num" t0] t0))
   , ("lit: bool", typed (ELit (LBool True)) TBool)
   , ("var: from the environment", typed (v "not") (TBool ~> TBool))
   , ("var: unbound", inferType (v "x") == Left (Unbound "x"))
@@ -155,7 +159,9 @@ tests =
   , ("commands: under a lambda", commands (lam ["x"] (ECmd "ls" [])) == ["ls"])
   , ("commands: in every part", commands (ERecord [("a", ECmd "a" []), ("b", EApp (ECmd "b" []) (ELet "x" (ECmd "c" []) (ECmd "d" [])))]) == ["a", "b", "c", "d"])
   , ("inferRunIn: gives the result type", inferRunIn (Map.fromList [("c", mono ((TComp noEffects) TInt))]) (v "c") == Right TInt)
-  , ("inferRunIn: refuses a non-computation", inferRunIn prelude (int 1) == Left (Unify (Mismatch TInt ((TComp noEffects) (TVar (Var 0))))))
+  , ("inferRunIn: refuses a non-computation", case inferRunIn prelude (int 1) of
+      Left (Unify (Mismatch TInt (TComp _ (TVar _)))) -> True
+      _ -> False)
   , ("inferRunIn: refuses a function", case inferRunIn prelude (v "not") of
         Left (Unify (Mismatch _ _)) -> True
         _ -> False)

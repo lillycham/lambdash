@@ -16,6 +16,8 @@ module Lambdash.Classes
   , superField
   , recordFields
   , extendFields
+  , fromIntName
+  , defaultCandidates
   ) where
 
 import Data.List (find, nub)
@@ -40,6 +42,9 @@ classes :: [ClassInfo]
 classes =
   [ ClassInfo "Eq" []
   , ClassInfo "Ord" ["Eq"]
+  , ClassInfo "Num" []
+  , ClassInfo "Integral" ["Num"]
+  , ClassInfo "Semigroup" []
   ]
 
 instances :: [Instance]
@@ -50,6 +55,9 @@ instances =
     <> [Instance "Eq" "Record" []]
     <> [Instance "Ord" ty [] | ty <- ["Int", "Bool", "String", "()"]]
     <> [Instance "Ord" "List" [["Ord"]]]
+    <> [Instance "Num" "Int" [], Instance "Integral" "Int" []]
+    <> [Instance "Semigroup" ty [] | ty <- ["String", "Bytes", "Overlay"]]
+    <> [Instance "Semigroup" "List" [[]]]
 
 -- | The constructor of a type, for instance lookup, and its arguments.
 tyKey :: Ty -> Maybe (String, [Ty])
@@ -78,6 +86,17 @@ superField cls = '%' : cls
 -- knows.
 recordFields :: String
 recordFields = "%fields"
+
+-- | What an integer literal elaborates through: @1@ is @fromInt d 1@, with
+-- @d@ the dictionary for @Num a@.
+fromIntName :: String
+fromIntName = "%fromInt"
+
+-- | What an ambiguous unknown can default to, in order: the first type that
+-- every class on it has an instance for. @eq [] []@ takes @()@; @eq 1 1@
+-- takes @Int@, because @()@ is not @Num@.
+defaultCandidates :: [Ty]
+defaultCandidates = [TUnit, TInt]
 
 -- | The builtin that extends a record of field dictionaries with more.
 extendFields :: String

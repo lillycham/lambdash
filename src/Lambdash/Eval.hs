@@ -30,7 +30,7 @@ import Control.Exception (IOException, SomeException, bracket, displayException,
 import Control.Monad (forM_, void)
 import System.Posix.Signals (Handler (..), installHandler, sigINT)
 import Data.List (sort, sortBy)
-import Lambdash.Classes (extendFields, instanceName, recordFields, superField)
+import Lambdash.Classes (extendFields, fromIntName, instanceName, recordFields, superField)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
@@ -482,6 +482,30 @@ methods =
   , method "ge" "Ord" (\a -> TFun a (TFun a TBool))
   , method "min" "Ord" (\a -> TFun a (TFun a a))
   , method "max" "Ord" (\a -> TFun a (TFun a a))
+  -- Operators are ordinary names: a == b desugars to (==) a b.
+  , alias "==" "Eq" "eq" (\a -> TFun a (TFun a TBool))
+  , alias "!=" "Eq" "ne" (\a -> TFun a (TFun a TBool))
+  , alias "<" "Ord" "lt" (\a -> TFun a (TFun a TBool))
+  , alias "<=" "Ord" "le" (\a -> TFun a (TFun a TBool))
+  , alias ">" "Ord" "gt" (\a -> TFun a (TFun a TBool))
+  , alias ">=" "Ord" "ge" (\a -> TFun a (TFun a TBool))
+  , method "+" "Num" (\a -> TFun a (TFun a a))
+  , method "-" "Num" (\a -> TFun a (TFun a a))
+  , method "*" "Num" (\a -> TFun a (TFun a a))
+  , method "negate" "Num" (\a -> TFun a a)
+  , method "/" "Integral" (\a -> TFun a (TFun a a))
+  , method "%" "Integral" (\a -> TFun a (TFun a a))
+  , alias "div" "Integral" "/" (\a -> TFun a (TFun a a))
+  , alias "mod" "Integral" "%" (\a -> TFun a (TFun a a))
+  , method "<>" "Semigroup" (\a -> TFun a (TFun a a))
+  , (fromIntName, Forall [Var 0] (TClass [IsIn "Num" (TVar (Var 0))] (TFun TInt (TVar (Var 0)))), VBuiltin fromIntName (select "fromInt"))
+  -- Lazy in the second argument, as the evaluator is.
+  , ("&&", mono (TFun TBool (TFun TBool TBool)), fn2 "&&" (\a b -> if truth a then b else VBool False))
+  , ("||", mono (TFun TBool (TFun TBool TBool)), fn2 "||" (\a b -> if truth a then VBool True else b))
+  , ( ">>>", Forall [Var 0, Var 1, Var 2] (TFun (TFun (TVar (Var 0)) (TVar (Var 1))) (TFun (TFun (TVar (Var 1)) (TVar (Var 2))) (TFun (TVar (Var 0)) (TVar (Var 2)))))
+    , fn2 ">>>" (\f g -> VBuiltin ">>>" (applyValue g . applyValue f)) )
+  , ( "<<<", Forall [Var 0, Var 1, Var 2] (TFun (TFun (TVar (Var 1)) (TVar (Var 2))) (TFun (TFun (TVar (Var 0)) (TVar (Var 1))) (TFun (TVar (Var 0)) (TVar (Var 2)))))
+    , fn2 "<<<" (\g f -> VBuiltin "<<<" (applyValue g . applyValue f)) )
   , ( "sort"
     , Forall [Var 0] (TClass [IsIn "Ord" (TVar (Var 0))] (TFun (TList (TVar (Var 0))) (TList (TVar (Var 0)))))
     , VBuiltin "sort" (\d -> VBuiltin "sort" (\xs -> VList (sortWith d id (items xs)))) )
@@ -491,8 +515,9 @@ methods =
     , VBuiltin "sortOn" (\d -> VBuiltin "sortOn" (\key -> VBuiltin "sortOn" (\xs -> VList (sortWith d (applyValue key) (items xs))))) )
   ]
  where
-  method name cls shape =
-    (name, Forall [Var 0] (TClass [IsIn cls (TVar (Var 0))] (shape (TVar (Var 0)))), VBuiltin name (select name))
+  method name cls shape = alias name cls name shape
+  alias name cls field shape =
+    (name, Forall [Var 0] (TClass [IsIn cls (TVar (Var 0))] (shape (TVar (Var 0)))), VBuiltin name (select field))
   items (VList xs) = xs
   items _ = error "sort: the checker passed a non-list"
   -- A stable sort by the dictionary's lt.
@@ -507,11 +532,34 @@ dictionaries :: [(Name, Value)]
 dictionaries =
   [(instanceName "Eq" key, eqDictionary structuralEq) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [(instanceName "Ord" key, ordDictionary (eqDictionary structuralEq) structuralLt) | key <- ["Int", "Bool", "String", "()"]]
-    <> [ (instanceName "Eq" "List", VBuiltin "Eq List" listEq)
+    <> [ (instanceName "Num" "Int", numInt)
+       , (instanceName "Integral" "Int", VRecord
+           [ (superField "Num", numInt)
+           , ("/", intOp "/" div)
+           , ("%", intOp "%" mod) ])
+       , (instanceName "Semigroup" "String", semigroup (\a b -> case (a, b) of (VStr x, VStr y) -> VStr (x <> y); _ -> error "<>: String"))
+       , (instanceName "Semigroup" "Bytes", semigroup (\a b -> case (a, b) of (VBytes x, VBytes y) -> VBytes (x <> y); _ -> error "<>: Bytes"))
+       , (instanceName "Semigroup" "List", semigroup (\a b -> case (a, b) of (VList x, VList y) -> VList (x <> y); _ -> error "<>: List"))
+       -- One overlay, whose later patches win, as use would apply them.
+       , (instanceName "Semigroup" "Overlay", semigroup (\a b -> case (a, b) of
+           (VOverlay (Overlay x px), VOverlay (Overlay y py)) -> VOverlay (Overlay (x <> "+" <> y) (px <> py))
+           _ -> error "<>: Overlay"))
+       , (instanceName "Eq" "List", VBuiltin "Eq List" listEq)
        , (instanceName "Ord" "List", VBuiltin "Ord List" listOrd)
        , (instanceName "Eq" "Record", VBuiltin "Eq Record" recordEq)
        , (extendFields, fn2 extendFields extend) ]
  where
+  numInt = VRecord
+    [ ("+", intOp "+" (+))
+    , ("-", intOp "-" (-))
+    , ("*", intOp "*" (*))
+    , ("negate", VBuiltin "negate" (\v -> case v of VInt n -> VInt (negate n); _ -> error "negate: Int"))
+    , ("fromInt", VBuiltin "fromInt" id)
+    ]
+  intOp name op = fn2 name (\a b -> case (a, b) of
+    (VInt x, VInt y) -> VInt (op x y)
+    _ -> error (name <> ": the checker passed a non-Int"))
+  semigroup combine = VRecord [("<>", fn2 "<>" combine)]
   listEq d = eqDictionary (listEquals d)
   -- A record's dictionary keeps its field dictionaries, so that a function
   -- over an open row can extend them with the fields it knows.

@@ -35,7 +35,7 @@ module Lambdash.Infer
   , elaborateRunIn
   ) where
 
-import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put)
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put, runStateT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad (foldM)
 import Data.Map.Strict (Map)
@@ -239,7 +239,11 @@ infer env (EVar name) =
            , bare
            , foldl EApp (EVar name) (map EVar evidence) )
 
-infer _ e@(ELit (LInt _))  = pure (emptySubst, TInt, e)
+-- A numeric literal is any Num type: 1 is fromInt d 1.
+infer _ e@(ELit (LInt _)) = do
+  a <- fresh
+  evidence <- freshEvidence
+  pure (emptySubst {classPreds = [(evidence, IsIn "Num" a)]}, a, EApp (EApp (EVar fromIntName) (EVar evidence)) e)
 infer _ e@(ELit (LBool _)) = pure (emptySubst, TBool, e)
 infer _ e@(ELit LUnit)     = pure (emptySubst, TUnit, e)
 infer _ e@(ELit (LStr _))  = pure (emptySubst, TString, e)
@@ -276,8 +280,11 @@ infer env (EPipe left right) = do
   (s2, rightTy, right'') <- infer (applyEnv s1 env) right
   -- An unknown producer is a stream. Deferring this choice to evaluation
   -- would let a polymorphic function change meaning after instantiation.
+  -- An unknown that a class constrains is a value, as 1 in 1 | add 2 is:
+  -- no stream is an instance of a class.
+  let constrainedVars = Set.unions [predVars (applyPred (s2 `compose` s1) p) | (_, p) <- classPreds (s2 `compose` s1)]
   shape <- case apply s2 leftTy of
-    TVar _ -> do
+    TVar v | Set.notMember v constrainedVars -> do
       input <- fresh
       output <- fresh
       result <- fresh
@@ -467,12 +474,19 @@ generaliseBinding env s1 t1 e1 = do
   let Forall bound qualified = generalise env (qualify (effectConstraints s1) (apply s1 t1))
       preds = [(n, applyPred s1 p) | (n, p) <- classPreds s1]
   (bindings, residual) <- simplify preds
-  let generalised = Set.fromList bound
-      ownedBy (_, p) = let vs = predVars p in not (Set.null vs) && vs `Set.isSubsetOf` generalised
+  let -- The monomorphism restriction: a binding with no parameters does not
+      -- generalise over its class predicates. Their unknowns stay unknowns,
+      -- for the rest of the program to choose or for defaulting: so
+      -- let n = 1 in add n 2 is fine, and n is one value, not one per use.
+      restricted = not (isLambda e1)
+      constrained = Set.unions (map (predVars . snd) residual)
+      bound' = if restricted then filter (`Set.notMember` constrained) bound else bound
+      generalised = Set.fromList bound'
+      ownedBy (_, p) = not restricted && let vs = predVars p in not (Set.null vs) && vs `Set.isSubsetOf` generalised
       mine = filter ownedBy residual
       deferred = filter (not . ownedBy) residual
       (context, reduced) = reduceContext mine
-      scheme = Forall bound (if null context then qualified else TClass (map snd context) qualified)
+      scheme = Forall bound' (if null context then qualified else TClass (map snd context) qualified)
   -- Reduced evidence comes first: an instance's dictionary can refer to it.
   pure (scheme, foldr ELam (wrapLets (reduced <> bindings) e1) (map fst context), deferred)
 
@@ -535,6 +549,13 @@ reduceContext preds = go [] [] preds
         next : _ -> superPath next to (ESelect dictionary (superField next))
         [] -> dictionary
 
+-- | Whether an expression is a function as written: the monomorphism
+-- restriction applies to the others.
+isLambda :: Expr -> Bool
+isLambda (ELoc _ e) = isLambda e
+isLambda (ELam _ _) = True
+isLambda _ = False
+
 -- | A row's fields, in order, and its tail.
 flatten :: Row -> ([(Label, Ty)], Row)
 flatten (RExtend label ty rest) = let (fields, tailRow) = flatten rest in ((label, ty) : fields, tailRow)
@@ -557,33 +578,52 @@ data Mode
 -- predicate mentions and the type does not is ambiguous, and defaults to
 -- @()@, as GHCi's extended defaulting does: @eq [] []@ is @true@.
 resolveClasses :: Mode -> Subst -> Ty -> Expr -> Infer (Ty, Expr)
-resolveClasses mode solved ty code = do
+resolveClasses requested solved ty code = do
+  -- x = e without parameters is restricted: it defaults instead.
+  let mode = if requested == Generalising && not (isLambda code) then Defaulting else requested
   let preds = [(n, applyPred solved p) | (n, p) <- classPreds solved]
   (bindings, residual) <- simplify preds
   let inType = ftv ty
       keeps (_, p) = mode /= Defaulting && predVars p `Set.isSubsetOf` inType
       (context, reduced) = reduceContext (filter keeps residual)
       ambiguous = filter (not . keeps) residual
-  defaulted <- defaultPreds ambiguous
+  (defaulted, chosen) <- defaultPreds ambiguous
   -- Defaulted and reduced evidence comes first: an instance's dictionary,
-  -- such as Eq [a]'s, can refer to the evidence for its argument.
+  -- such as Eq [a]'s, can refer to the evidence for its argument. What
+  -- defaulting chose is part of the type: x = 1 is x : Int.
   let lets = wrapLets (defaulted <> reduced <> bindings) code
-      shown = if null context then ty else TClass (map snd context) ty
+      ty' = apply chosen ty
+      shown = if null context then ty' else TClass (map snd context) ty'
   pure (shown, foldr ELam lets (map fst context))
 
--- | Default each unknown to @()@, and each unknown row to the empty row,
--- and resolve again.
-defaultPreds :: [(Name, Pred)] -> Infer [(Name, Expr)]
+-- | Default each unknown to the first candidate that every class on it
+-- accepts, and each unknown row to the empty row, and resolve again.
+defaultPreds :: [(Name, Pred)] -> Infer ([(Name, Expr)], Subst)
 defaultPreds preds = do
-  let toUnit (IsIn cls ty) =
-        let vs = Set.toList (ftv ty)
-            fill = Subst (Map.fromList [(v, TUnit) | v <- vs]) (Map.fromList [(v, REmpty) | v <- vs]) Map.empty [] []
-        in IsIn cls (apply fill ty)
-      defaulted = [(n, toUnit p) | (n, p) <- preds]
-  (bindings, residual) <- simplify defaulted
+  let vars = Set.toList (Set.unions [predVars p | (_, p) <- preds])
+      classesOn v = [cls | (_, IsIn cls (TVar v')) <- preds, v' == v]
+      accepts t cls = case tyKey t of
+        Just (key, _) -> maybe False (const True) (lookupInstance cls key)
+        Nothing -> False
+      choose v = case [t | t <- defaultCandidates, all (accepts t) (classesOn v)] of
+        t : _ -> t
+        [] -> TUnit
+      fill = Subst (Map.fromList [(v, choose v) | v <- vars]) (Map.fromList [(v, REmpty) | v <- vars]) Map.empty [] []
+      defaulted = [(n, applyPred fill p) | (n, p) <- preds]
+  (bindings, residual) <- simplify defaulted `orElse` preds
   case residual of
-    [] -> pure bindings
+    [] -> pure (bindings, fill)
     (_, p) : _ -> lift (Left (Ambiguous p))
+ where
+  -- A candidate that fails gives an ambiguity, not a missing instance.
+  orElse action original = do
+    state <- get
+    case runStateT action state of
+      Left (NoInstance _) -> case original of
+        (_, p) : _ -> lift (Left (Ambiguous p))
+        [] -> pure ([], [])
+      Left err -> lift (Left err)
+      Right (result, next) -> put next >> pure result
 
 -- | The external commands that an expression names, also under lambdas.
 commands :: Expr -> [Name]
@@ -654,8 +694,11 @@ elaborateRunIn env expr = evalStateT go (nextUnknown env)
         pure (s `compose` s1, result)
     (solved, actionTy) <- finish env s2 t
     (_, result) <- finish env s2 resultTy
-    (_, code') <- resolveClasses Defaulting solved actionTy code
-    pure (actionTy, result, code')
+    -- Defaulting chooses for the action and its result alike.
+    (both, code') <- resolveClasses Defaulting solved (TFun actionTy result) code
+    pure $ case both of
+      TFun actionTy' result' -> (actionTy', result', code')
+      _ -> (actionTy, result, code')
 
 -- Include bound names too: a fresh substitution range must not capture a
 -- quantified variable when that substitution reaches another scheme.

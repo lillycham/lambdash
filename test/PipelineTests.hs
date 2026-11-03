@@ -112,7 +112,7 @@ tests =
   , ("lists: empty bindings remain polymorphic", gives ["xs = []", "each xs | filter isEmpty | collect", "each xs | add 1 | collect"] ""
       ["xs : [a]", "{items = [], status = (), statuses = []}", "{items = [], status = (), statuses = []}"])
   , ("lists: heterogeneous items fail", do
-      (_, results) <- capture (linesIO ["[1, true]"])
+      (_, results) <- capture (linesIO ["[\"a\", true]"])
       pure (any (isInfixOf "type mismatch") results))
   , ("lists: actions stay latent", gives ["[print 1, print 2]", "each [print 1] | collect"] ""
       ["[<computation>, <computation>]", "{items = [<computation>], status = (), statuses = []}"])
@@ -172,7 +172,7 @@ tests =
       pure (BS.null output && any (isInfixOf "type mismatch") results))
   , ("types: list item constraints propagate", pure $ typed "x -> [x, add x 1]" "Int -> [Int]")
   , ("types: filters remain generic", pure $ typed "filter" "(a -> Bool) -> Stage a a")
-  , ("types: collector item types follow maps", pure $ typed "each [{size = 1}] | .size | collect" "Comp {items : [Int], status : (), statuses : [Status]}")
+  , ("types: collector item types follow maps", pure $ typed "each [{size = 1}] | .size | collect" "Num a => Comp {items : [a], status : (), statuses : [Status]}")
   , ("types: adapters require an explicit source", do
       (output, results) <- capture (linesIO ["filter (contains \"a\") | encodeLine | cat"])
       pure (BS.null output && any (isInfixOf "type mismatch") results))
@@ -215,7 +215,7 @@ tests =
       [boundType, "r : {f : Stream Bytes Bytes a -> Stream Bytes Bytes Status, n : Int}", "effect mismatch: {exec cat, exec printf} and {exec cat}", "1"])
   , ("constraints: unused locals still constrain enclosing inputs", gives
       ["local = s -> let unused = ((" <> bounded <> ") s) in pure 1", "local (printf side-effect)"] ""
-      ["local : Stream Bytes Bytes a -> Comp Int", "effect mismatch: {exec cat, exec printf} and {exec cat}"])
+      ["local : Num a => Stream Bytes Bytes b -> Comp a", "effect mismatch: {exec cat, exec printf} and {exec cat}"])
   , ("constraints: type query shows the deferred equality", gives
       [":t " <> bounded] ""
       ["({exec cat | a} = {exec cat}) => Stream { | a} Bytes Bytes b -> Stream {exec cat | a} Bytes Bytes Status"])
@@ -252,7 +252,7 @@ tests =
   , ("pipe: structured computation maps", gives ["pure {size = 3} | .size | add 2"] "" ["5"])
   , ("pipe: a pure identity preserves bytes", gives ["printf abc | (x -> x) | cat"] "abc" [""])
   , ("pipe: pure stages change item types", gives ["printf abc | byteLength | add 2"] "5\n" [""])
-  , ("pipe: a generic stage keeps its inferred meaning", gives ["f = s -> s | (x -> 1)", "f (printf abc)"] "1\n" ["f : Stream a b c -> Stream a Int c", ""])
+  , ("pipe: a generic stage keeps its inferred meaning", gives ["f = s -> s | (x -> 1)", "f (printf abc)"] "1\n" ["f : Num a => Stream b c d -> Stream b a d", ""])
   , ("pipe: named stages stay reusable", gives ["source = printf hi", "copy = x -> x", "p = source | copy | cat", "p", "p"] "hihi"
       ["source : Stream Bytes Bytes Status", "copy : a -> a", "p : Stream Bytes Bytes Status", "", ""])
   , ("pipe: a type query runs nothing", gives [":t printf abc | byteLength"] "" ["Stream {exec printf} Bytes Int Status"])

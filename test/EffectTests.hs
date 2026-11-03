@@ -148,14 +148,14 @@ tests =
   , ("inference: pipeline unions requirements", typed "echo hello | cat" "Stream {exec cat, exec echo} Bytes Bytes Status")
   , ("inference: duplicate requirements collapse", typed "cat | cat" "Stream {exec cat} Bytes Bytes Status")
   , ("inference: print has a console effect", typed "print 1" "Comp {console} ()")
-  , ("inference: pure has no immediate effects", typed "pure 1" "Comp Int")
+  , ("inference: pure has no immediate effects", typed "pure 1" "Num a => Comp a")
   , ("inference: latent commands stay in the result", typed "pure (echo hi)" "Comp (Stream {exec echo} Bytes Bytes Status)")
   , ("inference: higher-order application preserves effects", typed "(f x -> f x) (x -> echo $x) \"hi\"" "Stream {exec echo} Bytes Bytes Status")
   , ("inference: generic rows propagate", typed "s -> s | cat" "Stream { | a} b Bytes c -> Stream {exec cat | a} b Bytes Status")
   , ("inference: independent higher-order inputs compose", case inferSource "a b -> (a | cat) | (b | cat)" of
         Right (TFun _ (TFun _ (TStream (EffRow labels tails) _ _ _))) -> labels == Set.singleton (Exec "cat") && Set.size tails == 2
         _ -> False)
-  , ("inference: polymorphic comp instances stay separate", typed "let id = (x -> x) in {a = id (print 1), b = id (pure 1)}" "{a : Comp {console} (), b : Comp Int}")
+  , ("inference: polymorphic comp instances stay separate", typed "let id = (x -> x) in {a = id (print true), b = id (pure \"s\")}" "{a : Comp {console} (), b : Comp String}")
   , ("inference: pure mapping keeps action effects", typed "print 1 | (x -> encodeUtf8 \"a\") | cat" "Stream {exec cat, console} Bytes Bytes Status")
   , ("inference: a mapped returned action stays latent", typed "printf hi | (x -> print x)" "Stream {exec printf} Bytes (Comp {console} ()) Status")
   , ("preflight: only outer action effects", actionEffects (TComp noEffects (TStream echo TBytes TBytes TStatus)) == noEffects)
