@@ -16,10 +16,29 @@ e : Overlay
 λ [nixpkgs#ffmpeg .#]>
 ```
 
+## Bare references
+
+A word with a `#` in expression position is a flake reference, and means
+its string: `nixpkgs#ffmpeg`, `.#`, `.#bench`, `./path#dev`,
+`github:owner/repo#x`. A path needs the `#`: write `./path#` for its default
+output. In external argument position a word stays a word, so
+`nix build nixpkgs#jq` is unchanged. In head position a word is a command.
+
+```text
+λ> use nixpkgs#ffmpeg           -- andThen (pkg "nixpkgs#ffmpeg") use
+λ [nixpkgs#ffmpeg]> unuse nixpkgs#ffmpeg
+λ> with nixpkgs#ffmpeg do ffmpeg -i a.mov a.mp4 end
+λ> d <- dev .#bench
+```
+
+A bare reference after `use` or `with` means `pkg`, as in the plan. To use a
+devshell, resolve it with `dev` first. The sugar names the builtins `use`,
+`pkg` and `andThen`, so it follows a rebinding of any of them.
+
 The two differ because `nix shell` and `nix develop` differ. `pkg ".#"` is
 `packages.default`. `dev ".#"` is `devShells.default`, and falls back to the
-environment for building `packages.default`. Flake references are strings for
-now. The overlay's name is the reference.
+environment for building `packages.default`. The overlay's name is the
+reference, so `unuse` takes the same reference.
 
 Nix runs as an ordinary foreground job, so its progress reaches the terminal
 and Ctrl-C stops a build. A failed build reports its status and binds nothing.
@@ -110,7 +129,6 @@ Run it from the repository root. The first run builds the fixture.
 
 ## Not yet
 
-- Bare flake references (`use nixpkgs#ffmpeg`).
 - `use --local`, `with` and trust: Prototype 5.
 - Invalidation when `flake.lock` changes.
 - A devshell is resolved in one directory, and `NIX_LDFLAGS` names

@@ -48,6 +48,8 @@ data Lit
   | LBool Bool
   | LUnit
   | LStr String
+  | -- | A bare flake reference, such as @nixpkgs#ffmpeg@. It is a String.
+    LRef String
   deriving (Eq, Show)
 
 -- | One argument of an external command.
@@ -241,6 +243,7 @@ infer _ (ELit (LInt _))  = pure (emptySubst, TInt)
 infer _ (ELit (LBool _)) = pure (emptySubst, TBool)
 infer _ (ELit LUnit)     = pure (emptySubst, TUnit)
 infer _ (ELit (LStr _))  = pure (emptySubst, TString)
+infer _ (ELit (LRef _))  = pure (emptySubst, TString)
 
 -- For now, an argument must be a String. The checker has nothing to convert with.
 infer env (ECmd command args) = do

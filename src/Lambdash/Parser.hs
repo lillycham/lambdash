@@ -11,6 +11,9 @@
 -- > source | stage | stage      pipeline, below application precedence
 -- > do x <- e; f x end           a block of statements, run in order
 -- > with o do e end              a block with one more environment layer
+-- > nixpkgs#ffmpeg  .#dev        a flake reference: a String
+-- > use nixpkgs#ffmpeg           means andThen (pkg "nixpkgs#ffmpeg") use
+-- > with .#bench do e end        means andThen (pkg ".#bench") (o -> with o do e end)
 -- > -- to the end of the line   comment
 module Lambdash.Parser
   ( Parser,
@@ -24,6 +27,7 @@ module Lambdash.Parser
     keyword,
     identifier,
     literal,
+    flakeRef,
     record,
     accessor,
     atom,
@@ -40,7 +44,7 @@ where
 import Control.Monad (when)
 import Control.Monad.Reader (Reader, asks, local, runReader)
 import Data.Bifunctor (first)
-import Data.Char (isSpace)
+import Data.Char (isAlphaNum, isSpace)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Void (Void)
@@ -154,11 +158,22 @@ accessor = do
   let body = foldl ESelect (EVar "r") labels
   pure (ELam "r" body)
 
+-- | A bare flake reference: a word with a @#@, such as @nixpkgs#ffmpeg@, @.#@,
+-- @./path#dev@ or @github:owner/repo#x@. Nothing else in an expression uses
+-- @#@, so a word with one is a reference.
+flakeRef :: Parser String
+flakeRef = try $ do
+  word <- some (satisfy refChar)
+  if '#' `elem` word then pure word else fail "not a flake reference"
+ where
+  refChar c = isAlphaNum c || c `elem` ("._-/:~+@?=&#%" :: String)
+
 -- | One thing that needs no parentheses. It does not skip trailing space.
 atom :: Parser Expr
 atom =
   doBlock
     <|> withBlock
+    <|> (ELit . LRef <$> flakeRef)
     <|> (ELit <$> literal)
     <|> record
     <|> (EList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
@@ -229,7 +244,15 @@ application :: Parser Expr
 application = external <|> do
   fun <- postfix
   args <- many postfix
-  pure (foldl EApp fun args)
+  pure (useRef (foldl EApp fun args))
+ where
+  -- A bare reference means pkg, as in the plan. This names the builtins, so it
+  -- follows a rebinding of use, pkg or andThen.
+  useRef (EApp (EVar "use") (ELit (LRef ref))) = andThenPkg ref (EVar "use")
+  useRef e = e
+
+andThenPkg :: String -> Expr -> Expr
+andThenPkg ref next = EApp (EApp (EVar "andThen") (EApp (EVar "pkg") (ELit (LStr ref)))) next
 
 -- | @x y -> body@ means @\\x -> \\y -> body@. The body goes as far right as it
 -- can.
@@ -284,10 +307,16 @@ doBlock = do
 
 -- | @with overlay do ... end@.
 withBlock :: Parser Expr
+--
+-- A bare reference resolves with pkg first. The name that holds the overlay
+-- has a space, so nothing written can capture it.
 withBlock = do
   lexeme (keyword "with")
   overlay <- postfix
-  EWith overlay <$> doBlock
+  body <- doBlock
+  pure $ case overlay of
+    ELit (LRef ref) -> andThenPkg ref (ELam " overlay" (EWith (EVar " overlay") body))
+    _ -> EWith overlay body
 
 -- | Any expression.
 expr :: Parser Expr

@@ -104,6 +104,6 @@ CC = "gcc"
 
 - Overlays from Nix are in `nix.md`.
 - `with` is in `blocks.md`. `use --local` and trust: Prototype 5.
-- `unuse` takes a string, because a bare word in expression position is a
-  variable.
+- `unuse` takes a string or a bare flake reference, because a bare word in
+  expression position is a variable.
 - No `export`: the base is the environment λsh started with.

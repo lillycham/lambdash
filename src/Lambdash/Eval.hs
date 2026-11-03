@@ -213,6 +213,7 @@ eval env expression =
     evalLit (LBool b) = VBool b
     evalLit LUnit = VUnit
     evalLit (LStr s) = VStr s
+    evalLit (LRef s) = VStr s
     word (AWord s) = s
     word (AVar name) = case Map.lookup name env of
       Just (VStr s) -> s
