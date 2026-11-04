@@ -1,9 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | @lambdash --lsp@: a language server on stdin and stdout. For now it
--- reports problems: each open file is checked as a startup file would run,
--- but nothing runs. See "Lambdash.Check".
+-- | @lambdash --lsp@: a language server on stdin and stdout. It reports
+-- problems and shows types on hover. Each open file is checked as a startup
+-- file would run, but nothing runs. See "Lambdash.Check".
 module Server (serve) where
 
 import Control.Monad.IO.Class (liftIO)
@@ -13,7 +13,7 @@ import Language.LSP.Protocol.Message
 import Language.LSP.Protocol.Types
 import Language.LSP.Server
 import Language.LSP.VFS (virtualFileText, virtualFileVersion)
-import Lambdash.Check (Problem (..), checkText)
+import Lambdash.Check (Problem (..), checkText, hoverAt)
 import Lambdash.Repl (initial)
 
 serve :: IO Int
@@ -37,6 +37,12 @@ handlers = mconcat
   , notificationHandler SMethod_TextDocumentDidChange $ \(TNotificationMessage _ _ (DidChangeTextDocumentParams (VersionedTextDocumentIdentifier uri _) _)) ->
       recheck (toNormalizedUri uri)
   , notificationHandler SMethod_TextDocumentDidSave (const (pure ()))
+  , requestHandler SMethod_TextDocumentHover $ \(TRequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) (Position line column) _)) respond -> do
+      found <- getVirtualFile (toNormalizedUri uri)
+      let text = maybe "" (Text.unpack . virtualFileText) found
+          -- The protocol counts from 0, and Check from 1.
+          at = hoverAt initial text (fromIntegral line + 1) (fromIntegral column + 1)
+      respond (Right (maybe (InR Null) (InL . hover) at))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
   ]
@@ -50,6 +56,12 @@ recheck uri = do
     Just file -> do
       let problems = checkText initial (Text.unpack (virtualFileText file))
       publishDiagnostics maxProblems uri (Just (virtualFileVersion file)) (partitionBySource (map diagnostic problems))
+
+-- | The type as code, in a block that the editor highlights as λsh.
+hover :: (Int, Int, Int, String) -> Hover
+hover (line, from, to, shown) =
+  Hover (InL (MarkupContent MarkupKind_Markdown (Text.pack ("```lambdash\n" <> shown <> "\n```"))))
+    (Just (Range (Position (fromIntegral (line - 1)) (fromIntegral (from - 1))) (Position (fromIntegral (line - 1)) (fromIntegral (to - 1)))))
 
 maxProblems :: Int
 maxProblems = 100

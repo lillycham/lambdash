@@ -2,7 +2,7 @@ module Main (main) where
 
 import Control.Monad (unless)
 import Data.List (isPrefixOf)
-import Lambdash.Check (Problem (..), checkText)
+import Lambdash.Check (Problem (..), checkText, hoverAt)
 import Lambdash.Repl (initial)
 import System.Directory (doesFileExist)
 import System.Exit (exitFailure)
@@ -10,6 +10,9 @@ import System.Exit (exitFailure)
 -- | The problems in a file, as (line, column, message).
 problems :: [String] -> [(Int, Maybe Int, String)]
 problems source = [(problemLine p, problemColumn p, problemMessage p) | p <- checkText initial (unlines source)]
+
+hover :: [String] -> Int -> Int -> Maybe (Int, Int, Int, String)
+hover source = hoverAt initial (unlines source)
 
 tests :: [(String, Bool)]
 tests =
@@ -25,6 +28,12 @@ tests =
   , ("a signature waits for its binding", problems ["f : Int -> Int", "f = x -> x", "f true"] /= [])
   , ("declarations and let rec", problems ["data Maybe a = Nothing | Just a", "let rec len = m -> case m of Nothing -> 0; Just _ -> 1 end", "len (Just 1)"] == [])
   , ("a block spans lines", problems ["f = m -> do", "  print m", "end", "f 1"] == [])
+  , ("hover: a name has its type there", hover ["f = x -> x + 1", "w = f 1"] 2 5 == Just (2, 5, 6, "f : Num a => a -> a"))
+  , ("hover: a binding's own name", hover ["g = x -> x"] 1 1 == Just (1, 1, 2, "g : a -> a"))
+  , ("hover: a later binding changes it", hover ["f = 1", "f = true", "f"] 3 1 == Just (3, 1, 2, "f : Bool"))
+  , ("hover: a parameter shows nothing", hover ["f = 1", "g = f -> f"] 2 10 == Nothing)
+  , ("hover: a builtin and an operator", fmap (\(_, _, _, t) -> t) (hover ["print 1"] 1 3) == Just "print : a -> Comp {console} ()" && fmap (\(_, _, _, t) -> t) (hover ["1 + 2"] 1 3) == Just "(+) : Num a => a -> a -> a")
+  , ("hover: nothing on a space or a command", hover ["f 1"] 1 2 == Nothing && hover ["git status"] 1 2 == Nothing)
   , ("an error in a block marks every line of it", [(problemLine p, problemEndLine p) | p <- checkText initial (unlines ["f = do", "  print (1 + true)", "end"])] == [(1, 3)])
   ]
 

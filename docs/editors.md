@@ -11,6 +11,13 @@ flake activates and no file changes.
 - A type error, on the whole of its line, or of its block. The checker does
   not keep locations in its errors yet.
 
+## Hover
+
+Hover on a name to see its type at that point in the file, as `:t` shows
+it: a later binding of the same name changes it. A name that its own line
+binds, such as a lambda's parameter or a pattern variable, shows nothing
+for now. Hover has no types for parts of an expression yet.
+
 The file starts from a new session: the startup file does not run first, so
 a name that only `init.lsh` binds is a command in another file.
 
