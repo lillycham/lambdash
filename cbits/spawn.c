@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <signal.h>
 #include <spawn.h>
 #include <sys/types.h>
@@ -22,6 +23,22 @@ static int spawn(const char *file, char *const argv[], char *const envp[],
   if (out != STDOUT_FILENO)
     posix_spawn_file_actions_adddup2(&actions, out, STDOUT_FILENO);
 
+  /* A child gets stdin, stdout and stderr, and nothing else: no pipe of
+     another stage, no descriptor the shell inherited, no terminal that
+     the line editor opened. A background job that kept one would keep its
+     reader waiting for end of input, or keep a terminal it does not own. */
+  short flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+#if defined(__APPLE__)
+  if (in == STDIN_FILENO)
+    posix_spawn_file_actions_addinherit_np(&actions, STDIN_FILENO);
+  if (out == STDOUT_FILENO)
+    posix_spawn_file_actions_addinherit_np(&actions, STDOUT_FILENO);
+  posix_spawn_file_actions_addinherit_np(&actions, STDERR_FILENO);
+  flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+  posix_spawn_file_actions_addclosefrom_np(&actions, STDERR_FILENO + 1);
+#endif
+
   /* Ignored signals stay ignored across exec. The shell ignores the job
      control signals and the GHC runtime ignores SIGPIPE, so a child would
      inherit all of them: `yes | head -1` would never end. */
@@ -37,8 +54,7 @@ static int spawn(const char *file, char *const argv[], char *const envp[],
   posix_spawnattr_setpgroup(&attr, pgid);
   posix_spawnattr_setsigdefault(&attr, &defaults);
   posix_spawnattr_setsigmask(&attr, &mask);
-  posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF |
-                                      POSIX_SPAWN_SETSIGMASK);
+  posix_spawnattr_setflags(&attr, flags);
 
   err = search ? posix_spawnp(pid, file, &actions, &attr, argv, envp)
                : posix_spawn(pid, file, &actions, &attr, argv, envp);
