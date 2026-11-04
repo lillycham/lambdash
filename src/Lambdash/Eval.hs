@@ -32,7 +32,7 @@ import Control.Concurrent.STM
 import Control.Exception (IOException, SomeException, bracket, displayException, fromException, throwIO, try)
 import Control.Monad (forM_, void)
 import System.Posix.Signals (Handler (..), installHandler, sigINT)
-import Data.List (sort, sortBy)
+import Data.List (dropWhileEnd, intercalate, sort, sortBy, transpose)
 import Lambdash.Classes (extendFields, fromIntName, instanceName, recordFields, superField)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
@@ -549,6 +549,19 @@ methods =
   , alias "mod" "Integral" "%" (\a -> TFun a (TFun a a))
   , method "<>" "Semigroup" (\a -> TFun a (TFun a a))
   , method "show" "Show" (\a -> TFun a TString)
+  , method "display" "Display" (\a -> TFun a TString)
+  -- Each field of a record, in the record's order, as a person reads it.
+  , ( "fields"
+    , Forall [Var 0] (TClass [IsIn "Display" (TRecord (RVar (Var 0)))]
+        (TFun (TRecord (RVar (Var 0))) (TList (TRecord (RExtend "label" TString (RExtend "value" TString REmpty))))))
+    , VBuiltin "fields" (\d -> VBuiltin "fields" (\r -> case r of
+        VRecord values -> VList [VRecord [("label", VStr l), ("value", VStr (cell d l v))] | (l, v) <- values]
+        _ -> error "fields: the checker passed a non-record")) )
+  -- A table of every record that arrives: it reads them all first, to fit
+  -- the widths. The first record gives the columns and their order.
+  , ( "table"
+    , Forall [Var 0] (TClass [IsIn "Display" (TRecord (RVar (Var 0)))] (TStage (TRecord (RVar (Var 0))) TBytes))
+    , VBuiltin "table" (\d -> VStage [TransformStage (tableStage d)]) )
   -- What the prompt shows a value through, whatever the session binds.
   , alias "%show" "Show" "show" (\a -> TFun a TString)
   -- For the prelude's default methods, which no session can rebind.
@@ -574,6 +587,20 @@ methods =
   ]
  where
   method name cls shape = alias name cls name shape
+  tableStage d receive emit = do
+    let drain sofar = receive >>= maybe (pure (reverse sofar)) (\row -> drain (row : sofar))
+    rows <- drain []
+    case rows of
+      VRecord first : _ -> do
+        let labels = map fst first
+            grid = [[cell d l (select l row) | l <- labels] | row <- rows]
+            widths = map (maximum . map length) (transpose (labels : grid))
+            -- Trimmed, so that an empty last cell leaves no trailing space.
+            line cells = dropWhileEnd (== ' ') (intercalate "  " (zipWith pad widths cells))
+            pad width text = text <> replicate (width - length text) ' '
+            out text = emit (VBytes (Text.encodeUtf8 (Text.pack (text <> "\n"))))
+        mapM_ (out . line) (labels : map (`replicate` '-') widths : grid)
+      _ -> pure ()
   alias name cls field shape =
     (name, Forall [Var 0] (TClass [IsIn cls (TVar (Var 0))] (shape (TVar (Var 0)))), VBuiltin name (select field))
   items (VList xs) = xs
@@ -591,6 +618,16 @@ dictionaries =
   [(instanceName "Eq" key, eqDictionary structuralEq) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [(instanceName "Ord" key, ordDictionary (eqDictionary structuralEq) structuralLt) | key <- ["Int", "Bool", "String", "()"]]
     <> [(instanceName "Show" key, showDictionary render) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
+    <> [(instanceName "Display" key, displayDictionary plain) | key <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
+    <> [ (instanceName "Display" "[]", VBuiltin "Display List" (\d -> displayDictionary (\v -> case v of
+           VList xs -> "[" <> commaSep [displayed d x | x <- xs] <> "]"
+           _ -> error "Display List: the checker passed a non-list")))
+       -- As for Show: each field through its own dictionary.
+       , (instanceName "Display" "{}", VBuiltin "Display Record" (\fields -> case displayDictionary (\v -> case v of
+           VRecord values -> "{" <> commaSep [label <> " = " <> cell (VRecord [(recordFields, fields)]) label x | (label, x) <- values] <> "}"
+           _ -> error "Display Record: the checker passed a non-record") of
+             VRecord methods' -> VRecord ((recordFields, fields) : methods')
+             other -> other)) ]
     <> [ (instanceName "Num" "Int", numInt)
        , (instanceName "Integral" "Int", VRecord
            [ (superField "Num", numInt)
@@ -661,6 +698,28 @@ dictionaries =
 -- | A dictionary for Show from a way to show.
 showDictionary :: (Value -> String) -> Value
 showDictionary f = VRecord [("show", VBuiltin "show" (VStr . f))]
+
+-- | A dictionary for Display from a way to display.
+displayDictionary :: (Value -> String) -> Value
+displayDictionary f = VRecord [("display", VBuiltin "display" (VStr . f))]
+
+-- | A value displayed through a Display dictionary.
+displayed :: Value -> Value -> String
+displayed d x = case applyValue (select "display" d) x of
+  VStr text -> text
+  _ -> error "display: a method passed a non-String"
+
+-- | A value for a person: a String without its quotes.
+plain :: Value -> String
+plain (VStr s) = s
+plain value = render value
+
+-- | One field of a record, through the field's dictionary in a record's
+-- Display dictionary.
+cell :: Value -> Label -> Value -> String
+cell (VRecord methods') label value
+  | Just (VRecord ds) <- lookup recordFields methods', Just d <- lookup label ds = displayed d value
+cell _ _ value = plain value
 
 -- | A value shown through a Show dictionary.
 shown :: Value -> Value -> String

@@ -91,6 +91,7 @@ preludeClasses =
   , ClassInfo "Integral" ["Num"] a [(m, a2 ta) | m <- ["/", "%"]] []
   , ClassInfo "Semigroup" [] a [("<>", a2 ta)] []
   , ClassInfo "Show" [] a [("show", TFun ta TString)] []
+  , ClassInfo "Display" [] a [("display", TFun ta TString)] []
   ]
  where
   a = Var 0
@@ -115,6 +116,8 @@ preludeInstances =
     <> [Instance "Semigroup" "[]" [[]]]
     <> [Instance "Show" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
     <> [Instance "Show" "[]" [["Show"]], Instance "Show" "{}" []]
+    <> [Instance "Display" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
+    <> [Instance "Display" "[]" [["Display"]], Instance "Display" "{}" []]
 
 -- | The constructor of a type, for instance lookup, and its arguments.
 tyKey :: Ty -> Maybe (String, [Ty])

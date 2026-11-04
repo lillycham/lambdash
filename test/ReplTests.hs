@@ -591,6 +591,13 @@ tests =
   , ("case: only the chosen arm runs", prints [maybeData, "case Just 2 of Just n -> print n; Nothing -> print 0 end"] == ("2\n", ["data Maybe a", ""]))
   , ("case: spans lines", scripted (maybeData <> "\nf = m -> case m of\n  Just x -> x;\n  Nothing -> 0\nend\n") ["f (Just 7)"] == ([], ["7"]))
   , ("case: :core", final [":core case x of Just (Cons y _) -> y; _ -> 0 end"] == "case x of Just (Cons y _) -> y; _ -> 0 end")
+  , ("display: a String without quotes", session ["display \"a\"", "display {name = \"a\", xs = [1]}"] == ["\"a\"", "\"{name = a, xs = [1]}\""])
+  , ("fields: labels and displayed values", final ["fields {name = \"a\", n = 3}"] == "[{label = \"name\", value = \"a\"}, {label = \"n\", value = \"3\"}]")
+  , ("table: fits the widths, trims each line", fst (prints ["each [{name = \"a\", n = 10, ext = \"\"}, {name = \"bbb\", n = 2, ext = \"x\"}] | table"])
+      == "name  n   ext\n----  --  ---\na     10\nbbb   2   x\n")
+  , ("table: nothing for no records", fst (prints ["each [] | table"]) == "")
+  , ("table: through a Display instance", fst (prints [shapeData, "instance Display Shape where display = s -> case s of Circle r -> \"circle\"; Rect w h -> \"rect\" end", "each [{s = Circle 1}] | table"]) == "s\n------\ncircle\n")
+  , ("table: every field needs Display", final ["each [{f = x -> x}] | table"] == "no instance: Display (a -> a)")
   , ("lambda: _ as a parameter", session ["k = x _ -> x", "k 1 \"a\"", "(_ -> 2) ()"] == ["k : a -> b -> a", "1", "2"])
   , ("case: record patterns are open", session ["size = r -> case r of {size = 0} -> \"empty\"; {size} -> show size end", "size {name = \"a\", size = 0}", "size {size = 3}"]
       == ["size : {size : Int | a} -> String", "\"empty\"", "\"3\""])
@@ -602,7 +609,7 @@ tests =
   , ("case: a record pattern needs its fields", final ["case {a = 1} of {b} -> b end"] == "no field: b")
   ]
  where
-  builtinNames = words "print pure andThen collect map filter lines each pipefail length sort sortOn contains startsWith isEmpty stringLength byteLength encodeUtf8 encodeLine not add show eq ne lt le gt ge min max negate div mod cd ls overlay set unset prepend append prependWith appendWith use useLocal unuse environments pkg dev wait fg && || >>> <<< <> + - * / % == != < <= > >="
+  builtinNames = words "print pure andThen collect map filter lines each pipefail length sort sortOn contains startsWith isEmpty stringLength byteLength encodeUtf8 encodeLine not add show display fields table eq ne lt le gt ge min max negate div mod cd ls overlay set unset prepend append prependWith appendWith use useLocal unuse environments pkg dev wait fg && || >>> <<< <> + - * / % == != < <= > >="
   maybeData = "data Maybe a = Nothing | Just a"
   listData = "data List a = Nil | Cons a (List a)"
   shapeData = "data Shape = Circle Int | Rect Int Int"

@@ -141,6 +141,31 @@ instance changes what the prompt prints:
 <function>
 ```
 
+## Display
+
+`display : Display a => a -> String` is a value for a person to read.
+`Show` is the value as code. The difference is a String: `show "a"` is
+`"\"a\""`, and `display "a"` is `"a"`. A list or record displays each part
+through `Display`.
+
+`fields` and `table` use `Display`, so an instance for a type changes how a
+table shows it:
+
+```text
+λ> data Size = Size Int
+λ> instance Display Size where display = s -> case s of Size n -> show n <> "B" end
+λ> ls "." | map (r -> {name = r.name, size = Size r.size}) | table
+name            size
+--------------  -----
+README.md       3891B
+…
+```
+
+`table` is a stage from records to bytes. It reads every record before it
+writes, to fit the widths, so it does not suit a stream that never ends.
+The first record gives the columns and their order. To choose the columns,
+`map` each record to a smaller one.
+
 ## Instances
 
 | Class | Instances |
@@ -150,6 +175,7 @@ instance changes what the prompt prints:
 | `Num`, `Integral` | `Int`. `Integral` provides `Num` |
 | `Semigroup` | `String`, `Bytes`, `[a]`, and `Overlay`: `dev <> bench` is one overlay whose later patches win |
 | `Show` | `Int`, `Bool`, `String`, `()`, `Status`, `Bytes`, `Patch`, `Overlay`, `[a]` when `Show a`, and records when every field is `Show` |
+| `Display` | the same as `Show`, with `Display` in place of `Show` |
 
 `Ord a` provides `Eq a`, so a function that uses both shows only `Ord a`.
 Functions, computations, streams, stages, collectors and jobs have no `Eq`.
