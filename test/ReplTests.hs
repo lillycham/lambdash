@@ -524,9 +524,21 @@ tests =
   , ("rows: an instance may not exceed it", final [greetClass, "instance Greet Bool where greet = b -> do print 1; cd \"/\" end"] == "effect mismatch: {console, cwd} and {console}")
   , ("rows: an omitted row in a method is empty", final ["class Quiet a where quiet : a -> Comp ()", "instance Quiet Int where quiet = n -> print n"] == "effect mismatch: {console} and {}")
   , ("rows: the preflight knows a method's effects", final [greetClass, "instance Greet Int where greet = n -> print n", "greet 5"] == "")
+  , ("help: an overview", ("topics  syntax" `isInfixOf`) (final [":help"]) && final [":h"] == final [":help"])
+  , ("help: a builtin, with its type", final [":help map"] == "map : (a -> b) -> Stage a b\n  a stage that applies a function to each item")
+  , ("help: an operator, with its fixity", final [":help <>"] == "(<>) : Semigroup a => a -> a -> a\n  combine: strings, lists, bytes, overlays (later patches win)\n  infixr 5")
+  , ("help: a user operator", final ["(<+>) = a b -> a", "infixr 2 <+>", ":help <+>"] == "(<+>) : a -> b -> a\n  infixr 2")
+  , ("help: a rebound name loses its description", final ["map = 1", ":help map"] == "map : Int")
+  , ("help: a class", final [":help Ord"] == "class Eq a => Ord a\n  lt : a -> a -> Bool\n  le : a -> a -> Bool   (default)\n  gt : a -> a -> Bool   (default)\n  ge : a -> a -> Bool   (default)\n  min : a -> a -> a   (default)\n  max : a -> a -> a   (default)\ninstances  Int, Bool, String, (), [a] when Ord a")
+  , ("help: a declared class", final [prettyClass, prettyInt, ":help Pretty"] == "class Pretty a\n  pretty : a -> String\ninstances  Int")
+  , ("help: a topic", ("docs/jobs.md" `isInfixOf`) (final [":help jobs"]))
+  , ("help: every topic has text", all (\t -> not (null (final [":help " <> t]))) ["syntax", "operators", "pipelines", "jobs", "environments", "nix", "classes", "types", "startup"])
+  , ("help: every builtin is described", null [n | n <- builtinNames, "nothing named" `isInfixOf` final [":help " <> n] || length (lines (final [":help " <> n])) < 2])
+  , ("help: nothing by that name", final [":help nope"] == "nothing named nope; :help lists the topics")
   , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
   ]
  where
+  builtinNames = words "print pure andThen collect map filter lines each pipefail length sort sortOn contains startsWith isEmpty stringLength byteLength encodeUtf8 encodeLine not add show eq ne lt le gt ge min max negate div mod cd ls overlay set unset prepend append prependWith appendWith use useLocal unuse environments pkg dev wait fg && || >>> <<< <> + - * / % == != < <= > >="
   greetClass = "class Greet a where greet : a -> Comp {console} ()"
   prettyClass = "class Pretty a where pretty : a -> String"
   prettyInt = "instance Pretty Int where pretty = n -> \"#\" <> show n"

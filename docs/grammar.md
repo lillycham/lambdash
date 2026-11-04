@@ -168,7 +168,7 @@ The REPL parses one `line` at a time. `:t`, `:core`, `:elab`, `:q` and `:env` ar
 in this rule only. A line may span several input lines while a `do` is open.
 
 ```ebnf
-line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
+line        = [ ":q" | ":help" [ NAME ] | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
               | ":elab" declaration | declaration
               | fixity | name ":" [ context "=>" ] type
               | name "=" expr | name "<-" expr | expr ] EOF ;

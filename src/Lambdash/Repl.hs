@@ -50,7 +50,8 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Lambdash.Classes (ClassEnv, lookupClass, prelude)
+import Lambdash.Classes (ClassEnv (..), ClassInfo (..), Instance (..), lookupClass, prelude)
+import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Syntax (Declaration, SPred (..), SType (..))
 import Data.Map.Lazy qualified as Map.Lazy
@@ -169,6 +170,8 @@ data Command
     Declare Declaration
   | -- | @f : Eq a => a -> Bool@: the signature of the next @f = e@.
     Signature Name [SPred] SType
+  | -- | @:help@, @:help NAME@ or @:help TOPIC@.
+    Help (Maybe String)
   | -- | @:elab instance ...@: an instance's dictionary, as code. Nothing is
     -- declared.
     ShowElabDeclaration Declaration
@@ -187,6 +190,7 @@ command =
   <|> try (lexeme (keyword ":elab") *> (ShowElabDeclaration <$> declaration))
   <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (name <* symbol "=" <* notFollowedBy (char '='))) <*> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
+  <|> (Help <$> (lexeme (keyword ":help" <|> keyword ":h") *> optionalName))
   <|> fixityLine
   <|> (Declare <$> declaration)
   <|> (uncurry . Signature <$> try (name <* symbol ":" <* notFollowedBy (char ':')) <*> qualifiedType)
@@ -737,6 +741,8 @@ stepLine session input =
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
     Right (SetFixity fixity names) ->
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
+    Right (Help Nothing) -> pure (Continue session Help.overview)
+    Right (Help (Just word)) -> pure (Continue session (helpFor session word))
     Right (Signature name context written) -> case writtenCheck classes context written of
       Just problem -> pure (Failed problem)
       Nothing -> pure (Continue session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)} "")
@@ -906,3 +912,55 @@ writtenCheck classes context written =
     STRecord fields rest -> concatMap (names . snd) fields <> maybe [] pure rest
     STApp _ _ args -> concatMap names args
     STCon _ -> []
+
+-- | Help on one word: a topic, a class, or a name in scope, with its type
+-- as the session has it now.
+helpFor :: Session -> String -> String
+helpFor session word
+  | Just text <- Help.topic word = text
+  | Just info <- lookupClass classes word = classHelp classes info
+  | Just scheme <- Map.lookup word types =
+      let ty = either (const "?") renderEffectsType (inferWith classes types (EVar word))
+          builtin = Map.lookup word typeEnv == Just scheme
+          described = if builtin then maybe [] pure (Help.describe word) else []
+          fixity = case Map.lookup word (sessionFixities session) of
+            Just (Fixity assoc level) -> [assocWord assoc <> " " <> show level]
+            Nothing | operator -> ["infixl 9"]
+                    | otherwise -> []
+      in intercalate "\n" ((displayName word <> " : " <> ty) : map ("  " <>) (described <> fixity))
+  | otherwise = "nothing named " <> word <> "; :help lists the topics"
+ where
+  classes = sessionClasses session
+  types = sessionTypes session
+  operator = not (null word) && all (`elem` ("!%&*+-/<=>?@^|~:" :: String)) word
+  assocWord InfixL = "infixl"
+  assocWord InfixR = "infixr"
+  assocWord InfixN = "infix"
+
+-- | A class: its superclasses, methods and instances.
+classHelp :: ClassEnv -> ClassInfo -> String
+classHelp classes info = intercalate "\n" (header : methods <> [instancesLine])
+ where
+  name = className info
+  supers = case classSupers info of
+    [] -> ""
+    [one] -> one <> " a => "
+    several -> "(" <> intercalate ", " [c <> " a" | c <- several] <> ") => "
+  header = "class " <> supers <> name <> " a"
+  -- The class's unknown is always a.
+  method (m, ty) = "  " <> displayName m <> " : " <> evalState (renderVar (classVar info) >> renderTy ty) Map.empty
+    <> if m `elem` map fst (classDefaults info) then "   (default)" else ""
+  methods = map method (classMethods info)
+  instancesLine = case [inst | inst <- envInstances classes, instClass inst == name] of
+    [] -> "no instances"
+    found -> "instances  " <> intercalate ", " (map instanceText found)
+  instanceText inst =
+    let letters = ["a", "b", "c", "d"]
+        args = zip letters (instRequires inst)
+        shape = case instHead inst of
+          "List" -> "[a]"
+          "->" -> "(a -> b)"
+          "Record" -> "records"
+          other -> other
+        context = [c <> " " <> v | (v, cs) <- args, c <- cs]
+    in shape <> if null context then "" else " when " <> intercalate ", " context
