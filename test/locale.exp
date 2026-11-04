@@ -14,7 +14,7 @@ proc see {pattern what} {
     eof { fail "$what (shell died)" }
   }
 }
-proc prompt {} { see {> $} "prompt" }
+proc prompt {} { see {> (?:\x1b\[[0-9;]*m)*$} "prompt" }
 
 # λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
 # in this directory from activating, and the tests from touching real state.

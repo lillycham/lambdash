@@ -20,13 +20,15 @@ set name [file tail $work]
 
 # λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
 # in this directory from activating, and the tests from touching real state.
+# After the prompt, the line editor may reset the colour.
+set reset {(?:\x1b\[[0-9;]*m)*$}
 set state [exec mktemp -d]
 spawn env XDG_STATE_HOME=$state XDG_CONFIG_HOME=$state [lindex $argv 0]
-see {λ> $} "prompt"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt"
 
 send "cd $work\r"
 see {flake.nix here is not allowed} "an unapproved flake does not activate"
-see {λ> $} "and the prompt stays plain"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "and the prompt stays plain"
 send "cd /\r"
 send "cd $work\r"
 send "print 1\r"
@@ -38,12 +40,12 @@ expect {
 send "allow\r"
 see {lsh fixture hook ran} "allow runs the hook"
 see "$name# activated" "and activates the devshell"
-see "λ \\\[$name#\\\]> $" "the prompt shows it"
+see "λ \\\[$name#\\\]> $reset" "the prompt shows it"
 send "printenv LSH_HOOK\r"
 see {ran\r\n} "its environment reaches programs"
 
 send "cd sub\r"
-see "λ \\\[$name#\\\]> $" "it stays active below the directory"
+see "λ \\\[$name#\\\]> $reset" "it stays active below the directory"
 send "cd /\r"
 see "$name# deactivated" "leaving the tree deactivates it"
 send "printenv LSH_HOOK\r"
@@ -61,13 +63,13 @@ exec sh -c "echo '# changed' >> $work/flake.nix"
 send "cd $work\r"
 see "$name#: flake.nix or flake.lock changed" "a changed flake is noticed"
 see {not allowed} "and needs approval again"
-see {λ> $} "and is not active"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "and is not active"
 
 send "allow\r"
 see "$name# activated" "allow again"
 send "deny\r"
 see "$name# deactivated" "deny deactivates it"
-see {λ> $} "prompt"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt"
 send "cd /\r"
 send "cd $work\r"
 send "print 2\r"

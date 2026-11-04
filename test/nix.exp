@@ -18,13 +18,13 @@ set fixture "./test/nix-fixture"
 # in this directory from activating, and the tests from touching real state.
 set state [exec mktemp -d]
 spawn env XDG_STATE_HOME=$state XDG_CONFIG_HOME=$state [lindex $argv 0]
-see {λ> $} "prompt"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt"
 
 send "lsh-hello\r"
 see {command not found: lsh-hello} "the fixture is not on PATH yet"
 
 send "andThen (pkg \"$fixture\") use\r"
-see {λ \[\./test/nix-fixture\]> $} "pkg and use in one line"
+see {λ \[\./test/nix-fixture\]> (?:\x1b\[[0-9;]*m)*$} "pkg and use in one line"
 send "lsh-hello\r"
 see {hello from lsh-hello, LSH_HOOK=unset} "pkg puts the program on PATH"
 
@@ -40,7 +40,7 @@ see {from-attr} "attributes reach a program"
 send "d\r"
 expect {
   -re {TMPDIR|shellHook} { fail "dev drops the temporary directory and the hook source" }
-  -re {\]> $} { puts "\nPASS: dev drops the temporary directory and the hook source" }
+  -re {\]> (?:\x1b\[[0-9;]*m)*$} { puts "\nPASS: dev drops the temporary directory and the hook source" }
 }
 
 send "o <- dev \"$fixture#other\"\r"
@@ -54,9 +54,9 @@ see {LSH_HOOK=ran} "unuse restores the first devshell"
 
 send "unuse \"$fixture\"\r"
 send "use ./test/nix-fixture#\r"
-see {λ \[\./test/nix-fixture#\]> $} "use with a bare reference"
+see {λ \[\./test/nix-fixture#\]> (?:\x1b\[[0-9;]*m)*$} "use with a bare reference"
 send "unuse ./test/nix-fixture#\r"
-see {λ> $} "unuse with a bare reference"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "unuse with a bare reference"
 send "with ./test/nix-fixture# do lsh-hello end\r"
 see {hello from lsh-hello} "with a bare reference"
 

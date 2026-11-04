@@ -4,6 +4,7 @@
 # bg continues a stopped job without the terminal; the prompt reports it.
 set timeout 5
 set stty_init "sane"
+source [file join [file dirname [info script]] pause.tcl]
 proc fail {what} { puts "\nFAIL: $what"; exit 1 }
 proc see {pattern what} {
   expect {
@@ -12,7 +13,7 @@ proc see {pattern what} {
     eof { fail "$what (shell died)" }
   }
 }
-proc prompt {} { see {λ> $} "prompt" }
+proc prompt {} { see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt" }
 
 # λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
 # in this directory from activating, and the tests from touching real state.
@@ -26,7 +27,7 @@ prompt
 
 # A job that ends in the background is reported at the next prompt.
 send "sh -c \"sleep 1; exit 3\"\r"
-after 300
+pause 300
 send "\032"
 see {\[1\] stopped} "a stopped job"
 prompt
@@ -36,7 +37,7 @@ prompt
 send "jobs\r"
 see {\[1\] running} "jobs shows it running"
 prompt
-after 1500
+pause 1500
 send "\r"
 see {\[1\] done  sh -c "sleep 1; exit 3"\r\nexit 3} "its end is reported at the next prompt"
 prompt
@@ -50,18 +51,18 @@ prompt
 
 # A background job that reads the terminal stops instead.
 send "./test/reader.sh\r"
-after 300
+pause 300
 send "\032"
 see {\[1\] stopped  \./test/reader\.sh} "stop a reader"
 prompt
 send "bg\r"
 prompt
-after 500
+pause 500
 send "\r"
 see {\[1\] stopped  \./test/reader\.sh} "a background reader stops for the terminal"
 prompt
 send "fg\r"
-after 300
+pause 300
 send "from fg\r"
 see {from fg\r\nfrom fg} "fg gives it the terminal"
 send "\004"
@@ -69,27 +70,27 @@ prompt
 
 # fg of a job that is running in the background.
 send "sh -c \"sleep 1; read x; echo got \$x\"\r"
-after 300
+pause 300
 send "\032"
 see {stopped} "stop it"
 prompt
 send "bg\r"
 prompt
 send "fg\r"
-after 1500
+pause 1500
 send "it\r"
 see {got it} "fg brings a running job to the foreground"
 prompt
 
 # A binding that finishes in the background binds then.
 send "s <- sh -c \"sleep 1; exit 5\"\r"
-after 300
+pause 300
 send "\032"
 see {stopped} "stop a binding"
 prompt
 send "bg\r"
 prompt
-after 1500
+pause 1500
 send "\r"
 see {done.*s : Status} "a background binding binds when it ends"
 prompt

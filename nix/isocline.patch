@@ -1,0 +1,193 @@
+--- a/src/editline.c
++++ b/src/editline.c
+@@ -919,6 +919,10 @@
+       edit_generate_completions(env, &eb, true);
+       c = KEY_NONE;      
+     }
++
++    // lambdash: on one line, a linefeed ends it too. A key typed while the
++    // terminal was not raw arrives so: the driver turns Enter into '\n'.
++    if (c == KEY_LINEFEED && env->singleline_only) c = KEY_ENTER;
+ 
+     // Operations that may return
+     if (c == KEY_ENTER) {
+@@ -1112,7 +1116,11 @@
+   
+   // save result
+   char* res; 
+-  if ((c == KEY_CTRL_D && sbuf_len(eb.input) == 0) || c == KEY_CTRL_C || c == KEY_EVENT_STOP) {
++  if (c == KEY_CTRL_C) {
++    // lambdash: ctrl+C gives "\x03", so that it differs from end of input
++    res = mem_strdup(env->mem, "\x03");
++  }
++  else if ((c == KEY_CTRL_D && sbuf_len(eb.input) == 0) || c == KEY_EVENT_STOP) {
+     res = NULL;
+   }
+   else if (!tty_is_utf8(env->tty)) {
+@@ -1124,7 +1132,7 @@
+ 
+   // update history
+   history_update(env->history, sbuf_string(eb.input));
+-  if (res == NULL || sbuf_len(eb.input) <= 1) { ic_history_remove_last(); } // no empty or single-char entries
++  if (res == NULL || c == KEY_CTRL_C || sbuf_len(eb.input) <= 1) { ic_history_remove_last(); } // no empty or single-char entries
+   history_save(env->history);
+ 
+   // free resources 
+--- a/src/isocline.c
++++ b/src/isocline.c
+@@ -36,6 +36,14 @@
+ //-------------------------------------------------------------
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <errno.h>   // lambdash
++#include <signal.h>  // lambdash
++#include <stdbool.h> // lambdash
++#if !defined(_WIN32)
++#include <fcntl.h>      // lambdash
++#include <unistd.h>     // lambdash
++#include <sys/select.h> // lambdash
++#endif
+ #include <string.h>
+ #include <stdarg.h>
+ 
+@@ -64,9 +72,10 @@
+       // if the terminal is not interactive, but we are reading from the tty (keyboard), we display a prompt
+       term_start_raw(env->term);  // set utf8 mode on windows
+       if (prompt_text != NULL) {
+-        term_write(env->term, prompt_text);
++        bbcode_print(env->bbcode, prompt_text);  // lambdash: markup, as when editing
+       }
+       term_write(env->term, env->prompt_marker);    
++      term_flush(env->term);  // lambdash: the prompt has no newline to flush it
+       term_end_raw(env->term, false);
+     }
+     // read directly from stdin
+@@ -80,21 +89,99 @@
+ // support (like from a pipe, file, or dumb terminal).
+ //-------------------------------------------------------------
+ 
++// lambdash: without the editor the terminal is not raw, so Ctrl-C is SIGINT,
++// which a shell ignores. While reading, a handler takes it instead, and the
++// line is "\x03", as from the editor. The process may have many threads, and
++// any of them may take the signal, so the handler writes to a pipe that the
++// read waits on beside stdin (the self-pipe trick).
++#if !defined(_WIN32)
++static int getline_pipe[2] = { -1, -1 };
++static void getline_on_sigint(int signum) {
++  (void)signum;
++  int saved = errno;
++  if (getline_pipe[1] >= 0) { ssize_t n = write(getline_pipe[1], "x", 1); (void)n; }
++  errno = saved;
++}
++
++// One byte of stdin: 1, or 0 at end of input, or -1 on Ctrl-C.
++static int getline_byte(char* c) {
++  while (true) {
++    fd_set readset;
++    FD_ZERO(&readset);
++    FD_SET(0, &readset);
++    FD_SET(getline_pipe[0], &readset);
++    int top = (getline_pipe[0] > 0 ? getline_pipe[0] : 0);
++    if (select(top + 1, &readset, NULL, NULL, NULL) < 0) {
++      if (errno == EINTR) continue;  // a signal, such as SIGCHLD
++      return 0;
++    }
++    if (FD_ISSET(getline_pipe[0], &readset)) {
++      char drain[16];
++      while (read(getline_pipe[0], drain, sizeof(drain)) > 0) { }
++      return -1;
++    }
++    ssize_t n = read(0, c, 1);
++    if (n < 0 && errno == EINTR) continue;
++    return (n == 1 ? 1 : 0);
++  }
++}
++#endif
++
+ static char* ic_getline(alloc_t* mem)
+ {  
+-  // read until eof or newline
+   stringbuf_t* sb = sbuf_new(mem);
+-  int c;
++  char* line = NULL;
++  #if !defined(_WIN32)
++  if (getline_pipe[0] < 0) {
++    if (pipe(getline_pipe) == 0) {
++      fcntl(getline_pipe[0], F_SETFL, O_NONBLOCK);
++      fcntl(getline_pipe[1], F_SETFL, O_NONBLOCK);
++    }
++  }
++  struct sigaction on_sigint, previous;
++  memset(&on_sigint, 0, sizeof(on_sigint));
++  on_sigint.sa_handler = &getline_on_sigint;
++  sigemptyset(&on_sigint.sa_mask);
++  on_sigint.sa_flags = SA_RESTART;
++  bool installed = (getline_pipe[0] >= 0 && sigaction(SIGINT, &on_sigint, &previous) == 0);
++  // read until end of input or newline, a byte at a time: stdio would read
++  // ahead, and the bytes after the line belong to the programs it starts
+   while (true) {
+-    c = fgetc(stdin);
+-    if (c==EOF || c=='\n') {
+-      break;
++    char c;
++    int got = (installed ? getline_byte(&c) : (int)read(0, &c, 1));
++    if (got < 0 && installed) {
++      sbuf_free(sb);
++      line = mem_strdup(mem, "\x03");
++      goto done;
+     }
+-    else {
+-      sbuf_append_char(sb, (char)c);
++    if (got <= 0) {
++      if (sbuf_len(sb) == 0) {
++        // lambdash: end of input is no line, not an empty one
++        sbuf_free(sb);
++        goto done;
++      }
++      break;
+     }
++    if (c == '\n') break;
++    sbuf_append_char(sb, c);
+   }
+-  return sbuf_free_dup(sb);
++  #else
++  int c;
++  while (true) {
++    c = fgetc(stdin);
++    if (c==EOF && sbuf_len(sb) == 0) { sbuf_free(sb); return NULL; }
++    if (c==EOF || c=='\n') break;
++    sbuf_append_char(sb, (char)c);
++  }
++  #endif
++  // lambdash: an empty line has no buffer, and must not read as no line
++  line = sbuf_free_dup(sb);
++  if (line == NULL) line = mem_strdup(mem, "");
++#if !defined(_WIN32)
++done:
++  if (installed) sigaction(SIGINT, &previous, NULL);
++#endif
++  return line;
+ }
+ 
+ 
+--- a/src/tty.c
++++ b/src/tty.c
+@@ -649,7 +649,8 @@
+ ic_private bool tty_start_raw(tty_t* tty) {
+   if (tty == NULL) return false;
+   if (tty->raw_enabled) return true;
+-  if (tcsetattr(tty->fd_in,TCSAFLUSH,&tty->raw_ios) < 0) return false;  
++  // lambdash: TCSANOW, so that keys typed while a command ran are kept
++  if (tcsetattr(tty->fd_in,TCSANOW,&tty->raw_ios) < 0) return false;  
+   tty->raw_enabled = true;
+   return true;
+ }
+@@ -658,7 +659,7 @@
+   if (tty == NULL) return;
+   if (!tty->raw_enabled) return;
+   tty->cpush_count = 0;
+-  if (tcsetattr(tty->fd_in,TCSAFLUSH,&tty->orig_ios) < 0) return;
++  if (tcsetattr(tty->fd_in,TCSANOW,&tty->orig_ios) < 0) return;
+   tty->raw_enabled = false;
+ }
+ 

@@ -2,6 +2,7 @@
 # Usage: expect test/pipelines.exp path/to/lambdash
 set timeout 5
 set stty_init "sane"
+source [file join [file dirname [info script]] pause.tcl]
 proc fail {what} { puts "\nFAIL: $what"; exit 1 }
 proc see {pattern what} {
   expect {
@@ -10,7 +11,7 @@ proc see {pattern what} {
     eof { fail "$what (shell died)" }
   }
 }
-proc prompt {} { see {λ> $} "prompt" }
+proc prompt {} { see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt" }
 
 # λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
 # in this directory from activating, and the tests from touching real state.
@@ -19,7 +20,7 @@ spawn env XDG_STATE_HOME=$state XDG_CONFIG_HOME=$state [lindex $argv 0]
 prompt
 send "printf \"a|b\" | cat\r"
 # The line editor may switch keypad modes around a prompt, by TERM.
-see {a\|b(?:\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])*λ> $} "quoted bytes cross a pipeline"
+see {a\|b(?:\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])*λ> (?:\x1b\[[0-9;]*m)*$} "quoted bytes cross a pipeline"
 
 send "yes | head -1\r"
 see {y\r\n} "downstream demand ends an infinite source"
@@ -29,24 +30,24 @@ see {y\r\n} "cancellation crosses pure stages"
 prompt
 
 send "sleep 100 | cat\r"
-after 500
+pause 500
 send "\003"
 see {signal 2} "Ctrl-C reaches the whole pipeline"
 prompt
 
 send "sleep 100 | (x -> x) | cat\r"
-after 500
+pause 500
 send "\032"
 see {\[1\] stopped  sleep 100 \| \(x -> x\) \| cat} "Ctrl-Z stops the whole pipeline"
 prompt
 send "fg\r"
-after 500
+pause 500
 send "\003"
 see {signal 2} "fg resumes the whole group, including across pure stages"
 prompt
 
 send "cat | (x -> x) | cat\r"
-after 500
+pause 500
 send "from terminal\r"
 see {from terminal\r\nfrom terminal} "the first stage can read the terminal"
 send "\004"
@@ -86,7 +87,7 @@ see {\["owl"\]\r\n} "a failed collection preserves the old binding"
 prompt
 
 send "r <- sleep 100 | lines | collect\r"
-after 500
+pause 500
 send "\003"
 see {r : \{items : \[String\], status : Status, statuses : \[Status\]\}} "Ctrl-C ends collection without killing the shell"
 prompt

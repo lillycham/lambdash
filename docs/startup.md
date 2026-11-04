@@ -32,3 +32,10 @@ end
   ```
 
 - `:q` ends the file, not the shell.
+
+## History
+
+The prompt keeps up to 1000 lines of history in
+`$XDG_STATE_HOME/lambdash/history`, or `~/.local/state/lambdash/history`
+without `XDG_STATE_HOME`. Up and down move through it, and Ctrl-R searches it.
+Lines of one character and lines dropped with Ctrl-C are not kept.

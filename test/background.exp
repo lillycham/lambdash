@@ -6,6 +6,7 @@
 # and, by TERM, keypad and newline control sequences.
 set timeout 5
 set stty_init "sane"
+source [file join [file dirname [info script]] pause.tcl]
 proc fail {what} { puts "\nFAIL: $what"; exit 1 }
 proc see {pattern what} {
   expect {
@@ -14,7 +15,7 @@ proc see {pattern what} {
     eof { fail "$what (shell died)" }
   }
 }
-proc prompt {} { see {λ> $} "prompt" }
+proc prompt {} { see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt" }
 
 # λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
 # in this directory from activating, and the tests from touching real state.
@@ -35,13 +36,13 @@ send "wait j\r"
 see {exit 4\r\n} "and again"
 prompt
 send "jobs\r"
-see {jobs(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+λ> $} "a waited job leaves the table quietly"
+see {jobs(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+λ> (?:\x1b\[[0-9;]*m)*$} "a waited job leaves the table quietly"
 
 # A job nobody waits for is reported at the next prompt.
 send "sh -c \"exit 6\" &\r"
 see {\[1\] sh -c "exit 6" &} "a bare line shows the job"
 prompt
-after 500
+pause 500
 send "\r"
 see {\[1\] done  sh -c "exit 6" &\r\nexit 6} "its end is reported"
 prompt
@@ -50,7 +51,7 @@ prompt
 send "r <- ./test/reader.sh &\r"
 see {r : Job Status} "start a reader"
 prompt
-after 500
+pause 500
 send "\r"
 see {\[1\] stopped  r <- \./test/reader\.sh &} "it stops for the terminal"
 prompt
@@ -58,19 +59,19 @@ send "wait r\r"
 see {job 1 is stopped: fg it} "wait refuses a stopped job"
 prompt
 send "fg r\r"
-after 300
+pause 300
 send "via fg\r"
 see {via fg\r\nvia fg} "fg j gives it the terminal"
 send "\004"
 prompt
 send "jobs\r"
-see {jobs(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+λ> $} "fg collected it"
+see {jobs(?:\r|\n|\x1b\[[0-9;?]*[a-zA-Z]|\x1b[=>E])+λ> (?:\x1b\[[0-9;]*m)*$} "fg collected it"
 
 # Ctrl-C interrupts wait, not the job.
 send "s <- sleep 100 &\r"
 prompt
 send "wait s\r"
-after 300
+pause 300
 send "\003"
 see {wait: interrupted; job 1 is still running} "Ctrl-C interrupts wait"
 prompt
@@ -80,7 +81,7 @@ prompt
 
 # A line that starts a job and is then stopped takes the next number.
 send "do t <- sleep 100 &; ./test/reader.sh end\r"
-after 300
+pause 300
 send "\032"
 see {\[3\] stopped  do t <- sleep 100 &; \./test/reader\.sh end} "a stopped line numbers after its jobs"
 prompt

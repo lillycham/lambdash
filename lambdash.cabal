@@ -20,7 +20,7 @@ executable lambdash
   import:         shared
   hs-source-dirs: app
   main-is:        Main.hs
-  build-depends:  base, directory, haskeline, lambdash
+  build-depends:  base, directory, filepath, isocline, lambdash
   ghc-options:    -threaded
 
 -- Job-control spike. The threaded RTS is the point of the test.

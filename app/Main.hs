@@ -1,14 +1,15 @@
 module Main (main) where
 
-import Control.Monad (unless)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad (unless, void)
 import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (saveShellTerminal, setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runScript, sessionPrompt, startupFile, step)
-import System.Environment (getArgs)
-import System.Console.Haskeline
+import System.Environment (getArgs, lookupEnv)
+import System.Console.Isocline (enableAutoTab, enableMultiline, readlineMaybe, setHistory)
+import Foreign.C.String (CString, withCString)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
-import System.Directory (getCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, getHomeDirectory)
+import System.FilePath ((</>))
 import System.IO (BufferMode (..), hSetBuffering, hSetEncoding, stderr, stdin, stdout)
 
 main :: IO ()
@@ -16,14 +17,11 @@ main = do
   -- A shell must not die on the locale. Under LANG=C, GHC would encode text as
   -- ASCII and throw on the first non-ASCII character, so text is always UTF-8:
   -- the terminal, arguments, paths and the environment.
-  --
-  -- Note: haskeline still decodes keys by the locale, so under LANG=C a typed
-  -- é arrives as replacement characters. It no longer crashes the shell.
   setLocaleEncoding utf8
   setForeignEncoding utf8
   setFileSystemEncoding utf8
   mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
-  -- Computations print straight to stdout, beside the output of haskeline.
+  -- Computations print straight to stdout, between reads of the editor.
   hSetBuffering stdout LineBuffering
   setupTerminal
   restoreTerminal <- saveShellTerminal
@@ -42,7 +40,34 @@ main = do
         restoreTerminal
         mapM_ putStrLn reports
         pure ready
-    runInputT defaultSettings (loop restoreTerminal start)
+    history <- historyFile
+    setHistory history 1000
+    -- The prompt is the session's, whole: no marker after it.
+    withCString "" (\none -> setPromptMarker none none)
+    -- One line at a time: a block continues with ".. ", not inside the
+    -- editor. The patch then reads a linefeed as Enter, which is what a
+    -- key typed while a command ran arrives as.
+    void (enableMultiline False)
+    -- Tab with one completion takes it at once.
+    void (enableAutoTab True)
+    loop restoreTerminal start
+
+-- | The binding's setPromptMarker passes "" as NULL, which means the
+-- default marker, "> ". The C function takes "" as no marker.
+foreign import ccall unsafe "ic_set_prompt_marker"
+  setPromptMarker :: CString -> CString -> IO ()
+
+-- | Where history goes: @$XDG_STATE_HOME/lambdash/history@, or
+-- @~/.local/state/lambdash/history@, beside the approved flakes.
+historyFile :: IO FilePath
+historyFile = do
+  state <- lookupEnv "XDG_STATE_HOME"
+  home <- getHomeDirectory
+  let base = case state of
+        Just value | not (null value) -> value
+        _ -> home </> ".local/state"
+  createDirectoryIfMissing True (base </> "lambdash")
+  pure (base </> "lambdash" </> "history")
 
 -- | What the prompt read.
 data Input
@@ -54,42 +79,49 @@ data Input
 
 -- | Read a line, and continuation lines while a @do@ block is open.
 --
--- The shell ignores SIGINT, so that Ctrl-C reaches only the foreground job.
--- While reading, haskeline handles it instead, for the length of the read.
-readInput :: String -> InputT IO Input
-readInput prompt = handleInterrupt (pure Cancelled) $ withInterrupt $ do
-  first <- getInputLine prompt
-  maybe (pure End) (fmap Line . more) first
+-- The editor reads the terminal raw, so Ctrl-C is a key while it reads, not
+-- a signal. Patched isocline gives it as "\x03"; no line is end of input.
+-- End of input in a block stops reading, and the parser reports the
+-- unclosed block.
+readInput :: String -> IO Input
+readInput prompt = readlineMaybe (escape prompt) >>= \first -> case first of
+  Nothing -> pure End
+  Just line -> more line
+ where
+  more "\x03" = pure Cancelled
+  more input
+    | needsMore input = readlineMaybe ".. " >>= \next -> case next of
+        Nothing -> pure (Line input)
+        Just "\x03" -> pure Cancelled
+        Just line -> more (input <> "\n" <> line)
+    | otherwise = pure (Line input)
 
--- | End of input stops reading, and the parser reports the unclosed block.
-more :: String -> InputT IO String
-more input
-  | needsMore input = do
-      next <- getInputLine ".. "
-      maybe (pure input) (\line -> more (input <> "\n" <> line)) next
-  | otherwise = pure input
+-- | The prompt as plain text: the editor reads @[@ as the start of a style,
+-- and an overlay's prompt has one.
+escape :: String -> String
+escape = concatMap (\c -> if c `elem` ("[\\" :: String) then ['\\', c] else [c])
 
 -- | All of the meaning is in 'step'. This only moves text.
-loop :: IO () -> Session -> InputT IO ()
+loop :: IO () -> Session -> IO ()
 loop restoreTerminal before = do
   -- Background jobs report at the next prompt, as in other shells.
-  (session, messages) <- liftIO (notices before)
-  mapM_ outputStrLn messages
-  cwd <- liftIO getCurrentDirectory
+  (session, messages) <- notices before
+  mapM_ putStrLn messages
+  cwd <- getCurrentDirectory
   input <- readInput (sessionPrompt cwd session)
   case input of
     End -> pure ()
     Cancelled -> loop restoreTerminal session
     Line line -> do
-      result <- liftIO (step session line)
+      result <- step session line
       -- Whatever the line did to the terminal, the shell owns it again, in
       -- its own modes, before printing anything.
-      liftIO restoreTerminal
+      restoreTerminal
       case result of
         Quit -> pure ()
         Failed output -> do
-          outputStrLn output
+          putStrLn output
           loop restoreTerminal session
         Continue next output -> do
-          unless (null output) (outputStrLn output)
+          unless (null output) (putStrLn output)
           loop restoreTerminal next
