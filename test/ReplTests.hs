@@ -455,6 +455,14 @@ tests =
   , ("show: no instance for a function", final ["show (x -> x)"] == "no instance: Show (a -> a)")
   , (":elab: an instance's dictionary", ("(%instance Show List) = %d" `isInfixOf`) (final [":elab instance Show a => Show [a] where show = xs -> \"n\""]))
   , (":elab: a superclass field", ("%Eq = " `isInfixOf`) (final [hashClass, ":elab " <> hashInt]))
+  , ("default: a method left out takes it", session ["class Pretty a where do pretty : a -> String; prettyAll : [a] -> String; prettyAll = xs -> \"many\" end", "instance Pretty Int where pretty = n -> \"#\"", "prettyAll [1]"] == ["class Pretty", "instance Pretty Int", "\"many\""])
+  , ("default: an instance may still define it", final ["class Pretty a where do pretty : a -> String; prettyAll : [a] -> String; prettyAll = xs -> \"many\" end", "instance Pretty Bool where do pretty = b -> \"b\"; prettyAll = xs -> \"bools\" end", "prettyAll [true]"] == "\"bools\"")
+  , ("default: it uses the instance's other methods", final ["class Size a where do size : a -> Int; big : a -> Bool; big = x -> size x > 10 end", "instance Size Int where size = n -> n", "{a = big 20, b = big 2}"] == "{a = true, b = false}")
+  , ("default: checked against its signature", final ["class Q a where do q : a -> Int; q = x -> \"s\" end"] == "type mismatch: Int and String")
+  , ("default: needs a signature", final ["class R a where do r : a -> Int; s = x -> 1 end"] == "s has a default but no signature")
+  , ("default: Eq needs only eq", final ["instance Eq Bool where eq = a b -> true", "true != false"] == "false")
+  , ("default: Ord needs only lt", final ["instance Ord Bool where lt = a b -> false", "{m = min true false, l = true <= false, g = true > false}"] == "{m = true, l = true, g = false}")
+  , ("default: the prelude's are its own", final ["not = x -> x", "instance Eq Bool where eq = a b -> true", "true != false"] == "false")
   , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
   ]
  where

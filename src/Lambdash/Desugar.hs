@@ -21,7 +21,6 @@ module Lambdash.Desugar
 
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.List (intercalate)
-import Lambdash.Infer (Expr (..))
 import Lambdash.Syntax
 
 -- | The name by which sugar refers to a builtin.

@@ -64,7 +64,6 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Void (Void)
 import Lambdash.Desugar (desugar, stripLocations)
-import Lambdash.Infer (Expr)
 import Lambdash.Syntax
 import Text.Megaparsec
 import Text.Megaparsec.Char (alphaNumChar, char, hspace, letterChar, lowerChar, space1, string, upperChar)
@@ -617,7 +616,8 @@ declaration = classDeclaration <|> instanceDeclaration
     cls <- lexeme upperName
     var <- lexeme lowerName
     lexeme (keyword "where")
-    DeclClass supers cls var <$> members signature
+    items <- classMembers
+    pure (DeclClass supers cls var [x | Left x <- items] [x | Right x <- items])
   instanceDeclaration = do
     start "instance"
     requires <- context
@@ -631,6 +631,17 @@ declaration = classDeclaration <|> instanceDeclaration
   name = lexeme identifier <|> lexeme parenOperator
   signature = (,) <$> try (name <* symbol ":" <* notFollowedBy (char ':')) <*> typeExpr
   definition = (,) <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> local (\c -> c {inBlock = True}) expr
+  -- A signature binds its method for the members after it, so that a
+  -- default can use it: size x is a method call, not a command.
+  classMembers =
+        (lexeme (keyword "do") *> local (\c -> c {inBlock = True}) classItems <* lexeme (keyword "end"))
+    <|> ((: []) <$> classItem)
+  classItem = Left <$> signature <|> Right <$> definition
+  classItems = do
+    item <- classItem
+    let names = either (pure . fst) (const []) item
+    more <- option [] (symbol ";" *> option [] (notFollowedBy (keyword "end") *> binding names classItems))
+    pure (item : more)
   members item =
         (lexeme (keyword "do") *> (item `sepEndBy1` symbol ";") <* lexeme (keyword "end"))
     <|> ((: []) <$> item)

@@ -38,7 +38,7 @@ data Declared = Declared
 -- | Check a declaration against what the session has.
 declare :: ClassEnv -> Env -> Scope -> Declaration -> Either InferError Declared
 declare classes env values declaration = case declaration of
-  DeclClass supers cls var signatures -> do
+  DeclClass supers cls var signatures defaults -> do
     when (cls `elem` preludeNames) (bad (cls <> " is a prelude class"))
     let (classVariable, methods) = evalState (convert var signatures) (Map.empty, 0)
     mapM_ (\(SPred sup ty) -> do
@@ -54,10 +54,27 @@ declare classes env values declaration = case declaration of
     case [m | (i, (m, _)) <- zip [0 :: Int ..] methods, m `elem` map fst (take i methods)] of
       m : _ -> bad (m <> " is declared twice")
       [] -> pure ()
-    let info = ClassInfo cls (nub [sup | SPred sup _ <- supers]) classVariable methods
+    case [m | (m, _) <- defaults, m `notElem` map fst methods] of
+      m : _ -> bad (m <> " has a default but no signature")
+      [] -> pure ()
+    case [m | (i, (m, _)) <- zip [0 :: Int ..] defaults, m `elem` map fst (take i defaults)] of
+      m : _ -> bad (m <> " has two defaults")
+      [] -> pure ()
+    let core = [(m, desugar e) | (m, e) <- defaults]
+        info = ClassInfo cls (nub [sup | SPred sup _ <- supers]) classVariable methods core
         schemes = [(m, methodScheme cls classVariable ty) | (m, ty) <- methods]
+        classes' = addClass info classes
+        withMethods = foldr (uncurry Map.insert) env schemes
+    -- Each default must have its method's type. An instance checks it again
+    -- at its own type, as if it had written it.
+    mapM_ (\(m, e) -> case lookup m methods of
+      Just ty -> do
+        let check = Forall (Set.toList (Set.insert classVariable (ftv ty))) (TClass [IsIn cls (TVar classVariable)] (TFun ty ty))
+        _ <- inferWith classes' (Map.insert "%check" check withMethods) (EApp (EVar "%check") e)
+        pure ()
+      Nothing -> pure ()) core
     pure Declared
-      { declaredClasses = addClass info classes
+      { declaredClasses = classes'
       , declaredTypes = schemes
       , declaredValues = [(m, methodValue m) | (m, _) <- methods]
       , declaredMessage = "class " <> cls
@@ -85,7 +102,9 @@ declare classes env values declaration = case declaration of
         inst = Instance cls key needs
         dictionaryName = instanceName cls key
         withInstance = addInstance inst classes
-        code = [(methodField m, desugar e) | (m, e) <- definitions]
+        written = [(methodField m, desugar e) | (m, e) <- definitions]
+        -- A method left out takes the class's default, if it has one.
+        code = written <> maybe [] (\info -> [d | d@(m, _) <- classDefaults info, m `notElem` map fst written]) (lookupClass classes cls)
     elaborated <- elaborateInstance withInstance env inst headType code
     let value = eval (Map.Lazy.insert dictionaryName value values) elaborated
     pure Declared

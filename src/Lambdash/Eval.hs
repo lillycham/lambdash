@@ -504,6 +504,11 @@ methods =
   , method "show" "Show" (\a -> TFun a TString)
   -- What the prompt shows a value through, whatever the session binds.
   , alias "%show" "Show" "show" (\a -> TFun a TString)
+  -- For the prelude's default methods, which no session can rebind.
+  , alias "%eq" "Eq" "eq" (\a -> TFun a (TFun a TBool))
+  , alias "%lt" "Ord" "lt" (\a -> TFun a (TFun a TBool))
+  , ("%if", Forall [Var 0] (TFun TBool (TFun (TVar (Var 0)) (TFun (TVar (Var 0)) (TVar (Var 0))))),
+      VBuiltin "%if" (\c -> VBuiltin "%if" (\t -> VBuiltin "%if" (\f -> if truth c then t else f))))
   , (fromIntName, Forall [Var 0] (TClass [IsIn "Num" (TVar (Var 0))] (TFun TInt (TVar (Var 0)))), VBuiltin fromIntName (select "fromInt"))
   -- Lazy in the second argument, as the evaluator is.
   , ("&&", mono (TFun TBool (TFun TBool TBool)), fn2 "&&" (\a b -> if truth a then b else VBool False))
@@ -675,4 +680,4 @@ structuralLt a b = case (a, b) of
 -- spell, so that rebinding @use@ or @pkg@ does not change what @use REF@
 -- means. See "Lambdash.Desugar".
 aliases :: [(Name, Scheme, Value)]
-aliases = [('%' : n, t, x) | (n, t, x) <- builtins, n `elem` ["pkg", "use", "useLocal"]]
+aliases = [('%' : n, t, x) | (n, t, x) <- builtins, n `elem` ["pkg", "use", "useLocal", "not"]]

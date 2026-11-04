@@ -11,6 +11,7 @@ module Lambdash.Syntax
   , Surface (..)
   , Node (..)
   , Statement (..)
+  , Expr (..)
   , SType (..)
   , SPred (..)
   , Declaration (..)
@@ -118,9 +119,41 @@ data SPred = SPred Name SType
 -- | A line that declares a class or an instance.
 data Declaration
   = -- | @class (Eq a) => Hashable a where hash : a -> Int@: the superclasses,
-    -- the class, its unknown, and its methods' types.
-    DeclClass [SPred] Name Name [(Name, SType)]
+    -- the class, its unknown, its methods' types, and default definitions.
+    DeclClass [SPred] Name Name [(Name, SType)] [(Name, Surface)]
   | -- | @instance Show a => Show [a] where show = ...@: the context, the
     -- class, the head, and the methods.
     DeclInstance [SPred] Name SType [(Name, Surface)]
+  deriving (Eq, Show)
+
+-- | Core: what desugaring leaves, for the checker and the evaluator.
+data Expr
+  = EVar Name
+  | ELit Lit
+  | ELam Name Expr
+  | EApp Expr Expr
+  | EPipe Expr Expr
+  | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
+    -- in @bound@.
+    ELet Name Expr Expr
+  | -- | @git status@: a head that nothing binds, and its arguments.
+    ECmd Name [Arg]
+  | -- | @{name = 1, ok = true}@.
+    ERecord [(Label, Expr)]
+  | EList [Expr]
+  | -- | @r.name@.
+    ESelect Expr Label
+  | -- | Run the first, name its result, then the computation that follows.
+    -- A block desugars to these: @x <- e; rest@ is @EBind x e rest@.
+    EBind Name Expr Expr
+  | -- | Run a computation or a stream, as a block statement or at the prompt
+    -- does: a stream reads the terminal and gives its return value.
+    ERun Expr
+  | -- | Where an expression came from. It means the expression.
+    ELoc Span Expr
+  | -- | @with overlay do ... end@: run the block with one more environment
+    -- layer, for its dynamic extent only.
+    EWith Expr Expr
+  | -- | @e &@: start @e@ as a background job, and give its handle.
+    EBg Expr
   deriving (Eq, Show)

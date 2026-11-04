@@ -172,7 +172,7 @@ line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":
               | fixity | name "=" expr | name "<-" expr | expr ] EOF ;
 fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
 
-declaration = "class" [ context "=>" ] UPPER LOWER "where" members(signature)
+declaration = "class" [ context "=>" ] UPPER LOWER "where" members(signature | definition)
             | "instance" [ context "=>" ] UPPER tatom "where" members(definition) ;
 context     = pred | "(" pred { "," pred } ")" ;
 pred        = UPPER tatom ;

@@ -48,40 +48,10 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Lambdash.Classes
-import Lambdash.Syntax (Arg (..), Lit (..), Name, Span (..))
+import Lambdash.Syntax (Arg (..), Expr (..), Lit (..), Name, Span (..))
 import Lambdash.Unify
 import qualified Data.Set as Set
 
-data Expr
-  = EVar Name
-  | ELit Lit
-  | ELam Name Expr
-  | EApp Expr Expr
-  | EPipe Expr Expr
-  | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
-    -- in @bound@.
-    ELet Name Expr Expr
-  | -- | @git status@: a head that nothing binds, and its arguments.
-    ECmd Name [Arg]
-  | -- | @{name = 1, ok = true}@.
-    ERecord [(Label, Expr)]
-  | EList [Expr]
-  | -- | @r.name@.
-    ESelect Expr Label
-  | -- | Run the first, name its result, then the computation that follows.
-    -- A block desugars to these: @x <- e; rest@ is @EBind x e rest@.
-    EBind Name Expr Expr
-  | -- | Run a computation or a stream, as a block statement or at the prompt
-    -- does: a stream reads the terminal and gives its return value.
-    ERun Expr
-  | -- | Where an expression came from. It means the expression.
-    ELoc Span Expr
-  | -- | @with overlay do ... end@: run the block with one more environment
-    -- layer, for its dynamic extent only.
-    EWith Expr Expr
-  | -- | @e &@: start @e@ as a background job, and give its handle.
-    EBg Expr
-  deriving (Eq, Show)
 
 -- | A type that holds for every choice of the listed unknowns.
 -- @Forall [a] (a -> a)@ is @forall a. a -> a@. The other unknowns are free.
@@ -566,7 +536,7 @@ reduceContext env preds = go [] [] preds
 superPath :: ClassEnv -> String -> String -> Expr -> Expr
 superPath env from to dictionary
   | from == to = dictionary
-  | otherwise = case [s | ClassInfo name supers _ _ <- envClasses env, name == from, s <- supers, s == to || to `elem` superclassesOf env s] of
+  | otherwise = case [s | ClassInfo {className = name, classSupers = supers} <- envClasses env, name == from, s <- supers, s == to || to `elem` superclassesOf env s] of
       next : _ -> superPath env next to (ESelect dictionary (superField next))
       [] -> dictionary
 

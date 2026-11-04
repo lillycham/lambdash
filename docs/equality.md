@@ -84,7 +84,8 @@ Confirmed with slice 3:
    Overlap cannot arise: a head is a constructor on distinct unknowns.
 4. **Replaceable built-in instances**: any prelude instance can be
    replaced. Records stay structural, since no head can name a record.
-5. **Default methods**: not yet. Every instance defines every method.
+5. ~~Default methods~~: done. A class block defines them after their
+   signatures; the prelude's `Eq` and `Ord` have them.
 6. **Effect rows in method types**: `Comp`, `Job` and `Stream` need a row
    syntax first.
 

@@ -166,9 +166,9 @@ tests =
   , ("type: lists, unit and parentheses", run typeExpr "[a] -> (a -> ()) -> String" == Just (STFun (STList (STVar "a")) (STFun (STFun (STVar "a") (STCon "()")) (STCon "String"))))
   , ("type: records, open and closed", run typeExpr "{name : String | r}" == Just (STRecord [("name", STCon "String")] (Just "r")) && run typeExpr "{}" == Just (STRecord [] Nothing))
   , ("type: applied constructors", run typeExpr "Stage a [a] -> Comp Int" == Just (STFun (STApp "Stage" [STVar "a", STList (STVar "a")]) (STApp "Comp" [STCon "Int"])))
-  , ("decl: a class", run declaration "class Pretty a where pretty : a -> String" == Just (DeclClass [] "Pretty" "a" [("pretty", STFun (STVar "a") (STCon "String"))]))
+  , ("decl: a class", run declaration "class Pretty a where pretty : a -> String" == Just (DeclClass [] "Pretty" "a" [("pretty", STFun (STVar "a") (STCon "String"))] []))
   , ("decl: superclasses and a block", run declaration "class (Eq a, Show a) => H a where do h : a -> Int; (<+>) : a -> a -> a end"
-      == Just (DeclClass [SPred "Eq" (STVar "a"), SPred "Show" (STVar "a")] "H" "a" [("h", STFun (STVar "a") (STCon "Int")), ("<+>", STFun (STVar "a") (STFun (STVar "a") (STVar "a")))]))
+      == Just (DeclClass [SPred "Eq" (STVar "a"), SPred "Show" (STVar "a")] "H" "a" [("h", STFun (STVar "a") (STCon "Int")), ("<+>", STFun (STVar "a") (STFun (STVar "a") (STVar "a")))] []))
   , ("decl: an instance with a context", fmap strip (run declaration "instance Show a => Show [a] where show = xs -> \"l\"")
       == Just (DeclInstance' [SPred "Show" (STVar "a")] "Show" (STList (STVar "a")) [("show", ELam "xs" (ELit (LStr "l")))]))
   , ("decl: methods in a block", fmap strip (run declaration "instance Shape Int where do area = n -> n; name = n -> \"sq\"; end")
@@ -178,9 +178,9 @@ tests =
   ]
  where
   strip (DeclInstance ctx cls ty defs) = DeclInstance' ctx cls ty [(m, stripLocations (desugar e)) | (m, e) <- defs]
-  strip (DeclClass a b c d) = DeclClass' a b c d
+  strip (DeclClass a b c d e) = DeclClass' a b c d [(m, stripLocations (desugar x)) | (m, x) <- e]
 
-data Strip = DeclInstance' [SPred] Name SType [(Name, Expr)] | DeclClass' [SPred] Name Name [(Name, SType)]
+data Strip = DeclInstance' [SPred] Name SType [(Name, Expr)] | DeclClass' [SPred] Name Name [(Name, SType)] [(Name, Expr)]
   deriving (Eq, Show)
 
 op :: Name -> Expr -> Expr -> Expr

@@ -25,6 +25,7 @@ module Lambdash.Classes
   ) where
 
 import Data.List (find, nub)
+import Lambdash.Syntax (Expr (..))
 import Lambdash.Unify
 
 data ClassInfo = ClassInfo
@@ -37,6 +38,9 @@ data ClassInfo = ClassInfo
   , -- | Each method's field in the dictionary, and its type. Other unknowns
     -- in a method's type are its own, chosen at each use.
     classMethods :: [(String, Ty)]
+  , -- | Default definitions, in core: an instance that leaves a method out
+    -- gets its default, checked as if the instance had written it.
+    classDefaults :: [(String, Expr)]
   }
 
 -- | An instance for a type constructor. Each argument of the constructor
@@ -60,17 +64,27 @@ prelude = ClassEnv preludeClasses preludeInstances
 preludeClasses :: [ClassInfo]
 preludeClasses =
   [ ClassInfo "Eq" [] a [("eq", a2 TBool), ("ne", a2 TBool)]
-  , ClassInfo "Ord" ["Eq"] a [(m, a2 TBool) | m <- ["lt", "le", "gt", "ge"]] `withMethods` [(m, a2 ta) | m <- ["min", "max"]]
-  , ClassInfo "Num" [] a ([(m, a2 ta) | m <- ["+", "-", "*"]] <> [("negate", TFun ta ta), ("fromInt", TFun TInt ta)])
-  , ClassInfo "Integral" ["Num"] a [(m, a2 ta) | m <- ["/", "%"]]
-  , ClassInfo "Semigroup" [] a [("<>", a2 ta)]
-  , ClassInfo "Show" [] a [("show", TFun ta TString)]
+      [("ne", binary (call "%not" [call "%eq" [x, y]]))]
+  , ClassInfo "Ord" ["Eq"] a ([(m, a2 TBool) | m <- ["lt", "le", "gt", "ge"]] <> [(m, a2 ta) | m <- ["min", "max"]])
+      [ ("le", binary (call "%not" [call "%lt" [y, x]]))
+      , ("gt", binary (call "%lt" [y, x]))
+      , ("ge", binary (call "%not" [call "%lt" [x, y]]))
+      , ("min", binary (call "%if" [call "%lt" [y, x], y, x]))
+      , ("max", binary (call "%if" [call "%lt" [x, y], y, x])) ]
+  , ClassInfo "Num" [] a ([(m, a2 ta) | m <- ["+", "-", "*"]] <> [("negate", TFun ta ta), ("fromInt", TFun TInt ta)]) []
+  , ClassInfo "Integral" ["Num"] a [(m, a2 ta) | m <- ["/", "%"]] []
+  , ClassInfo "Semigroup" [] a [("<>", a2 ta)] []
+  , ClassInfo "Show" [] a [("show", TFun ta TString)] []
   ]
  where
   a = Var 0
   ta = TVar a
   a2 result = TFun ta (TFun ta result)
-  withMethods info more = info {classMethods = classMethods info <> more}
+  -- The prelude's defaults use names that no session can rebind.
+  x = EVar "%x"
+  y = EVar "%y"
+  binary = ELam "%x" . ELam "%y"
+  call f = foldl EApp (EVar f)
 
 preludeInstances :: [Instance]
 preludeInstances =
@@ -101,7 +115,7 @@ lookupInstance env cls key = find (\i -> instClass i == cls && instHead i == key
 
 -- | Every superclass, transitively.
 superclassesOf :: ClassEnv -> String -> [String]
-superclassesOf env cls = nub (concat [supers <> concatMap (superclassesOf env) supers | ClassInfo name supers _ _ <- envClasses env, name == cls])
+superclassesOf env cls = nub (concat [supers <> concatMap (superclassesOf env) supers | ClassInfo {className = name, classSupers = supers} <- envClasses env, name == cls])
 
 -- | Declare a class. A class declared again replaces the old one, and its
 -- instances go with it: they have the old methods.

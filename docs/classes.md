@@ -89,7 +89,23 @@ Several methods go in a block, which may span lines:
   are `Eq` and `Show` structurally.
 - **A context** constrains only the head's unknowns, so resolution always
   ends.
-- **Every method** must be defined; there are no defaults yet.
+- **Defaults**: a class block may define a method after its signature. An
+  instance that leaves the method out gets the default, checked at the
+  instance's type as if it had written it, so a default can use the
+  instance's other methods:
+
+  ```text
+  λ> class Size a where do size : a -> Int; big : a -> Bool; big = x -> size x > 10 end
+  λ> instance Size Int where size = n -> n
+  λ> big 20
+  true
+  ```
+
+  Every method without a default must be defined. A default sees the names
+  in scope where the instance is declared.
+- **Prelude defaults**: `Eq` needs only `eq`, and `Ord` only `lt`: `ne`,
+  `le`, `gt`, `ge`, `min` and `max` follow. They use names that no session
+  can rebind.
 - **Method types** use the type syntax of [the grammar](grammar.md). A
   method's other unknowns stay as general as the class says, so an
   instance cannot fix them. `Comp`, `Job` and `Stream` cannot appear yet,
