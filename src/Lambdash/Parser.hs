@@ -502,13 +502,15 @@ pathArg = do
   pure arg
 
 -- | @x y -> body@ means @\\x -> \\y -> body@. The body goes as far right as it
--- can.
+-- can. A parameter @_@ binds nothing: desugaring gives it a fresh name.
 --
 -- Note: @f x@ starts like a lambda until the arrow fails to arrive. Look at 'try'.
 lambda :: Parser Surface
 lambda = spanned $ do
-  names <- try (some (lexeme identifier) <* symbol "->")
+  names <- try (some (lexeme parameter) <* symbol "->")
   SLam names <$> binding names expr
+ where
+  parameter = identifier <|> ("_" <$ try (char '_' <* notFollowedBy identifierChar))
 
 -- | @if c then a else b@. The @else@ branch goes as far right as it can,
 -- like a lambda's body.

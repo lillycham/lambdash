@@ -86,6 +86,7 @@ tests =
   , ("application: select as an argument", core application "f r.a" == Just (EApp (v "f") (ESelect (v "r") "a")))
   , ("lambda: one parameter", core lambda "x -> x" == Just (ELam "x" (v "x")))
   , ("lambda: two parameters", core lambda "x y -> x" == Just (ELam "x" (ELam "y" (v "x"))))
+  , ("lambda: _ binds nothing", core lambda "x _ _ -> x" == Just (ELam "x" (ELam "%1" (ELam "%2" (v "x")))) && core lambda "_ -> 1" == Just (ELam "%1" (int 1)))
   , ("lambda: the body goes right", core lambda "x -> f x y" == Just (ELam "x" (EApp (EApp (v "f") (v "x")) (v "y"))))
   , ("lambda: nests", core lambda "x -> y -> x" == Just (ELam "x" (ELam "y" (v "x"))))
   , ("letIn: simple", core letIn "let x = 1 in x" == Just (ELet "x" (int 1) (v "x")))

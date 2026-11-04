@@ -591,6 +591,7 @@ tests =
   , ("case: only the chosen arm runs", prints [maybeData, "case Just 2 of Just n -> print n; Nothing -> print 0 end"] == ("2\n", ["data Maybe a", ""]))
   , ("case: spans lines", scripted (maybeData <> "\nf = m -> case m of\n  Just x -> x;\n  Nothing -> 0\nend\n") ["f (Just 7)"] == ([], ["7"]))
   , ("case: :core", final [":core case x of Just (Cons y _) -> y; _ -> 0 end"] == "case x of Just (Cons y _) -> y; _ -> 0 end")
+  , ("lambda: _ as a parameter", session ["k = x _ -> x", "k 1 \"a\"", "(_ -> 2) ()"] == ["k : a -> b -> a", "1", "2"])
   , ("case: record patterns are open", session ["size = r -> case r of {size = 0} -> \"empty\"; {size} -> show size end", "size {name = \"a\", size = 0}", "size {size = 3}"]
       == ["size : {size : Int | a} -> String", "\"empty\"", "\"3\""])
   , ("case: arms name different fields", session ["area = s -> case s of {kind = \"sq\", side} -> side * side; {w, h} -> w * h end", "area {kind = \"rect\", side = 0, w = 2, h = 5, extra = true}"]

@@ -42,7 +42,10 @@ go :: Surface -> State Int Expr
 go (Surface location node) = ELoc location <$> case node of
   SVar name -> pure (EVar name)
   SLit lit -> pure (ELit lit)
-  SLam names body -> (\b -> foldr ELam b names) <$> go body
+  SLam names body -> do
+    -- A parameter _ binds nothing, so it gets a name that nothing can use.
+    names' <- traverse (\name -> if name == "_" then fresh else pure name) names
+    (\b -> foldr ELam b names') <$> go body
   SApp f x -> EApp <$> go f <*> go x
   SPipe a b -> EPipe <$> go a <*> go b
   SLet name bound body -> ELet name <$> go bound <*> go body

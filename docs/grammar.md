@@ -19,7 +19,8 @@ let         = "let" name "=" expr "in" expr
             | "let" "rec" recgroup "in" expr ;
 recgroup    = name "=" lambda { "and" name "=" lambda } ;   (* a lambda, perhaps annotated *)
 if          = "if" expr "then" expr "else" expr ;
-lambda      = IDENT { IDENT } "->" expr ;
+lambda      = param { param } "->" expr ;
+param       = IDENT | "_" ;
 pipeline    = stage { "|" stage } [ "&" ] ;
 stage       = operand { OP operand } ;            (* resolved by fixity *)
 operand     = lambda | external | application ;
