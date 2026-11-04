@@ -35,6 +35,46 @@ nix develop -c test/run.sh
 fresh state directory. `--no-nix` skips the suite that builds a flake.
 `LAMBDASH_TRACE_TTY=1` traces terminal and job-control calls to stderr.
 
+## An evaluator written in λsh
+
+[`examples/metacircular.lsh`](examples/metacircular.lsh) evaluates a small,
+strict, lexically scoped subset of λsh. Run it from the repository root:
+
+```bash
+nix develop -c cabal run exe:lambdash -- --no-init < examples/metacircular.lsh
+```
+
+Guest programs are `Expr` values, not source strings. The file defines
+the evaluator and runs examples, including recursive factorial, lexical
+capture, higher-order functions, and guest errors.
+
+| Guest syntax | AST |
+| --- | --- |
+| integers, booleans | `IntLit n`, `BoolLit b` |
+| variables | `Var "x"` |
+| `x -> body` | `Lam "x" body` |
+| `f x` | `App f x` |
+| `let x = value in body` | `Let "x" value body` |
+| `let rec f = x -> rhs in body` | `LetRec "f" "x" rhs body` |
+| `if c then a else b` | `If c a b` |
+| integer `+`, `-`, `*`, `==` | `Bin Plus a b`, `Bin Minus a b`, `Bin Times a b`, `Bin IntEq a b` |
+
+`eval : (String -> Result Value) -> Expr -> Result Value` is the core.
+An environment is a lookup function; a closure stores its parameter,
+body AST, and definition environment. `LetRec` ties a recursive lookup
+function with the host's `let rec`. `run` evaluates in the empty environment
+and renders the result.
+
+Applications evaluate the function, then the argument, then the body.
+Let bindings and binary operands are strict too; `If` evaluates only its
+chosen branch. Unbound variables and invalid operand types return `Err`
+rather than fail in the host.
+
+The host checks the evaluator's types, but guest type errors are detected
+at runtime. There is no guest parser, type inference, data declaration,
+pattern matching, mutual recursion group, or shell effect support.
+Like the host, the evaluator can diverge.
+
 ## Documentation
 
 | Topic | |

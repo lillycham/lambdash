@@ -1,0 +1,73 @@
+-- A strict, lexically scoped λsh subset, evaluated in λsh itself.
+-- Feed this file to lambdash --no-init; guest programs are AST values.
+
+data Result a = Ok a | Err String
+data Op = Plus | Minus | Times | IntEq
+data Expr = IntLit Int | BoolLit Bool | Var String | Lam String Expr | App Expr Expr | Let String Expr Expr | LetRec String String Expr Expr | If Expr Expr Expr | Bin Op Expr Expr
+data Value = VInt Int | VBool Bool | VClosure String Expr (String -> Result Value)
+
+-- An environment is a lookup function. Extending it captures the old lookup;
+-- a closure saves the environment at definition time, not at call time.
+emptyEnv : String -> Result Value
+emptyEnv = name -> Err ("unbound variable: " <> name)
+extend = env name value -> key -> if key == name then Ok value else env key
+andThenResult = result next -> case result of
+  Err message -> Err message;
+  Ok value -> next value
+end
+
+binary = op left right -> case left of
+  VInt a -> case right of
+    VInt b -> case op of
+      Plus -> Ok (VInt (a + b));
+      Minus -> Ok (VInt (a - b));
+      Times -> Ok (VInt (a * b));
+      IntEq -> Ok (VBool (a == b))
+    end;
+    _ -> Err "integer operands required"
+  end;
+  _ -> Err "integer operands required"
+end
+
+eval : (String -> Result Value) -> Expr -> Result Value
+let rec eval = env expression -> case expression of
+  IntLit n -> Ok (VInt n);
+  BoolLit b -> Ok (VBool b);
+  Var name -> env name;
+  Lam parameter body -> Ok (VClosure parameter body env);
+  App function argument -> andThenResult (eval env function) (callee -> andThenResult (eval env argument) (value -> case callee of
+    VClosure parameter body captured -> eval (extend captured parameter value) body;
+    _ -> Err "application requires a function"
+  end));
+  Let name bound body -> andThenResult (eval env bound) (value -> eval (extend env name value) body);
+  LetRec name parameter functionBody body -> let rec scope = key -> if key == name then Ok (VClosure parameter functionBody scope) else env key in eval scope body;
+  If condition yes no -> andThenResult (eval env condition) (value -> case value of
+    VBool b -> if b then eval env yes else eval env no;
+    _ -> Err "if requires a boolean"
+  end);
+  Bin op left right -> andThenResult (eval env left) (a -> andThenResult (eval env right) (b -> binary op a b))
+end
+
+renderValue = value -> case value of
+  VInt n -> show n;
+  VBool b -> show b;
+  VClosure _ _ _ -> "<closure>"
+end
+run = expression -> case eval emptyEnv expression of
+  Ok value -> renderValue value;
+  Err message -> "error: " <> message
+end
+
+-- let rec fact n = if n == 0 then 1 else n * fact (n - 1) in fact 5
+factorial = LetRec "fact" "n" (If (Bin IntEq (Var "n") (IntLit 0)) (IntLit 1) (Bin Times (Var "n") (App (Var "fact") (Bin Minus (Var "n") (IntLit 1))))) (App (Var "fact") (IntLit 5))
+
+-- let x = 10 in let f = y -> x + y in let x = 100 in f 7
+-- Lexical scope gives 17, not 107.
+lexical = Let "x" (IntLit 10) (Let "f" (Lam "y" (Bin Plus (Var "x") (Var "y"))) (Let "x" (IntLit 100) (App (Var "f") (IntLit 7))))
+
+-- (x -> y -> x + y) 20 22: the returned closure retains x.
+higherOrder = App (App (Lam "x" (Lam "y" (Bin Plus (Var "x") (Var "y")))) (IntLit 20)) (IntLit 22)
+
+{factorial = run factorial, lexical = run lexical, higherOrder = run higherOrder}
+{branch = run (If (BoolLit true) (IntLit 42) (Var "unreachable")), boolean = run (Bin IntEq (IntLit 1) (IntLit 2))}
+{unbound = run (Var "missing"), badCall = run (App (IntLit 1) (IntLit 2)), badCondition = run (If (IntLit 0) (IntLit 1) (IntLit 2)), badOperands = run (Bin Plus (BoolLit true) (IntLit 1))}

@@ -608,6 +608,44 @@ tests =
   withLine = "o = overlay \"o\" [set \"LSH_W\" \"inside\"]"
   devLine = "dev = overlay \"dev\" [set \"LSH_A\" \"1\", set \"LSH_B\" \"x\"]"
 
+-- | Exercise the guest evaluator, not a second implementation of its semantics.
+metacircularTests :: String -> [(String, Bool)]
+metacircularTests source =
+  [ guest "recursive factorial" "run factorial" (show "120")
+  , guest "lexical capture" "run lexical" (show "17")
+  , guest "returned closure" "run higherOrder" (show "42")
+  , guest "parameter shadows captured name"
+      "run (App (Let \"x\" (IntLit 1) (Lam \"x\" (Var \"x\"))) (IntLit 2))" (show "2")
+  , guest "let RHS uses outer scope"
+      "run (Let \"x\" (IntLit 1) (Let \"x\" (Bin Plus (Var \"x\") (IntLit 1)) (Var \"x\")))" (show "2")
+  , guest "recursive closure retains definition scope"
+      "run (Let \"x\" (IntLit 3) (App (LetRec \"f\" \"n\" (If (Bin IntEq (Var \"n\") (IntLit 0)) (Var \"x\") (App (Var \"f\") (Bin Minus (Var \"n\") (IntLit 1)))) (Let \"x\" (IntLit 99) (Var \"f\"))) (IntLit 2)))" (show "3")
+  , guest "parameter shadows recursive name"
+      "run (LetRec \"f\" \"f\" (Var \"f\") (App (Var \"f\") (IntLit 7)))" (show "7")
+  , guest "true branch only"
+      "run (If (BoolLit true) (IntLit 42) (Var \"missing\"))" (show "42")
+  , guest "false branch only"
+      "run (If (BoolLit false) (Var \"missing\") (BoolLit true))" (show "true")
+  , guest "integer equality"
+      "run (Bin IntEq (IntLit 2) (IntLit 2))" (show "true")
+  ] <> map rejects
+  [ ("unbound variable", "Var \"missing\"")
+  , ("non-function application", "App (IntLit 1) (IntLit 2)")
+  , ("non-boolean condition", "If (IntLit 0) (IntLit 1) (IntLit 2)")
+  , ("non-integer left operand", "Bin Plus (BoolLit true) (IntLit 1)")
+  , ("non-integer right operand", "Bin Times (IntLit 1) (BoolLit false)")
+  , ("strict application argument", "App (Lam \"x\" (IntLit 1)) (Var \"missing\")")
+  , ("strict let RHS", "Let \"x\" (Var \"missing\") (IntLit 1)")
+  , ("callee error propagation", "App (Var \"missing\") (IntLit 1)")
+  , ("condition error propagation", "If (Var \"missing\") (IntLit 1) (IntLit 2)")
+  , ("operand error propagation", "Bin Plus (IntLit 1) (Var \"missing\")")
+  ]
+ where
+  guest name expression expected =
+    ("metacircular: " <> name, snd (scripted source [expression]) == [expected])
+  rejects (name, expression) = guest name
+    ("case eval emptyEnv (" <> expression <> ") of Err _ -> true; Ok _ -> false end") "true"
+
 runTest :: (String, Bool) -> IO Bool
 runTest (name, result) = do
   outcome <- try (timeout 2000000 (evaluate result)) :: IO (Either SomeException (Maybe Bool))
@@ -621,6 +659,9 @@ runTest (name, result) = do
 
 main :: IO ()
 main = do
+  -- Read the example before moving to the isolated test directory.
+  evaluatorSource <- readFile "examples/metacircular.lsh"
+  _ <- evaluate (length evaluatorSource)
   -- Unit tests must not touch the terminal they were started from: with a
   -- tty on stdin, jobs hand the terminal over and back, which can stop the
   -- whole test run in an interactive shell. With stdin on /dev/null that code
@@ -641,6 +682,6 @@ main = do
   let work = scratch <> "/work"
   createDirectoryIfMissing True work
   setCurrentDirectory work
-  results <- mapM runTest tests
+  results <- mapM runTest (tests <> metacircularTests evaluatorSource)
   putStrLn (show (length (filter id results)) <> "/" <> show (length results) <> " passed")
   unless (and results) exitFailure

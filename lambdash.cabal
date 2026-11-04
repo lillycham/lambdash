@@ -3,6 +3,7 @@ name:            lambdash
 version:         0.1.0.0
 synopsis:        A functional shell with composable environments
 build-type:      Simple
+extra-source-files: examples/metacircular.lsh
 
 common shared
   default-language: GHC2021
