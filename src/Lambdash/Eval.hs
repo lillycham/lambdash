@@ -215,6 +215,11 @@ eval env expression =
     ESelect record label -> select label (eval env record)
     -- Lazy, so that an instance's dictionary can refer to itself.
     ELet name value body -> eval (Map.Lazy.insert name (eval env value) env) body
+    -- Each closure captures the scope that holds them all. Every bound
+    -- expression is a lambda, so building one forces nothing.
+    ELetRec bindings body ->
+      let env' = foldr (\(name, value) -> Map.Lazy.insert name (eval env' value)) env bindings
+      in eval env' body
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
     ELoc _ e -> eval env e
     EAnn e _ -> eval env e

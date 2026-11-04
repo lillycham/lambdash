@@ -2,6 +2,7 @@
 --
 -- > x y -> body                 lambda, one or more parameters
 -- > let x = 1 in x              let
+-- > let rec f = x -> ... in f   recursive let; and joins a group
 -- > f x y                       application, to the left
 -- > {name = 1, ok = true}       record
 -- > r.name                      select, with no space before the dot
@@ -39,6 +40,7 @@ module Lambdash.Parser
     application,
     lambda,
     letIn,
+    recGroup,
     doBlock,
     expr,
     parseExpr,
@@ -193,7 +195,9 @@ reservedNames =
     "with",
     "if",
     "then",
-    "else"
+    "else",
+    "rec",
+    "and"
   ]
 
 -- | A reserved word. @let@ matches in @let x@, but not in @letter@.
@@ -513,15 +517,52 @@ ifThenElse = spanned $ do
  where
   guarded = local (\c -> c {inCondition = True})
 
--- | @let x = bound in body@.
+-- | @let x = bound in body@, or @let rec f = x -> ... and g = y -> ... in
+-- body@.
 letIn :: Parser Surface
 letIn = spanned $ do
   lexeme (keyword "let")
-  name <- lexeme identifier <|> lexeme parenOperator
-  _ <- symbol "="
-  bound <- expr
-  lexeme (keyword "in")
-  SLet name bound <$> binding [name] expr
+  recursive <- optional (lexeme (keyword "rec"))
+  case recursive of
+    Just () -> do
+      group <- recGroup
+      lexeme (keyword "in")
+      SLetRec group <$> binding (map fst group) expr
+    Nothing -> do
+      name <- lexeme identifier <|> lexeme parenOperator
+      _ <- symbol "="
+      bound <- expr
+      lexeme (keyword "in")
+      SLet name bound <$> binding [name] expr
+
+-- | The bindings of @let rec@, after @rec@: @f = x -> ... and g = y -> ...@.
+-- Every name is bound in every bound expression, so @g x@ in @f@'s body is
+-- a call, not a command, even before @g@ is defined. The group is parsed
+-- twice for that: once to find the names, once with all of them bound.
+--
+-- Each bound expression must be a lambda, as in OCaml: evaluation is
+-- strict, so @let rec x = x + 1@ could only loop.
+recGroup :: Parser [(Name, Surface)]
+recGroup = do
+  -- The first pass treats every head as bound, as a name defined later
+  -- would be. It only finds the names; if it cannot, the second pass binds
+  -- each name for the bindings after it, and reports the error.
+  names <- option [] (try (lookAhead (local (\c -> c {contextBound = AllBound}) (map fst <$> bindings []))))
+  group <- binding names (bindings [])
+  case [name | (name, bound) <- group, not (isLambda bound)] of
+    name : _ -> fail ("let rec binds functions only: write " <> name <> " = x -> ...")
+    [] -> pure group
+ where
+  bindings known = do
+    name <- lexeme identifier <|> lexeme parenOperator
+    _ <- symbol "=" <* notFollowedBy (char '=')
+    bound <- binding (name : known) expr
+    more <- option [] (lexeme (keyword "and") *> bindings (name : known))
+    pure ((name, bound) : more)
+  isLambda (Surface _ node) = case node of
+    SLam _ _ -> True
+    SAnn inner _ -> isLambda inner
+    _ -> False
 
 -- | @do s; s; e end@. A statement is @x <- e@, @x = e@ or @e@, and the last
 -- one is an expression. A name that a statement binds is bound for the

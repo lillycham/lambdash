@@ -66,6 +66,9 @@ data Node
   | SApp Surface Surface
   | SPipe Surface Surface
   | SLet Name Surface Surface
+  | -- | @let rec f = x -> ... and g = y -> ... in body@. Every bound
+    -- expression is a lambda: the parser checks.
+    SLetRec [(Name, Surface)] Surface
   | SCmd Name [Arg]
   | SRecord [(Label, Surface)]
   | SList [Surface]
@@ -147,6 +150,10 @@ data Expr
   | -- | @let name = bound in body@. It is not recursive: @name@ is not in scope
     -- in @bound@.
     ELet Name Expr Expr
+  | -- | @let rec f = ... and g = ... in body@: every name is in scope in
+    -- every bound expression, and each of those is a lambda. Inside the
+    -- group a name has one type; the group generalises after.
+    ELetRec [(Name, Expr)] Expr
   | -- | @git status@: a head that nothing binds, and its arguments.
     ECmd Name [Arg]
   | -- | @{name = 1, ok = true}@.

@@ -46,6 +46,7 @@ go (Surface location node) = ELoc location <$> case node of
   SApp f x -> EApp <$> go f <*> go x
   SPipe a b -> EPipe <$> go a <*> go b
   SLet name bound body -> ELet name <$> go bound <*> go body
+  SLetRec bindings body -> ELetRec <$> traverse (\(name, bound) -> (,) name <$> go bound) bindings <*> go body
   SCmd name args -> pure (ECmd name args)
   SRecord fields -> ERecord <$> traverse (\(label, value) -> (,) label <$> go value) fields
   SList items -> EList <$> traverse go items
@@ -104,6 +105,7 @@ stripLocations expression = case expression of
   EApp f x -> EApp (stripLocations f) (stripLocations x)
   EPipe a b -> EPipe (stripLocations a) (stripLocations b)
   ELet name bound body -> ELet name (stripLocations bound) (stripLocations body)
+  ELetRec bindings body -> ELetRec [(name, stripLocations bound) | (name, bound) <- bindings] (stripLocations body)
   ERecord fields -> ERecord [(label, stripLocations value) | (label, value) <- fields]
   EList items -> EList (map stripLocations items)
   ESelect record label -> ESelect (stripLocations record) label
@@ -148,6 +150,8 @@ renderCore = render 0
       in parens (level > 2) (unwords (render 2 f : map (render 3) args))
     EPipe a b -> parens (level > 1) (render 1 a <> " | " <> render 2 b)
     ELet name bound body -> parens (level > 0) ("let " <> name <> " = " <> render 0 bound <> " in " <> render 0 body)
+    ELetRec bindings body -> parens (level > 0)
+      ("let rec " <> intercalate " and " [name <> " = " <> render 0 bound | (name, bound) <- bindings] <> " in " <> render 0 body)
     ECmd name args -> parens (level > 2) (unwords (name : map argument args))
     ERecord fields -> "{" <> intercalate ", " [label <> " = " <> render 0 value | (label, value) <- fields] <> "}"
     EList items -> "[" <> intercalate ", " (map (render 0) items) <> "]"

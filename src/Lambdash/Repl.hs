@@ -55,7 +55,7 @@ import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Syntax (Declaration, SPred (..), SType (..))
 import Data.Map.Lazy qualified as Map.Lazy
-import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, some, try)
+import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
 import System.Directory (XdgDirectory (..), doesFileExist, getCurrentDirectory, getXdgDirectory)
 
@@ -149,6 +149,9 @@ data Command
     ShowEnv (Maybe String)
   | -- | @x = expr@.
     Bind Name Expr
+  | -- | @let rec f = x -> ... and g = y -> ...@, without @in@: bind the
+    -- group's names for the lines after.
+    BindRec [(Name, Expr)]
   | -- | @x <- expr@.
     BindRun Name Expr
   | -- | @expr@.
@@ -195,6 +198,8 @@ command =
   <|> (Declare <$> declaration)
   <|> (uncurry . Signature <$> try (name <* symbol ":" <* notFollowedBy (char ':')) <*> qualifiedType)
   <|> (Bind <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> core)
+  -- With in, it is an expression, for Run.
+  <|> (BindRec . map (fmap desugar) <$> try (lexeme (keyword "let") *> lexeme (keyword "rec") *> recGroup <* lookAhead eof))
   <|> (BindRun <$> try (name <* symbol "<-") <*> core)
   <|> (Run <$> core)
  where
@@ -790,6 +795,21 @@ stepLine session input =
           used now = now {sessionSignatures = Map.delete name (sessionSignatures now)}
       in checked elaborated $ \(ty, code) ->
         pure (bound (used session) name ty (eval values code))
+    -- Each member is the group with that member as its body, so each gets
+    -- the group's generalisation, and a waiting signature as Bind does. The
+    -- group binds only if every member checks.
+    Right (BindRec group) ->
+      let members = [(name, ELetRec group (EVar name)) | (name, _) <- group]
+          elaborate (name, expression) = (,) name <$> maybe
+            (elaborateWith classes Generalising types expression)
+            (\sig -> elaborateSigned classes types sig expression)
+            (Map.lookup name (sessionSignatures session))
+      in checked (mapM elaborate members) $ \done ->
+        let add (now, shown) (name, (ty, code)) = case bound now {sessionSignatures = Map.delete name (sessionSignatures now)} name ty (eval values code) of
+              Continue next text -> (next, shown <> [text])
+              _ -> (now, shown)
+            (final, texts) = foldl add (session, []) done
+        in pure (Continue final (intercalate "\n" texts))
     Right (BindRun name expression) -> checked (elaborateRunWith classes types expression) $ \(actionTy, ty, code) ->
       preflight actionTy $ \runtime ->
         -- A job stopped here binds when fg finishes it, in the session then.
@@ -889,6 +909,7 @@ runScript path session = do
         fmap (shown <>) <$> go next rest
   quiet now chunk = case parseCommandWith (sessionFixities now) AllBound chunk of
     Right (Bind _ _) -> True
+    Right (BindRec _) -> True
     Right (BindRun _ _) -> True
     Right (Declare _) -> True
     Right (Signature {}) -> True

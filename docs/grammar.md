@@ -15,7 +15,9 @@ program     = expr EOF ;
 
 expr        = let | if | lambda | pipeline ;
 
-let         = "let" name "=" expr "in" expr ;
+let         = "let" name "=" expr "in" expr
+            | "let" "rec" recgroup "in" expr ;
+recgroup    = name "=" lambda { "and" name "=" lambda } ;   (* a lambda, perhaps annotated *)
 if          = "if" expr "then" expr "else" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
 pipeline    = stage { "|" stage } [ "&" ] ;
@@ -59,7 +61,7 @@ list        = "[" [ expr { "," expr } ] "]" ;
 ```ebnf
 IDENT       = LETTER { LETTER | DIGIT | "_" | "'" } - RESERVED ;
 RESERVED    = "let" | "in" | "true" | "false" | "do" | "end" | "with"
-            | "if" | "then" | "else" ;
+            | "if" | "then" | "else" | "rec" | "and" ;
 INT         = [ "+" | "-" ] DIGIT { DIGIT } ;
 STRING      = a Haskell string literal ;
 COMMENT     = "--" { any character except newline } ;
@@ -90,6 +92,16 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
   do either, so the preflight checks both. Only the chosen branch runs.
 - The body of a `lambda` or a `let` goes as far right as it can. A lambda
   argument needs parentheses: `f (x -> x)`.
+- `let rec f = x -> ... and g = y -> ... in e`: every name of the group is in
+  scope in every bound expression and in `e`, so `g x` in `f` is a call even
+  before `g` is defined. Each bound expression must be a lambda, as in OCaml:
+  evaluation is strict, so `let rec x = x + 1` could only loop. Inside the
+  group a name has one type; the group then generalises as one, as a Haskell
+  binding group does, and its members share a class context. A recursive
+  call at another type is a type error: there is no polymorphic recursion.
+  Recursion adds no effects: a `countdown` that prints and calls itself
+  has the row `{console}`, not `{console | e}`.
+  `let` without `rec` is still not recursive.
 - `application` goes to the left: `f x y` is `(f x) y`.
 - `pipeline` goes to the left: `a | b | c` is `(a | b) | c`.
 - Application has higher precedence than `|`: `a | f x` is `a | (f x)`.
@@ -178,7 +190,7 @@ in this rule only. A line may span several input lines while a `do` is open.
 line        = [ ":q" | ":help" [ NAME ] | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
               | ":elab" declaration | declaration
               | fixity | name ":" [ context "=>" ] type
-              | name "=" expr | name "<-" expr | expr ] EOF ;
+              | name "=" expr | "let" "rec" recgroup | name "<-" expr | expr ] EOF ;
 fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
 
 declaration = "class" [ context "=>" ] UPPER LOWER "where" members(signature | definition)
@@ -205,6 +217,8 @@ JOB         = [ "%" ] DIGIT { DIGIT } ;
   See [jobs](jobs.md) and [directories](directories.md).
 
 - `x = e` names a value and runs nothing.
+- `let rec f = x -> ...` (and `and`, without `in`) binds every name of the group.
+  A waiting signature decides a member's type, as for `x = e`.
 - `x <- e` runs a `Comp a` or `Stream i o r` and binds its return value (`a` or `r`).
 - `e` runs if its type is `Comp a` or `Stream i o r`. Otherwise it shows the value.
 

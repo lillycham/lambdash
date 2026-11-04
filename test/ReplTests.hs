@@ -545,6 +545,18 @@ tests =
   , ("if: recursion-free abs", final ["abs = n -> if n < 0 then negate n else n", "abs -5"] == "5")
   , ("if: :core", final [":core if a then b else c"] == "if a then b else c")
   , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
+  , ("let rec: binds at the prompt", session ["let rec fact = n -> if n == 0 then 1 else n * fact (n - 1)", "fact 10"] == ["fact : (Eq a, Num a) => a -> a", "3628800"])
+  , ("let rec: a group binds every member", session ["let rec even = n -> if n == 0 then true else odd (n - 1) and odd = n -> if n == 0 then false else even (n - 1)", "{e = even 10, o = odd 10}"]
+      == ["even : (Eq a, Num a) => a -> Bool\nodd : (Eq a, Num a) => a -> Bool", "{e = true, o = false}"])
+  , ("let rec: in an expression", final ["let rec sum = xs n -> if n == 0 then 0 else n + sum xs (n - 1) in sum [] 4"] == "10")
+  , ("let rec: binds functions only", ("let rec binds functions only" `isInfixOf`) (final ["let rec x = x + 1 in x"]))
+  , ("let rec: a failed member binds nothing", session ["let rec ok = n -> n and bad = n -> not 1", ":t ok"] == ["no instance: Num Bool", "Stream {exec ok} Bytes Bytes Status"])
+  , ("let rec: a signature decides the type", session ["count : Int -> Int", "let rec count = n -> if n == 0 then 0 else count (n - 1)", ":t count"] == ["", "count : Int -> Int", "Int -> Int"])
+  , ("let rec: recursion adds no effects", ty' ["let rec countdown = n -> if n == 0 then print \"go\" else do print n; countdown (n - 1) end"] "countdown" "(Eq a, Num a) => a -> Comp {console} ()")
+  , ("let rec: an effectful loop runs", prints ["let rec countdown = n -> if n == 0 then print \"go\" else do print n; countdown (n - 1) end", "countdown 2"] == ("2\n1\ngo\n", ["countdown : (Eq a, Num a) => a -> Comp ()", ""]))
+  , ("let rec: a parameter's row stays open", ty' ["let rec times = m n -> if n == 0 then pure () else do m; times m (n - 1) end"] "times" "(Eq a, Num a) => Comp { | b} c -> a -> Comp { | b} ()")
+  , ("let rec: :core", final [":core let rec f = x -> g x and g = y -> f y in f"] == "let rec f = x -> g x and g = y -> f y in f")
+  , ("let rec: quiet in the startup file", fst (scripted "let rec f = x -> x\n" []) == [])
   ]
  where
   builtinNames = words "print pure andThen collect map filter lines each pipefail length sort sortOn contains startsWith isEmpty stringLength byteLength encodeUtf8 encodeLine not add show eq ne lt le gt ge min max negate div mod cd ls overlay set unset prepend append prependWith appendWith use useLocal unuse environments pkg dev wait fg && || >>> <<< <> + - * / % == != < <= > >="

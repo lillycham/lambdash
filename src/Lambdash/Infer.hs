@@ -359,9 +359,50 @@ infer env (ELet x e1 e2) = do
       -- even when the local binding is unused. Independent quantified rows
       -- belong to the scheme and must not leak between its instances.
       escaped = connectedConstraints (ftvEnv env') (effectConstraints s1)
-  (sc, e1'', deferred) <- generaliseBinding env' s1 t1 e1'
+  -- Whether the binding is a function is a question about the source.
+  (sc, context, e1''', deferred) <- generaliseWith (not (isLambda e1)) env' s1 t1 e1'
+  let e1'' = foldr ELam e1''' context
   (s2, t2, e2') <- infer (Map.insert x sc env') e2
   pure (s2 `compose` s1 {effectConstraints = escaped, classPreds = deferred}, apply s2 t2, ELet x e1'' e2')
+
+-- Inside the group each name has one type, as a lambda parameter has: a
+-- recursive call at another type is a mismatch. The group then generalises
+-- as one, as Haskell's binding groups do, so its members share a class
+-- context: the checker generalises a record of the members, and each member
+-- is its field.
+infer env (ELetRec bindings body) = do
+  let names = map fst bindings
+  tys <- mapM (const fresh) bindings
+  let inner = foldr (\(name, t) -> Map.insert name (mono t)) env (zip names tys)
+  (raw, bounds') <- foldM (\(known, done) ((_, bound), t) -> do
+    (s, boundTy, bound') <- infer (applyEnv known inner) bound
+    let sofar = s `compose` known
+    u <- unifying (unify (apply sofar t) (apply sofar boundTy))
+    pure (u `compose` sofar, done <> [bound'])) (emptySubst, []) (zip bindings tys)
+  solved <- checkedConstraints raw
+  let s1 = closeRecursion env solved (map (apply solved) tys)
+  let env' = applyEnv s1 env
+      escaped = connectedConstraints (ftvEnv env') (effectConstraints s1)
+      groupTy = TRecord (foldr (\(name, t) row -> RExtend name t row) REmpty (zip names tys))
+      group = ELetRec (zip names bounds') (ERecord [(name, EVar name) | name <- names])
+  (Forall bound groupScheme, context, groupCode, deferred) <- generaliseWith False env' s1 groupTy group
+  let member name = Forall bound (field name groupScheme)
+      field name ty = case ty of
+        TClass ps t -> TClass ps (field name t)
+        TQualified cs t -> TQualified cs (field name t)
+        TRecord row -> maybe ty id (lookup name (fst (flatten row)))
+        _ -> ty
+      env'' = foldr (\name -> Map.insert name (member name)) env' names
+  (s2, t2, body') <- infer env'' body
+  code <- case (context, groupCode) of
+    -- Nothing to pass: the group as written.
+    ([], ELetRec _ _) -> pure (ELetRec (zip names bounds') body')
+    _ -> do
+      whole <- freshEvidence
+      let dictionaries = map EVar context
+          select name = foldr ELam (ESelect (foldl EApp (EVar whole) dictionaries) name) context
+      pure (ELet whole (foldr ELam groupCode context) (foldr (\name rest -> ELet name (select name) rest) body' names))
+  pure (s2 `compose` s1 {effectConstraints = escaped, classPreds = deferred}, apply s2 t2, code)
 
 infer env (ERecord fields) = do
   (sub, row, fields') <- inferFields env fields
@@ -467,6 +508,38 @@ infer env (EBg e) = do
   (s, eff, result, e') <- inferRun env e
   pure (s, TComp eff (TJob eff result), EBg e')
 
+-- | Close the effect tails that only recursion put in a group's types. A
+-- recursive call unifies a member's row with a row that holds it, as in
+-- r = {console} + r, and the solution leaves a tail that nothing else
+-- constrains: {console | a}. The least solution is the empty tail, and an
+-- open one would keep the preflight from knowing what the member runs. A
+-- tail that a parameter, a constraint or the environment mentions stays.
+closeRecursion :: Env -> Subst -> [Ty] -> Subst
+closeRecursion env s tys = closing `compose` s
+ where
+  occurrences = concatMap (polarities True) tys
+  negative = Set.fromList [v | (v, False) <- occurrences]
+  fixed = Set.unions (ftvEnv (applyEnv s env) : map constraintVars (effectConstraints s))
+  closable = Set.fromList [v | (v, True) <- occurrences] `Set.difference` Set.union negative fixed
+  closing = emptySubst {getEffectSubst = Map.fromSet (const noEffects) closable}
+  -- Each effect tail, and whether it is in a result's position (True) or
+  -- a parameter's (False).
+  polarities :: Bool -> Ty -> [(Var, Bool)]
+  polarities p ty = case ty of
+    TFun a b -> polarities (not p) a <> polarities p b
+    TComp eff t -> tails p eff <> polarities p t
+    TJob eff t -> tails p eff <> polarities p t
+    TStream eff i o r -> tails p eff <> polarities (not p) i <> polarities p o <> polarities p r
+    TList t -> polarities p t
+    TRecord row -> concatMap (polarities p . snd) (fst (flatten row))
+    TStage i o -> polarities (not p) i <> polarities p o
+    TCollector i o -> polarities (not p) i <> polarities p o
+    TQualified cs t -> [(v, q) | c <- cs, v <- Set.toList (constraintVars c), q <- [True, False]] <> polarities p t
+    TClass _ t -> polarities p t
+    TVar _ -> []
+    TCon _ -> []
+  tails p (EffRow _ vs) = [(v, p) | v <- Set.toList vs]
+
 -- | Unify a type with the one it must fit, where a closed row in the one
 -- expected is a ceiling: Comp {} () fits Comp {console} (), as doing less
 -- than allowed is fine. Rows are not values, so widening one needs no
@@ -524,8 +597,12 @@ freshEvidence = do
 -- | Generalise a @let@ binding over the unknowns the environment does not
 -- fix, and over the dictionaries its scheme needs. Predicates that mention
 -- an unknown of the environment stay pending, for an enclosing binding.
-generaliseBinding :: Env -> Subst -> Ty -> Expr -> Infer (Scheme, Expr, [(Name, Pred)])
-generaliseBinding env s1 t1 e1 = do
+--
+-- The first argument says whether the monomorphism restriction applies.
+-- The names of the dictionaries the scheme needs come apart from the code
+-- that uses them: the code is what goes under their lambdas.
+generaliseWith :: Bool -> Env -> Subst -> Ty -> Expr -> Infer (Scheme, [Name], Expr, [(Name, Pred)])
+generaliseWith restricted env s1 t1 e1 = do
   env' <- classEnv
   let Forall bound qualified = generalise env (qualify (effectConstraints s1) (apply s1 t1))
       preds = [(n, applyPred s1 p) | (n, p) <- classPreds s1]
@@ -534,7 +611,6 @@ generaliseBinding env s1 t1 e1 = do
       -- generalise over its class predicates. Their unknowns stay unknowns,
       -- for the rest of the program to choose or for defaulting: so
       -- let n = 1 in add n 2 is fine, and n is one value, not one per use.
-      restricted = not (isLambda e1)
       constrained = Set.unions (map (predVars . snd) residual)
       bound' = if restricted then filter (`Set.notMember` constrained) bound else bound
       generalised = Set.fromList bound'
@@ -544,7 +620,7 @@ generaliseBinding env s1 t1 e1 = do
       (context, reduced) = reduceContext env' mine
       scheme = Forall bound' (if null context then qualified else TClass (map snd context) qualified)
   -- Reduced evidence comes first: an instance's dictionary can refer to it.
-  pure (scheme, foldr ELam (wrapLets (reduced <> bindings) e1) (map fst context), deferred)
+  pure (scheme, map fst context, wrapLets (reduced <> bindings) e1, deferred)
 
 -- | Resolve predicates on constructed types from instances, and keep the
 -- ones on unknowns. A resolved predicate's evidence is the instance's
@@ -613,6 +689,12 @@ superPath env from to dictionary
 isLambda :: Expr -> Bool
 isLambda (ELoc _ e) = isLambda e
 isLambda (ELam _ _) = True
+isLambda (EAnn e _) = isLambda e
+-- let rec f = x -> ... in f is the function f: every member is a lambda.
+isLambda (ELetRec bindings body) = case body of
+  ELoc _ e -> isLambda (ELetRec bindings e)
+  EVar name -> name `elem` map fst bindings
+  _ -> False
 isLambda _ = False
 
 -- | A row's fields, in order, and its tail.
@@ -636,10 +718,11 @@ data Mode
 -- | Resolve the class predicates of a whole line. An unknown that a
 -- predicate mentions and the type does not is ambiguous, and defaults to
 -- @()@, as GHCi's extended defaulting does: @eq [] []@ is @true@.
-resolveClasses :: Mode -> Subst -> Ty -> Expr -> Infer (Ty, Expr)
-resolveClasses requested solved ty code = do
-  -- x = e without parameters is restricted: it defaults instead.
-  let mode = if requested == Generalising && not (isLambda code) then Defaulting else requested
+resolveClasses :: Mode -> Bool -> Subst -> Ty -> Expr -> Infer (Ty, Expr)
+resolveClasses requested function solved ty code = do
+  -- x = e without parameters is restricted: it defaults instead. Whether
+  -- e is a function is a question about the source, not the elaborated code.
+  let mode = if requested == Generalising && not function then Defaulting else requested
   let preds = [(n, applyPred solved p) | (n, p) <- classPreds solved]
   (bindings, residual) <- simplify preds
   env <- classEnv
@@ -694,6 +777,7 @@ commands (ELam _ body) = commands body
 commands (EApp f x) = commands f <> commands x
 commands (EPipe left right) = commands left <> commands right
 commands (ELet _ bound body) = commands bound <> commands body
+commands (ELetRec bindings body) = concatMap (commands . snd) bindings <> commands body
 commands (ERecord fields) = concatMap (commands . snd) fields
 commands (EList items) = concatMap commands items
 commands (ESelect record _) = commands record
@@ -724,7 +808,7 @@ elaborateWith classes mode env expr = runReaderT (evalStateT go (nextUnknown env
   go = do
     (s, t, code) <- infer env expr
     (solved, ty) <- finish env s t
-    resolveClasses mode solved ty code
+    resolveClasses mode (isLambda expr) solved ty code
 
 checkedConstraints :: Subst -> Infer Subst
 checkedConstraints = lift . lift . either (Left . Unify) Right . solveConstraints
@@ -771,7 +855,7 @@ elaborateRunWith classes env expr = runReaderT (evalStateT go (nextUnknown env))
     (solved, actionTy) <- finish env s2 t
     (_, result) <- finish env s2 resultTy
     -- Defaulting chooses for the action and its result alike.
-    (both, code') <- resolveClasses Defaulting solved (TFun actionTy result) code
+    (both, code') <- resolveClasses Defaulting False solved (TFun actionTy result) code
     pure $ case both of
       TFun actionTy' result' -> (actionTy', result', code')
       _ -> (actionTy, result, code')
