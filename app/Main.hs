@@ -5,7 +5,7 @@ import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (saveShellTerminal, setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runScript, sessionPrompt, startupFile, step)
 import System.Environment (getArgs, lookupEnv)
-import Lambdash.Complete (Candidate (..), completeName, isNameChar)
+import Lambdash.Complete (Candidate (..), completeField, completeName, isNameChar)
 import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (..), enableAutoTab, enableMultiline, readlineExMaybe, setHistory)
 import Foreign.C.String (CString, withCString)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
@@ -98,8 +98,8 @@ readInput session prompt = readline (escape prompt) >>= \first -> case first of
     | otherwise = pure (Line input)
   readline text = readlineExMaybe text (Just (complete session)) Nothing
 
--- | The prompt as plain text: the editor reads @[@ as the start of a style,
--- and an overlay's prompt has one.
+-- | Text as plain text: the editor reads @[@ as the start of a style, and
+-- an overlay's prompt has one, as does a list type in the completion menu.
 escape :: String -> String
 escape = concatMap (\c -> if c `elem` ("[\\" :: String) then ['\\', c] else [c])
 
@@ -134,5 +134,5 @@ loop restoreTerminal before = do
 complete :: Session -> CompletionEnv -> String -> IO ()
 complete session env input = do
   completeWord env input (Just isNameChar) $ \word ->
-    [Completion (candidateText c) (candidateText c) (candidateHelp c) | c <- completeName session input word]
+    [Completion (candidateText c) (escape (candidateText c)) (escape (candidateHelp c)) | c <- completeName session input word <> completeField session word]
   completeFileName env input (Just '/') ["."] []

@@ -45,5 +45,7 @@ Lines of one character and lines dropped with Ctrl-C are not kept.
 Tab completes the word before the cursor. The menu shows the session's
 names that start with it, each with its type, and then file names. After
 `:help`, it shows the help topics too. `tab.` completes the names of a module
-imported as `tab`. With one match, Tab takes it at once. With more, a digit
+imported as `tab`. After a name and a dot, such as `r.`, it shows the fields
+of its record with their types, from the checker: `res.` after
+`res <- ls "." | collect` gives `items`, `status` and `statuses`. With one match, Tab takes it at once. With more, a digit
 picks one.

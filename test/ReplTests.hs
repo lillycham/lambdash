@@ -7,7 +7,7 @@ import Control.Monad (unless, when)
 import Data.List (isInfixOf)
 import Data.Set qualified as Set
 import Lambdash.Desugar (stripLocations)
-import Lambdash.Complete (Candidate (..), completeName)
+import Lambdash.Complete (Candidate (..), completeField, completeName)
 import Lambdash.Infer
 import Lambdash.Parser (Bound (..))
 import Lambdash.Repl
@@ -580,6 +580,13 @@ tests =
   , ("complete: help topics after :help", Candidate "pipelines" "topic" `elem` completeName initial ":help pi" "pi")
   , ("complete: no topics elsewhere", Candidate "pipelines" "topic" `notElem` completeName initial "pi" "pi")
   , ("complete: never the checker's own names", null (completeName initial "%" "%"))
+  , ("complete: a record's fields after a dot", completeField (after ["r = {name = \"x\", size = 3}"]) "r.na" == [Candidate "r.name" "String"])
+  , ("complete: every field after a bare dot", map candidateText (completeField (after ["r = {name = \"x\", size = 3}"]) "r.") == ["r.name", "r.size"])
+  , ("complete: a chain of fields", completeField (after ["o = {owner = {name = \"a\"}}"]) "o.owner.na" == [Candidate "o.owner.name" "String"])
+  , ("complete: a module's record", map candidateText (completeField (afterIn [("m.lsh", "config = {size = 1, shown = true}\n")] ["m = import \"m.lsh\""]) "m.config.s") == ["m.config.size", "m.config.shown"])
+  , ("complete: no fields on what is not a record", null (completeField (after ["x = 1"]) "x."))
+  , ("complete: no fields on an unbound name", null (completeField initial "nope.a"))
+  , ("complete: a name with no dot has no fields", null (completeField (after ["r = {name = \"x\"}"]) "r"))
   , ("annotate: narrows a type", session ["(1 : Int)", ":t (x -> x : Int -> Int)", ":t ([] : [String])"] == ["1", "Int -> Int", "[String]"])
   , ("annotate: must fit", final ["(true : Int)"] == "type mismatch: Bool and Int")
   , ("annotate: :core shows it", final [":core (1 : Int)"] == "(1 : Int)")
