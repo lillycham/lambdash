@@ -25,7 +25,10 @@ serve = runServer ServerDefinition
   , doInitialize = \env _ -> pure (Right env)
   , staticHandlers = const handlers
   , interpretHandler = \env -> Iso (runLspT env) liftIO
+  -- Without this, the library tells the client to send no open or change
+  -- notifications. The library keeps the text from incremental changes.
   , options = defaultOptions
+      { optTextDocumentSync = Just (TextDocumentSyncOptions (Just True) (Just TextDocumentSyncKind_Incremental) Nothing Nothing Nothing) }
   }
 
 -- The library keeps each open file's text; a change only rechecks it.
@@ -37,6 +40,9 @@ handlers = mconcat
   , notificationHandler SMethod_TextDocumentDidChange $ \(TNotificationMessage _ _ (DidChangeTextDocumentParams (VersionedTextDocumentIdentifier uri _) _)) ->
       recheck (toNormalizedUri uri)
   , notificationHandler SMethod_TextDocumentDidSave (const (pure ()))
+  -- The lsp library always advertises semantic tokens, so a client asks.
+  -- None yet: an empty answer, not an error.
+  , requestHandler SMethod_TextDocumentSemanticTokensFull $ \_ respond -> respond (Right (InR Null))
   , requestHandler SMethod_TextDocumentHover $ \(TRequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) (Position line column) _)) respond -> do
       found <- getVirtualFile (toNormalizedUri uri)
       let text = maybe "" (Text.unpack . virtualFileText) found
