@@ -60,6 +60,31 @@ send "\004"
 see {in\r\n} "fg keeps the layer"
 prompt
 
+# Ctrl-C drops what was typed, an open block too, and prompts again.
+send "do print 1;\r"
+see {\.\. $} "a block is open"
+send "print 2;\r"
+see {\.\. $} "still open"
+send "\003"
+prompt
+send "print 5\r"
+see {5\r\n} "the block is gone, and the shell reads again"
+prompt
+send "1 + "
+send "\003"
+prompt
+send "2 * 3\r"
+see {6\r\n} "Ctrl-C drops a partial line"
+prompt
+# The shell itself survives it, and a job still gets it.
+send "sleep 10\r"
+after 300
+send "\003"
+prompt
+send "print 7\r"
+see {7\r\n} "Ctrl-C stops a job, not the shell"
+prompt
+
 send ":q\r"
 expect eof
 exec rm -rf $state

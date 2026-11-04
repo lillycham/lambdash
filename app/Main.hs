@@ -33,8 +33,24 @@ main = do
     mapM_ putStrLn messages
     runInputT defaultSettings (loop restoreTerminal start)
 
--- | Read continuation lines while a @do@ block is open. End of input stops
--- reading, and the parser reports the unclosed block.
+-- | What the prompt read.
+data Input
+  = Line String
+  | -- | Ctrl-C: drop what was typed, including an open block, and prompt
+    -- again, as other shells do.
+    Cancelled
+  | End
+
+-- | Read a line, and continuation lines while a @do@ block is open.
+--
+-- The shell ignores SIGINT, so that Ctrl-C reaches only the foreground job.
+-- While reading, haskeline handles it instead, for the length of the read.
+readInput :: String -> InputT IO Input
+readInput prompt = handleInterrupt (pure Cancelled) $ withInterrupt $ do
+  first <- getInputLine prompt
+  maybe (pure End) (fmap Line . more) first
+
+-- | End of input stops reading, and the parser reports the unclosed block.
 more :: String -> InputT IO String
 more input
   | needsMore input = do
@@ -49,11 +65,12 @@ loop restoreTerminal before = do
   (session, messages) <- liftIO (notices before)
   mapM_ outputStrLn messages
   cwd <- liftIO getCurrentDirectory
-  line <- getInputLine (sessionPrompt cwd session) >>= traverse more
-  case line of
-    Nothing -> pure ()
-    Just input -> do
-      result <- liftIO (step session input)
+  input <- readInput (sessionPrompt cwd session)
+  case input of
+    End -> pure ()
+    Cancelled -> loop restoreTerminal session
+    Line line -> do
+      result <- liftIO (step session line)
       -- Whatever the line did to the terminal, the shell owns it again, in
       -- its own modes, before printing anything.
       liftIO restoreTerminal

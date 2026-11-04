@@ -42,7 +42,9 @@ A block is a computation, so `=` names it and a bare line or `<-` runs it:
   ```
 
   The REPL asks for another line while a `do` is unclosed. Only whole words
-  outside string literals count.
+  outside string literals count. Ctrl-C drops the whole block and prompts
+  again, as it drops a partly typed line. Ctrl-D ends the input, and the
+  parser reports the unclosed block.
 - `;` ends a bareword everywhere, so `echo a;b` is two statements in a block
   and a parse error outside one.
 - **Inside a block, a bare `end` ends a command line.** `do echo end end`
