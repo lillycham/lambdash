@@ -470,7 +470,6 @@ tests =
   , ("instance: it may use itself", final [prettyClass, prettyInt, "instance Pretty a => Pretty [a] where pretty = xs -> \"[\" <> pretty (length xs) <> \"]\"", "pretty [[1]]"] == "\"[#1]\"")
   , ("class: a prelude class stays", final ["class Eq a where foo : a -> a"] == "Eq is a prelude class")
   , ("class: a method mentions the class's unknown", final ["class Bad a where bad : Int"] == "bad must mention a")
-  , ("class: no effect rows yet", ("cannot mention Comp" `isInfixOf`) (final ["class Run a where go : a -> Comp ()"]))
   , ("class: redeclaring drops its instances", final [prettyClass, prettyInt, "class Pretty a where pretty : a -> Int", "pretty (length [])"] == "no instance: Pretty Int")
   , ("show: values print through Show", session ["instance Show Int where show = n -> \"int\"", "1", "{a = 1, b = [true]}", "pure 3", "x -> x"] == ["instance Show Int", "int", "{a = int, b = [true]}", "int", "<function>"])
   , ("show: as before for the prelude", session ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"] == ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"])
@@ -513,9 +512,22 @@ tests =
   , ("signature: no such class", final ["r : Nope a => a"] == "no class Nope")
   , ("signature: a context on its own unknowns", final ["r : Eq b => a -> a"] == "a signature's context constrains its own unknowns")
   , ("init: a signature is quiet", fst (scripted "g : Int -> Int\ng = x -> x\n" []) == [])
+  , ("rows: written as printed", session ["c : Int -> Comp {console} ()", "c = n -> print n", ":t c"] == ["", "c : Int -> Comp ()", "Int -> Comp {console} ()"])
+  , ("rows: a closed row is a ceiling", final ["c : Int -> Comp {console} ()", "c = n -> pure ()", ":t c"] == "Int -> Comp {console} ()")
+  , ("rows: more than the ceiling", final ["c : Comp {} ()", "c = print 1"] == "effect mismatch: {console} and {}")
+  , ("rows: an omitted row is open", final ["e : Int -> Comp ()", "e = n -> print n", ":t e"] == "Int -> Comp {console} ()")
+  , ("rows: a tail ties rows together", session ["h : Comp {| e} a -> Comp {console | e} a", "h = m -> do print 1; m end", ":t h (pure 1)"] == ["", "h : Comp a -> Comp a", "Num a => Comp {console} a"])
+  , ("rows: an annotation is a ceiling too", final [":t (pure 1 : Comp {console} Int)"] == "Comp {console} Int")
+  , ("rows: an exec label", final ["k : Comp {exec git} Status", "k = do r <- git --version | collect; pure r.status end", ":t k"] == "Comp {exec git} Status")
+  , ("rows: a method's row is its ceiling", session [greetClass, "instance Greet Int where greet = n -> print n", "instance Greet String where greet = s -> pure ()", ":t greet"]
+      == ["class Greet", "instance Greet Int", "instance Greet String", "Greet a => a -> Comp {console} ()"])
+  , ("rows: an instance may not exceed it", final [greetClass, "instance Greet Bool where greet = b -> do print 1; cd \"/\" end"] == "effect mismatch: {console, cwd} and {console}")
+  , ("rows: an omitted row in a method is empty", final ["class Quiet a where quiet : a -> Comp ()", "instance Quiet Int where quiet = n -> print n"] == "effect mismatch: {console} and {}")
+  , ("rows: the preflight knows a method's effects", final [greetClass, "instance Greet Int where greet = n -> print n", "greet 5"] == "")
   , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
   ]
  where
+  greetClass = "class Greet a where greet : a -> Comp {console} ()"
   prettyClass = "class Pretty a where pretty : a -> String"
   prettyInt = "instance Pretty Int where pretty = n -> \"#\" <> show n"
   prettyList = "instance Pretty a => Pretty [a] where pretty = xs -> show (length xs) <> \" items\""

@@ -86,8 +86,9 @@ Confirmed with slice 3:
    replaced. Records stay structural, since no head can name a record.
 5. ~~Default methods~~: done. A class block defines them after their
    signatures; the prelude's `Eq` and `Ord` have them.
-6. **Effect rows in method types**: `Comp`, `Job` and `Stream` need a row
-   syntax first.
+6. ~~Effect rows in method types~~: done. Rows are written as `:t`
+   prints them; a closed row is a ceiling, and a method's row left out is
+   empty. See [types](types.md#effect-rows).
 
 ## Slices
 

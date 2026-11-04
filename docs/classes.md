@@ -108,8 +108,9 @@ Several methods go in a block, which may span lines:
   can rebind.
 - **Method types** use the type syntax of [the grammar](grammar.md). A
   method's other unknowns stay as general as the class says, so an
-  instance cannot fix them. `Comp`, `Job` and `Stream` cannot appear yet,
-  because their effect rows have no syntax.
+  instance cannot fix them. A computation's row in a method type is a
+  ceiling for every instance, and a row left out there is empty: see
+  [types](types.md#effect-rows).
 - **Again**: an instance for the same class and type replaces the old one
   for the lines after it. A binding that already chose a dictionary keeps
   it. A user class declared again replaces the old one and drops its

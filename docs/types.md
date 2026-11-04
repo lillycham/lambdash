@@ -7,8 +7,37 @@ a -> b                       a function, to the right
 Int  String  ()  [a]         constructors and lists
 {name : String | r}          a record, open with a tail
 Comp a  Job a  Stream i o r  Stage i o  Collector i o
+Comp {console} a             an effect row, as :t prints it
+Stream {exec git | e} i o r  a row with a tail
 Eq a => a -> Bool            a context, in signatures
 ```
+
+## Effect rows
+
+A row is written right after `Comp`, `Job` or `Stream`, as `:t` prints it.
+Its labels are `exec NAME`, `console`, `env`, `fs` and `cwd`, and `| e`
+leaves it open. A brace group with `name : type` fields is a record, as
+before: `Comp {name : String}` is a computation that gives a record.
+
+- **A closed row is a ceiling.** `Comp {console} ()` allows `console` and
+  nothing else; doing less is fine. So `pure ()` fits it and `cd "/"` does
+  not.
+- **A row left out is open** in signatures and annotations: the binding's own
+  row fills it in. `Comp ()` there means whatever the binding does.
+- **A tail ties rows together**: `Comp {| e} a -> Comp {console | e} a` adds
+  `console` to whatever the argument does.
+- **In a class's method types, a row left out is empty**, and a written one
+  is the ceiling for every instance. The preflight then knows what a method
+  can run from its class alone:
+
+  ```text
+  λ> class Greet a where greet : a -> Comp {console} ()
+  λ> instance Greet Int where greet = n -> print n
+  λ> instance Greet Bool where greet = b -> do print 1; cd "/" end
+  effect mismatch: {console, cwd} and {console}
+  ```
+
+Only results widen: a function's parameter must match its row exactly.
 
 ## In an expression: `(e : t)`
 

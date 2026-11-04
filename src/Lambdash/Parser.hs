@@ -585,9 +585,27 @@ typeExpr = do
     case name >>= (`lookup` arities) of
       Just n -> do
         _ <- lexeme upperName
-        STApp (maybe "" id name) <$> count n typeAtom
+        -- A brace group right after is a row when the arguments still
+        -- follow it: Comp {console} a. Otherwise it is the record that
+        -- Comp {name : String} gives.
+        let applied = maybe "" id name
+            withRow = try ((\r args -> STApp applied (Just r) args) <$> effectRow <*> count n typeAtom)
+        if applied `elem` ["Comp", "Job", "Stream"]
+          then withRow <|> (STApp applied Nothing <$> count n typeAtom)
+          else STApp applied Nothing <$> count n typeAtom
       Nothing -> typeAtom
   arities = [("Comp", 1), ("Job", 1), ("Stream", 3), ("Stage", 2), ("Collector", 2)]
+
+-- | @{exec git, console | e}@. Labels are as @:t@ prints them.
+effectRow :: Parser SRow
+effectRow = between (symbol "{") (symbol "}") $ do
+  labels <- lexeme effectName `sepBy` symbol ","
+  rest <- optional (symbol "|" *> lexeme lowerName)
+  pure (SRow labels rest)
+ where
+  effectName =
+        (\name -> "exec " <> name) <$> (lexeme (keyword "exec") *> some (satisfy (\c -> not (isSpace c) && c `notElem` (",|}" :: String))))
+    <|> choice [word <$ keyword word | word <- ["console", "env", "fs", "cwd"]]
 
 -- | A type that needs no parentheses.
 typeAtom :: Parser SType

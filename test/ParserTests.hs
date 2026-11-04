@@ -9,7 +9,7 @@ import Data.Set qualified as Set
 import Lambdash.Infer
 import Lambdash.Desugar (desugar, stripLocations)
 import Lambdash.Parser
-import Lambdash.Syntax (Declaration (..), SPred (..), SType (..), Surface)
+import Lambdash.Syntax (Declaration (..), SPred (..), SRow (..), SType (..), Surface)
 import Lambdash.Unify
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
@@ -165,7 +165,13 @@ tests =
   , ("type: functions to the right", run typeExpr "a -> b -> Int" == Just (STFun (STVar "a") (STFun (STVar "b") (STCon "Int"))))
   , ("type: lists, unit and parentheses", run typeExpr "[a] -> (a -> ()) -> String" == Just (STFun (STList (STVar "a")) (STFun (STFun (STVar "a") (STCon "()")) (STCon "String"))))
   , ("type: records, open and closed", run typeExpr "{name : String | r}" == Just (STRecord [("name", STCon "String")] (Just "r")) && run typeExpr "{}" == Just (STRecord [] Nothing))
-  , ("type: applied constructors", run typeExpr "Stage a [a] -> Comp Int" == Just (STFun (STApp "Stage" [STVar "a", STList (STVar "a")]) (STApp "Comp" [STCon "Int"])))
+  , ("type: applied constructors", run typeExpr "Stage a [a] -> Comp Int" == Just (STFun (STApp "Stage" Nothing [STVar "a", STList (STVar "a")]) (STApp "Comp" Nothing [STCon "Int"])))
+  , ("type: a row", run typeExpr "Comp {exec git, console | e} a" == Just (STApp "Comp" (Just (SRow ["exec git", "console"] (Just "e"))) [STVar "a"]))
+  , ("type: an empty row", run typeExpr "Comp {} ()" == Just (STApp "Comp" (Just (SRow [] Nothing)) [STCon "()"]))
+  , ("type: a tail only", run typeExpr "Job {| e} a" == Just (STApp "Job" (Just (SRow [] (Just "e"))) [STVar "a"]))
+  , ("type: a record, not a row", run typeExpr "Comp {name : String}" == Just (STApp "Comp" Nothing [STRecord [("name", STCon "String")] Nothing]))
+  , ("type: an open record, not a row", run typeExpr "Comp {| r}" == Just (STApp "Comp" Nothing [STRecord [] (Just "r")]))
+  , ("type: a stream's row", run typeExpr "Stream {fs} Bytes a ()" == Just (STApp "Stream" (Just (SRow ["fs"] Nothing)) [STCon "Bytes", STVar "a", STCon "()"]))
   , ("decl: a class", run declaration "class Pretty a where pretty : a -> String" == Just (DeclClass [] "Pretty" "a" [("pretty", STFun (STVar "a") (STCon "String"))] []))
   , ("decl: superclasses and a block", run declaration "class (Eq a, Show a) => H a where do h : a -> Int; (<+>) : a -> a -> a end"
       == Just (DeclClass [SPred "Eq" (STVar "a"), SPred "Show" (STVar "a")] "H" "a" [("h", STFun (STVar "a") (STCon "Int")), ("<+>", STFun (STVar "a") (STFun (STVar "a") (STVar "a")))] []))

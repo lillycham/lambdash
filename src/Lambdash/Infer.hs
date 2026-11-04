@@ -388,8 +388,8 @@ infer env (EAnn e written) = do
   let (bound, annotated) = writtenType [] written
   t <- unifying (instantiate (Forall bound annotated))
   (s1, te, e') <- infer env e
-  s2 <- unifying (unify (apply s1 te) (apply s1 t))
-  pure (s2 `compose` s1, apply s2 te, e')
+  s2 <- fitting (apply s1 te) (apply s1 t)
+  pure (s2 `compose` s1, apply s2 (apply s1 t), e')
 
 -- A location changes nothing about the type.
 infer env (ELoc location e) = do
@@ -441,6 +441,36 @@ infer env (EWith overlay body) = do
 infer env (EBg e) = do
   (s, eff, result, e') <- inferRun env e
   pure (s, TComp eff (TJob eff result), EBg e')
+
+-- | Unify a type with the one it must fit, where a closed row in the one
+-- expected is a ceiling: Comp {} () fits Comp {console} (), as doing less
+-- than allowed is fine. Rows are not values, so widening one needs no
+-- conversion. Elsewhere, and where either row is open, this is 'unify'.
+-- Only results widen: a function's parameter must match exactly.
+fitting :: Ty -> Ty -> Infer Subst
+fitting actual expected = case (actual, expected) of
+  (TFun a b, TFun a' b') -> do
+    s1 <- unifying (unify a a')
+    s2 <- fitting (apply s1 b) (apply s1 b')
+    pure (s2 `compose` s1)
+  (TComp r t, TComp r' t') -> inside r r' t t'
+  (TJob r t, TJob r' t') -> inside r r' t t'
+  (TStream r i o x, TStream r' i' o' x') -> do
+    s1 <- unifying (unify (TFun i o) (TFun i' o'))
+    s2 <- row (applyEffects s1 r) (applyEffects s1 r')
+    let known = s2 `compose` s1
+    s3 <- fitting (apply known x) (apply known x')
+    pure (s3 `compose` known)
+  _ -> unifying (unify actual expected)
+ where
+  inside r r' t t' = do
+    s1 <- row r r'
+    s2 <- fitting (apply s1 t) (apply s1 t')
+    pure (s2 `compose` s1)
+  row a@(EffRow labels tails) b@(EffRow allowed tails')
+    | Set.null tails && Set.null tails' =
+        if labels `Set.isSubsetOf` allowed then pure emptySubst else failWith (Unify (EffectMismatch a b))
+    | otherwise = unifying (unify (TComp a TUnit) (TComp b TUnit))
 
 -- | What running an expression requires and gives. A computation gives its
 -- result. A stream reads the terminal, so its input is Bytes, and gives its
@@ -753,10 +783,14 @@ elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT g
       t <- unifying (instantiate (Forall own atHead))
       pure (m, t)) (classMethods info)
     let ordered = [(m, e) | (m, _) <- expected, Just e <- [lookup m definitions]]
-    (s1, recordTy, record') <- infer env (ERecord ordered)
-    let expectedTy = TRecord (foldr (\(m, t) r -> RExtend m t r) REmpty expected)
-    s2 <- unifying (unify (apply s1 recordTy) (apply s1 expectedTy))
-    solved <- checkedConstraints (s2 `compose` s1)
+    -- Each method fits its type: a closed row there is a ceiling.
+    (learned, fields') <- foldM (\(known, done) (m, e) -> do
+      (s, t, e') <- infer (applyEnv known env) e
+      let sofar = s `compose` known
+      fit <- fitting (apply sofar t) (apply sofar (maybe t id (lookup m expected)))
+      pure (fit `compose` sofar, done <> [(m, e')])) (emptySubst, []) ordered
+    let record' = ERecord fields'
+    solved <- checkedConstraints learned
     -- Rigid: the head's unknowns and each method's own must stay distinct
     -- unknowns.
     let rigid = Set.toList (Set.unions (ftv headTy : [ftv t | (_, t) <- expected]))
@@ -805,7 +839,7 @@ elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go 
     t <- unifying (instantiate (Forall bound signature))
     let (sigPreds, sigBare) = unclass t
     (s1, te, code) <- infer env expr
-    s2 <- unifying (unify (apply s1 te) (apply s1 sigBare))
+    s2 <- fitting (apply s1 te) (apply s1 sigBare)
     (solved, ty) <- finish env (s2 `compose` s1) sigBare
     let rigid = Set.toList (typeUnknowns sigBare)
         images = [apply solved (TVar v) | v <- rigid]

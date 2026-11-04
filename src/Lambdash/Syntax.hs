@@ -13,6 +13,7 @@ module Lambdash.Syntax
   , Statement (..)
   , Expr (..)
   , SType (..)
+  , SRow (..)
   , SPred (..)
   , Declaration (..)
   ) where
@@ -110,8 +111,14 @@ data SType
   | STFun SType SType
   | -- | @{a : Int | r}@: the fields, and the tail if there is one.
     STRecord [(Label, SType)] (Maybe Name)
-  | -- | @Comp a@, @Job a@, @Stream i o r@, @Stage i o@, @Collector i o@.
-    STApp Name [SType]
+  | -- | @Comp a@, @Job a@, @Stream i o r@, @Stage i o@, @Collector i o@,
+    -- and a row if one is written: @Comp {console | e} a@.
+    STApp Name (Maybe SRow) [SType]
+  deriving (Eq, Show)
+
+-- | An effect row as written: its labels, such as @exec git@ and
+-- @console@, and its tail if it is open.
+data SRow = SRow [String] (Maybe Name)
   deriving (Eq, Show)
 
 -- | @Eq a@ in a context.

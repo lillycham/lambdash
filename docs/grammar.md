@@ -183,10 +183,13 @@ signature   = name ":" type ;
 definition  = name "=" expr ;
 
 type        = btype [ "->" type ] ;
-btype       = "Comp" tatom | "Job" tatom | "Stream" tatom tatom tatom
+btype       = "Comp" [ row ] tatom | "Job" [ row ] tatom
+            | "Stream" [ row ] tatom tatom tatom
             | "Stage" tatom tatom | "Collector" tatom tatom | tatom ;
 tatom       = LOWER | UPPER | "(" ")" | "(" type ")" | "[" type "]"
             | "{" [ IDENT ":" type { "," IDENT ":" type } ] [ "|" LOWER ] "}" ;
+row         = "{" [ label { "," label } ] [ "|" LOWER ] "}" ;   (* only when the arguments follow *)
+label       = "exec" WORD | "console" | "env" | "fs" | "cwd" ;
 command     = "jobs" | "fg" [ JOB ] | "bg" [ JOB ] | "allow" | "deny" ;
 JOB         = [ "%" ] DIGIT { DIGIT } ;
 ```

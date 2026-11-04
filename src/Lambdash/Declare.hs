@@ -48,10 +48,6 @@ declare classes env values declaration = case declaration of
     case [m | (m, ty) <- methods, Set.notMember classVariable (ftv ty)] of
       m : _ -> bad (m <> " must mention " <> var)
       [] -> pure ()
-    -- A row in a signature would be unchecked: there is no syntax for one.
-    case [m | (m, ty) <- signatures, effectful ty] of
-      m : _ -> bad (m <> ": a method's type cannot mention Comp, Job or Stream yet, because their effect rows have no syntax")
-      [] -> pure ()
     case [m | (i, (m, _)) <- zip [0 :: Int ..] methods, m `elem` map fst (take i methods)] of
       m : _ -> bad (m <> " is declared twice")
       [] -> pure ()
@@ -121,7 +117,7 @@ declare classes env values declaration = case declaration of
   preludeNames = map className (envClasses prelude)
   convert var signatures = do
     v <- unknown var
-    methods <- mapM (\(m, ty) -> (,) m <$> sTy ty) signatures
+    methods <- mapM (\(m, ty) -> (,) m <$> methodTy ty) signatures
     pure (v, methods)
   renderHead (STCon name) = name
   renderHead (STList (STVar a)) = "[" <> a <> "]"

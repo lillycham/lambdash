@@ -2,10 +2,11 @@
 module Lambdash.TypeSyntax
   ( Naming
   , sTy
+  , methodTy
   , unknown
   , writtenType
-  , effectful
   , renderSType
+  , effectLabel
   ) where
 
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
@@ -29,14 +30,6 @@ writtenType context written = evalState build (Map.empty, 0)
     pure (Set.toList vars, whole)
   ftvTy t = predVars (IsIn "" t)
 
-effectful :: SType -> Bool
-effectful written = case written of
-  STApp name args -> name `elem` ["Comp", "Job", "Stream"] || any effectful args
-  STList t -> effectful t
-  STFun a b -> effectful a || effectful b
-  STRecord fields _ -> any (effectful . snd) fields
-  _ -> False
-
 type Naming = State (Map.Map Name Var, Int)
 
 unknown :: Name -> Naming Var
@@ -55,22 +48,59 @@ freshRow = do
   put (names, next + 1)
   pure (effectVar (Var next))
 
+-- | What a row that is not written means.
+data Omitted
+  = -- | In a signature or an annotation: whatever the binding does.
+    OpenRow
+  | -- | In a method's type: nothing. A method's effects are a ceiling that
+    -- its class declares, so that the preflight knows them.
+    EmptyRow
+
+-- | A type in a signature or an annotation.
 sTy :: SType -> Naming Ty
-sTy written = case written of
+sTy = sTyIn OpenRow
+
+-- | A type in a class's method signature.
+methodTy :: SType -> Naming Ty
+methodTy = sTyIn EmptyRow
+
+-- | A label as written and as printed: @exec git@, @console@, @env@, @fs@,
+-- @cwd@.
+effectLabel :: String -> Maybe Effect
+effectLabel text = case words text of
+  ["exec", name] -> Just (Exec name)
+  ["console"] -> Just Console
+  ["env"] -> Just Environment
+  ["fs"] -> Just Filesystem
+  ["cwd"] -> Just WorkingDirectory
+  _ -> Nothing
+
+sTyIn :: Omitted -> SType -> Naming Ty
+sTyIn omitted written = case written of
   STVar name -> TVar <$> unknown name
   STCon name -> pure (TCon name)
-  STList t -> TList <$> sTy t
-  STFun a b -> TFun <$> sTy a <*> sTy b
+  STList t -> TList <$> go t
+  STFun a b -> TFun <$> go a <*> go b
   STRecord fields rest -> do
     tailRow <- maybe (pure REmpty) (fmap RVar . unknown) rest
-    fieldTys <- mapM (\(label, t) -> (,) label <$> sTy t) fields
+    fieldTys <- mapM (\(label, t) -> (,) label <$> go t) fields
     pure (TRecord (foldr (\(label, t) r -> RExtend label t r) tailRow fieldTys))
-  STApp "Comp" [t] -> TComp <$> freshRow <*> sTy t
-  STApp "Job" [t] -> TJob <$> freshRow <*> sTy t
-  STApp "Stream" [i, o, r] -> TStream <$> freshRow <*> sTy i <*> sTy o <*> sTy r
-  STApp "Stage" [i, o] -> TStage <$> sTy i <*> sTy o
-  STApp "Collector" [i, o] -> TCollector <$> sTy i <*> sTy o
-  STApp name _ -> pure (TCon name)
+  STApp "Comp" row [t] -> TComp <$> effects row <*> go t
+  STApp "Job" row [t] -> TJob <$> effects row <*> go t
+  STApp "Stream" row [i, o, r] -> TStream <$> effects row <*> go i <*> go o <*> go r
+  STApp "Stage" _ [i, o] -> TStage <$> go i <*> go o
+  STApp "Collector" _ [i, o] -> TCollector <$> go i <*> go o
+  STApp name _ _ -> pure (TCon name)
+ where
+  go = sTyIn omitted
+  effects Nothing = case omitted of
+    OpenRow -> freshRow
+    EmptyRow -> pure noEffects
+  -- A row's tail shares no name with a type's unknown: e in {| e} and e
+  -- in a -> e are different unknowns.
+  effects (Just (SRow labels rest)) = do
+    tails <- maybe (pure Set.empty) (fmap Set.singleton . unknown . ('!' :)) rest
+    pure (EffRow (Set.fromList [l | Just l <- map effectLabel labels]) tails)
 
 -- | A written type as text, as it was written.
 renderSType :: SType -> String
@@ -83,6 +113,7 @@ renderSType = go 0
     STList t -> "[" <> go 0 t <> "]"
     STFun a b -> parens (level > 0) (go 1 a <> " -> " <> go 0 b)
     STRecord fields rest -> "{" <> intercalate ", " [label <> " : " <> go 0 t | (label, t) <- fields] <> maybe "" (" | " <>) rest <> "}"
-    STApp name args -> parens (level > 1) (unwords (name : map (go 2) args))
+    STApp name row args -> parens (level > 1) (unwords (name : maybe [] (pure . renderRow) row <> map (go 2) args))
+  renderRow (SRow labels rest) = "{" <> intercalate ", " labels <> maybe "" (" | " <>) rest <> "}"
   parens True text = "(" <> text <> ")"
   parens False text = text

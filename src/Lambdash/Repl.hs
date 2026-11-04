@@ -904,5 +904,5 @@ writtenCheck classes context written =
     STList a -> names a
     STFun a b -> names a <> names b
     STRecord fields rest -> concatMap (names . snd) fields <> maybe [] pure rest
-    STApp _ args -> concatMap names args
+    STApp _ _ args -> concatMap names args
     STCon _ -> []
