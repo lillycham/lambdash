@@ -61,6 +61,7 @@ linesIO = go initial
   go session (line : rest) = step session line >>= \result -> case result of
     Quit -> pure ["<quit>"]
     Continue next text -> (text :) <$> go next rest
+    Failed text -> (text :) <$> go session rest
 
 gives :: [String] -> String -> [String] -> IO Bool
 gives input output results = do
@@ -201,7 +202,7 @@ tests =
           qualified = qualify [EffEqual row missing] (TStream row TBytes TBytes TStatus)
           session = initial {sessionTypes = (Map.singleton "job" (Forall [Var 0] qualified)), sessionValues = (Map.singleton "job" (VStream [External "missing-constraint-command-xyz" []] ReturnStatus))}
       (output, result) <- capture (step session "job")
-      pure $ BS.null output && case result of Continue _ "command not found: missing-constraint-command-xyz" -> True; _ -> False)
+      pure $ BS.null output && case result of Failed "command not found: missing-constraint-command-xyz" -> True; _ -> False)
   , ("constraints: a binding retains and resolves its bound", gives
       ["bounded = " <> bounded, "bounded (cat /dev/null)"] "" [boundType, ""])
   , ("constraints: an invalid instance runs no command", gives

@@ -4,7 +4,8 @@ import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (saveShellTerminal, setupTerminal)
-import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, sessionPrompt, step)
+import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runScript, sessionPrompt, startupFile, step)
+import System.Environment (getArgs)
 import System.Console.Haskeline
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
 import System.Directory (getCurrentDirectory)
@@ -29,8 +30,18 @@ main = do
   withRootDirectory $ \roots -> do
     -- Starting in a directory is arriving in it.
     cwd <- getCurrentDirectory
-    (start, messages) <- arrive cwd initial {sessionRoots = roots}
+    (arrived, messages) <- arrive cwd initial {sessionRoots = roots}
     mapM_ putStrLn messages
+    -- The startup file runs before the first prompt. --no-init skips it.
+    args <- getArgs
+    start <- if "--no-init" `elem` args
+      then pure arrived
+      else do
+        path <- startupFile
+        (ready, reports) <- runScript path arrived
+        restoreTerminal
+        mapM_ putStrLn reports
+        pure ready
     runInputT defaultSettings (loop restoreTerminal start)
 
 -- | What the prompt read.
@@ -76,6 +87,9 @@ loop restoreTerminal before = do
       liftIO restoreTerminal
       case result of
         Quit -> pure ()
+        Failed output -> do
+          outputStrLn output
+          loop restoreTerminal session
         Continue next output -> do
           unless (null output) (outputStrLn output)
           loop restoreTerminal next

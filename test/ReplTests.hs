@@ -14,7 +14,7 @@ import Lambdash.Unify
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile, setCurrentDirectory)
 import System.Exit (exitFailure)
-import System.IO (IOMode (..), hClose, hFlush, openFile, openTempFile, stdin, stdout)
+import System.IO (IOMode (..), hClose, hFlush, hPutStr, openFile, openTempFile, stdin, stdout)
 import System.Environment (lookupEnv, setEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
@@ -30,6 +30,7 @@ sessionIO = go initial
     case result of
       Quit -> pure ["<quit>"]
       Continue next out -> (out :) <$> go next ls
+      Failed out -> (out :) <$> go s ls
 
 -- | The prompt after some lines.
 promptAfter :: [String] -> String
@@ -41,6 +42,7 @@ promptAfter = unsafePerformIO . go initial
     case result of
       Quit -> pure "<quit>"
       Continue next _ -> go next ls
+      Failed _ -> go s ls
 
 -- | Tests are plain values, so this hides the 'IO'. Each call is one session.
 session :: [String] -> [String]
@@ -94,6 +96,27 @@ ty input expected = session [":t " <> input] == [expected]
 v0, v1 :: Var
 v0 = Var 7
 v1 = Var 3
+
+-- | Run a startup file, then lines at the prompt: the file's reports, with
+-- its path left out, and what each line shows.
+scripted :: String -> [String] -> ([String], [String])
+scripted text after = unsafePerformIO $ do
+  dir <- getTemporaryDirectory
+  (path, h) <- openTempFile dir "init.lsh"
+  hPutStr h text
+  hClose h
+  (ready, reports) <- runScript path initial
+  removeFile path
+  shown <- go ready after
+  pure (map (\r -> if take (length path) r == path then drop (length path) r else r) reports, shown)
+ where
+  go _ [] = pure []
+  go s (l : ls) = do
+    result <- step s l
+    case result of
+      Quit -> pure ["<quit>"]
+      Continue next out -> (out :) <$> go next ls
+      Failed out -> (out :) <$> go s ls
 
 tests :: [(String, Bool)]
 tests =
@@ -463,6 +486,13 @@ tests =
   , ("default: Eq needs only eq", final ["instance Eq Bool where eq = a b -> true", "true != false"] == "false")
   , ("default: Ord needs only lt", final ["instance Ord Bool where lt = a b -> false", "{m = min true false, l = true <= false, g = true > false}"] == "{m = true, l = true, g = false}")
   , ("default: the prelude's are its own", final ["not = x -> x", "instance Eq Bool where eq = a b -> true", "true != false"] == "false")
+  , ("init: bindings and declarations, quietly", scripted "x = 41\nclass P a where p : a -> Int\ninstance P Int where p = n -> n + x\ninfixl 6 <+>\n(<+>) = a b -> a * 10 + b\n" ["p 1", "1 <+> 2 * 3"] == ([], ["42", "16"]))
+  , ("init: errors name their line, and the rest still runs", scripted "x = 1\ny = x + true\nz = 3\n" ["z"] == ([":2: type mismatch: Int and Bool"], ["3"]))
+  , ("init: a block spans lines", scripted "f = x -> do\n  print x;\n  pure x\nend\n" [":t f"] == ([], ["a -> Comp {console} a"]))
+  , ("init: a value shows", fst (scripted "1 + 1\n" []) == ["2"])
+  , ("init: :q ends the file", ("exec y" `isInfixOf`) (last (snd (scripted "x = 1\n:q\ny = 2\n" [":t y"]))))
+  , ("init: a missing file is none", unsafePerformIO (snd <$> runScript "/lsh-no-such/init.lsh" initial) == [])
+  , ("init: comments and blank lines", scripted "-- setup\n\nx = 2 -- two\n" ["x"] == ([], ["2"]))
   , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
   ]
  where

@@ -17,7 +17,7 @@ proc prompt {} { see {λ> $} "prompt" }
 # λsh reads approvals from $XDG_STATE_HOME. A fresh one keeps an approved flake
 # in this directory from activating, and the tests from touching real state.
 set state [exec mktemp -d]
-spawn env XDG_STATE_HOME=$state [lindex $argv 0]
+spawn env XDG_STATE_HOME=$state XDG_CONFIG_HOME=$state [lindex $argv 0]
 prompt
 
 send "do print 1;\r"

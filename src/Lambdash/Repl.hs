@@ -17,6 +17,8 @@ module Lambdash.Repl
   , renderError
   , Step (..)
   , step
+  , runScript
+  , startupFile
   , Entry
   ) where
 
@@ -54,7 +56,8 @@ import Lambdash.Syntax (Declaration)
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
-import System.Directory (getCurrentDirectory)
+import System.Directory (XdgDirectory (..), doesFileExist, getCurrentDirectory, getXdgDirectory)
+
 import System.Environment (lookupEnv)
 
 -- | What persists between lines. A name has its type in one and its value in
@@ -540,6 +543,7 @@ notices session = go session {sessionJobs = []} [] (sessionJobs session)
               step' <- finish current v
               case step' of
                 Continue next text -> go next (lines' [label <> "done  " <> jobLine job, text] : messages) rest
+                Failed text -> go current ((label <> "failed  " <> jobLine job <> ": " <> text) : messages) rest
                 Quit -> go current messages rest
             Left err -> case fromException err of
               Just (StreamError message) -> go current ((label <> "failed  " <> jobLine job <> ": " <> message) : messages) rest
@@ -632,6 +636,8 @@ arrive dir session = do
 data Step
   = -- | The next session, and text to show. No text means show nothing.
     Continue Session String
+  | -- | The line failed, and the session is as it was: what went wrong.
+    Failed String
   | Quit
 
 lastWord :: String -> String
@@ -649,7 +655,7 @@ lastWord text = case words text of
 step :: Session -> String -> IO Step
 step session input = do
   before <- getCurrentDirectory
-  result <- stepLine session input `catch` \(StreamError message) -> pure (Continue session message)
+  result <- stepLine session input `catch` \(StreamError message) -> pure (Failed message)
   after <- getCurrentDirectory
   case result of
     Continue next output | before /= after -> do
@@ -667,7 +673,7 @@ step session input = do
 stepLine :: Session -> String -> IO Step
 stepLine session input =
   case parseCommandWith (sessionFixities session) (BoundWith (Map.keysSet types) builtinNames) input of
-    Left err -> pure (Continue session err)
+    Left err -> pure (Failed err)
     Right Blank -> pure (Continue session "")
     Right Exit
       | null (sessionJobs session) || sessionWarned session -> pure Quit
@@ -726,14 +732,14 @@ stepLine session input =
     Right (SetFixity fixity names) ->
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
     Right (Declare written) -> case declare classes types values written of
-      Left err -> pure (Continue session (renderError err))
+      Left err -> pure (Failed (renderError err))
       Right done -> pure (Continue session
         { sessionClasses = declaredClasses done
         , sessionTypes = foldr (uncurry Map.insert) types (declaredTypes done)
         , sessionValues = foldr (uncurry Map.Lazy.insert) values (declaredValues done)
         } (declaredMessage done))
     Right (ShowElabDeclaration written) -> case declare classes types values written of
-      Left err -> pure (Continue session (renderError err))
+      Left err -> pure (Failed (renderError err))
       Right done -> pure (Continue session (maybe (declaredMessage done) (\(name, code) -> "(" <> name <> ") = " <> renderCore code) (declaredCode done)))
     Right (ShowCore expression) -> pure (Continue session (renderCore expression))
     Right (ShowElab named expression) ->
@@ -778,7 +784,7 @@ stepLine session input =
     -- A builtin's signature guides parsing only while it is still the builtin.
     builtinNames = Map.keysSet (Map.filterWithKey (\name scheme -> Map.lookup name typeEnv == Just scheme) types)
     checked result onSuccess = case result of
-      Left err -> pure (Continue session (renderError err))
+      Left err -> pure (Failed (renderError err))
       Right ty -> onSuccess ty
     -- Generalising after a run is sound while no value can be mutable. A
     -- mutable reference would need a value restriction here.
@@ -793,14 +799,14 @@ stepLine session input =
     preflight ty action = do
       let (constraints, _) = unqualify ty
       case closeEffects constraints (actionEffects ty) of
-        Nothing -> pure (Continue session "cannot run an action with an unresolved effect row")
+        Nothing -> pure (Failed "cannot run an action with an unresolved effect row")
         Just (EffRow labels _) -> do
           runtime <- newRuntimeWith (sessionRoots session) (sessionShell session)
           env <- runtimeEnviron runtime
           missing <- filterM (fmap not . programExists env) [name | Exec name <- Set.toList labels]
           case missing of
             [] -> action runtime
-            name : _ -> pure (Continue session ("command not found: " <> name))
+            name : _ -> pure (Failed ("command not found: " <> name))
     classes = sessionClasses session
     showResult _ VUnit = ""
     showResult _ (VStatus (ExitedWith 0)) = ""
@@ -826,3 +832,43 @@ showValue session ty value =
     Left _ -> render value
  where
   it = "%it"
+
+-- | Where the startup file is: @$XDG_CONFIG_HOME/lambdash/init.lsh@, or
+-- @~/.config/lambdash/init.lsh@.
+startupFile :: IO FilePath
+startupFile = (<> "/init.lsh") <$> getXdgDirectory XdgConfig "lambdash"
+
+-- | Run a file's lines as if typed, in order: bindings, fixity lines,
+-- declarations and commands. A @do@ block may span lines, as at the prompt.
+-- A line that fails is reported with its line number and the rest still
+-- run; @:q@ stops the file, not the shell. Bindings and declarations say
+-- nothing, so only output and errors show. A missing file is no file.
+runScript :: FilePath -> Session -> IO (Session, [String])
+runScript path session = do
+  exists <- doesFileExist path
+  if not exists
+    then pure (session, [])
+    else do
+      text <- readFile path
+      _ <- Exception.evaluate (length text)
+      go session (chunks (zip [1 :: Int ..] (lines text)))
+ where
+  chunks [] = []
+  chunks ((n, line) : rest) = gather n line rest
+  gather n acc rest
+    | needsMore acc, (_, next) : more <- rest = gather n (acc <> "\n" <> next) more
+    | otherwise = (n, acc) : chunks rest
+  go now [] = pure (now, [])
+  go now ((n, chunk) : rest) = do
+    result <- step now chunk
+    case result of
+      Quit -> pure (now, [])
+      Failed message -> fmap ((path <> ":" <> show n <> ": " <> message) :) <$> go now rest
+      Continue next output -> do
+        let shown = [output | not (null output), not (quiet next chunk)]
+        fmap (shown <>) <$> go next rest
+  quiet now chunk = case parseCommandWith (sessionFixities now) AllBound chunk of
+    Right (Bind _ _) -> True
+    Right (BindRun _ _) -> True
+    Right (Declare _) -> True
+    _ -> False
