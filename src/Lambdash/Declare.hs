@@ -11,7 +11,7 @@ module Lambdash.Declare
   ) where
 
 import Control.Monad (unless, when)
-import Control.Monad.Trans.State.Strict (State, evalState, get, put)
+import Control.Monad.Trans.State.Strict (evalState)
 import Data.List (nub)
 import Data.Map.Lazy qualified as Map.Lazy
 import Data.Map.Strict qualified as Map
@@ -21,6 +21,7 @@ import Lambdash.Desugar (desugar)
 import Lambdash.Eval (Scope, Value, eval, methodValue)
 import Lambdash.Infer
 import Lambdash.Syntax
+import Lambdash.TypeSyntax
 import Lambdash.Unify
 
 -- | What a declaration adds to the session.
@@ -127,14 +128,6 @@ declare classes env values declaration = case declaration of
   renderHead (STFun (STVar a) (STVar b)) = "(" <> a <> " -> " <> b <> ")"
   renderHead _ = "?"
 
-effectful :: SType -> Bool
-effectful written = case written of
-  STApp name args -> name `elem` ["Comp", "Job", "Stream"] || any effectful args
-  STList t -> effectful t
-  STFun a b -> effectful a || effectful b
-  STRecord fields _ -> any (effectful . snd) fields
-  _ -> False
-
 -- | A method's type: every unknown bound, and the class on its unknown.
 methodScheme :: String -> Var -> Ty -> Scheme
 methodScheme cls var ty =
@@ -142,39 +135,4 @@ methodScheme cls var ty =
 
 -- | A written type as a scheme over all its unknowns.
 toScheme :: SType -> Scheme
-toScheme written = let ty = evalState (sTy written) (Map.empty, 0) in Forall (Set.toList (ftv ty)) ty
-
-type Naming = State (Map.Map Name Var, Int)
-
-unknown :: Name -> Naming Var
-unknown name = do
-  (names, next) <- get
-  case Map.lookup name names of
-    Just v -> pure v
-    Nothing -> do
-      put (Map.insert name (Var next) names, next + 1)
-      pure (Var next)
-
--- | A row of its own for each computation, job and stream.
-freshRow :: Naming EffRow
-freshRow = do
-  (names, next) <- get
-  put (names, next + 1)
-  pure (effectVar (Var next))
-
-sTy :: SType -> Naming Ty
-sTy written = case written of
-  STVar name -> TVar <$> unknown name
-  STCon name -> pure (TCon name)
-  STList t -> TList <$> sTy t
-  STFun a b -> TFun <$> sTy a <*> sTy b
-  STRecord fields rest -> do
-    tailRow <- maybe (pure REmpty) (fmap RVar . unknown) rest
-    fieldTys <- mapM (\(label, t) -> (,) label <$> sTy t) fields
-    pure (TRecord (foldr (\(label, t) r -> RExtend label t r) tailRow fieldTys))
-  STApp "Comp" [t] -> TComp <$> freshRow <*> sTy t
-  STApp "Job" [t] -> TJob <$> freshRow <*> sTy t
-  STApp "Stream" [i, o, r] -> TStream <$> freshRow <*> sTy i <*> sTy o <*> sTy r
-  STApp "Stage" [i, o] -> TStage <$> sTy i <*> sTy o
-  STApp "Collector" [i, o] -> TCollector <$> sTy i <*> sTy o
-  STApp name _ -> pure (TCon name)
+toScheme written = uncurry Forall (writtenType [] written)

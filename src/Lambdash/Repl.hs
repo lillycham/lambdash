@@ -50,9 +50,9 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Lambdash.Classes (ClassEnv, prelude)
+import Lambdash.Classes (ClassEnv, lookupClass, prelude)
 import Lambdash.Declare (Declared (..), declare)
-import Lambdash.Syntax (Declaration)
+import Lambdash.Syntax (Declaration, SPred (..), SType (..))
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
@@ -82,6 +82,8 @@ data Session = Session
   , -- | The classes and instances: the prelude's, and the session's
     -- declarations.
     sessionClasses :: ClassEnv
+  , -- | Signatures waiting for their binding: @f : t@, then @f = e@.
+    sessionSignatures :: Map.Map Name ([SPred], SType)
   }
 
 -- | A job in the table: a line that Ctrl-Z stopped, or a job that @&@
@@ -103,7 +105,7 @@ data Entry = Entry
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude
+initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty
 
 -- | Does this input open more @do@ blocks than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals.
@@ -165,6 +167,8 @@ data Command
     SetFixity Fixity [Name]
   | -- | @class ...@ or @instance ...@.
     Declare Declaration
+  | -- | @f : Eq a => a -> Bool@: the signature of the next @f = e@.
+    Signature Name [SPred] SType
   | -- | @:elab instance ...@: an instance's dictionary, as code. Nothing is
     -- declared.
     ShowElabDeclaration Declaration
@@ -185,6 +189,7 @@ command =
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> fixityLine
   <|> (Declare <$> declaration)
+  <|> (uncurry . Signature <$> try (name <* symbol ":" <* notFollowedBy (char ':')) <*> qualifiedType)
   <|> (Bind <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> core)
   <|> (BindRun <$> try (name <* symbol "<-") <*> core)
   <|> (Run <$> core)
@@ -414,6 +419,7 @@ renderError (Unbound name) = "unbound name: " <> name
 renderError (NoInstance p) = "no instance: " <> evalState (renderPred p) Map.empty
 renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.empty
 renderError (BadDeclaration message) = message
+renderError (SignatureNeeds p) = "the binding needs " <> evalState (renderPred p) Map.empty <> ", and its signature does not give it"
 renderError (Unentailed p) = "the instance needs " <> evalState (renderPred p) Map.empty <> ", and its context does not give it"
 renderError (Unify err) = case err of
   Mismatch left right -> renderPair "type mismatch: " left right
@@ -731,6 +737,9 @@ stepLine session input =
           pure (Continue session {sessionJobs = others <> [running]} ("[" <> show number <> "] " <> shown))
     Right (SetFixity fixity names) ->
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
+    Right (Signature name context written) -> case writtenCheck classes context written of
+      Just problem -> pure (Failed problem)
+      Nothing -> pure (Continue session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)} "")
     Right (Declare written) -> case declare classes types values written of
       Left err -> pure (Failed (renderError err))
       Right done -> pure (Continue session
@@ -768,8 +777,13 @@ stepLine session input =
               committed done start now (showResult Nothing result)
         valueTy -> pure (Continue session (showValue session valueTy (eval values code)))
     -- A binding abstracts over the dictionaries its type needs.
-    Right (Bind name expression) -> checked (elaborateWith classes Generalising types expression) $ \(ty, code) ->
-      pure (bound session name ty (eval values code))
+    -- A signature, if one waits, decides the binding's type; it is used up.
+    Right (Bind name expression) ->
+      let signed = Map.lookup name (sessionSignatures session)
+          elaborated = maybe (elaborateWith classes Generalising types expression) (\sig -> elaborateSigned classes types sig expression) signed
+          used now = now {sessionSignatures = Map.delete name (sessionSignatures now)}
+      in checked elaborated $ \(ty, code) ->
+        pure (bound (used session) name ty (eval values code))
     Right (BindRun name expression) -> checked (elaborateRunWith classes types expression) $ \(actionTy, ty, code) ->
       preflight actionTy $ \runtime ->
         -- A job stopped here binds when fg finishes it, in the session then.
@@ -871,4 +885,24 @@ runScript path session = do
     Right (Bind _ _) -> True
     Right (BindRun _ _) -> True
     Right (Declare _) -> True
+    Right (Signature {}) -> True
     _ -> False
+
+-- | Whether a signature can stand: its classes exist, and its context
+-- constrains only its own unknowns.
+writtenCheck :: ClassEnv -> [SPred] -> SType -> Maybe String
+writtenCheck classes context written =
+  case [c | SPred c _ <- context, null (lookupClass classes c)] of
+    c : _ -> Just ("no class " <> c)
+    [] | not (all onOwn context) -> Just "a signature's context constrains its own unknowns"
+       | otherwise -> Nothing
+ where
+  onOwn (SPred _ (STVar v)) = v `elem` names written
+  onOwn _ = False
+  names t = case t of
+    STVar v -> [v]
+    STList a -> names a
+    STFun a b -> names a <> names b
+    STRecord fields rest -> concatMap (names . snd) fields <> maybe [] pure rest
+    STApp _ args -> concatMap names args
+    STCon _ -> []

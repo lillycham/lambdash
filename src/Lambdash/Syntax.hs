@@ -88,6 +88,8 @@ data Node
   | -- | @(.size > 1)@: an operator expression whose leftmost operand is an
     -- accessor is a function of the record.
     SAccessorSection Surface
+  | -- | @(e : t)@.
+    SAnn Surface SType
   deriving (Eq, Show)
 
 data Statement
@@ -156,4 +158,6 @@ data Expr
     EWith Expr Expr
   | -- | @e &@: start @e@ as a background job, and give its handle.
     EBg Expr
+  | -- | @(e : t)@: @e@, at a type no more general than @t@.
+    EAnn Expr SType
   deriving (Eq, Show)

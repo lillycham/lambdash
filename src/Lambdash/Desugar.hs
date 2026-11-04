@@ -22,6 +22,7 @@ module Lambdash.Desugar
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.List (intercalate)
 import Lambdash.Syntax
+import Lambdash.TypeSyntax (renderSType)
 
 -- | The name by which sugar refers to a builtin.
 builtinAlias :: Name -> Name
@@ -64,6 +65,7 @@ go (Surface location node) = ELoc location <$> case node of
     e <- go operand
     pure (ELam x (EApp (EApp (EVar op) (EVar x)) e))
   SLeftSection operand op -> EApp (EVar op) <$> go operand
+  SAnn e written -> (`EAnn` written) <$> go e
   SAccessorSection body -> do
     record <- fresh
     ELam record <$> go (replaceLeftmost record body)
@@ -108,6 +110,7 @@ stripLocations expression = case expression of
   ERun e -> ERun (stripLocations e)
   EWith overlay body -> EWith (stripLocations overlay) (stripLocations body)
   EBg e -> EBg (stripLocations e)
+  EAnn e written -> EAnn (stripLocations e) written
   other -> other
 
 -- | Core as text, for @:core@. It reads like the surface syntax where core
@@ -151,6 +154,7 @@ renderCore = render 0
     ERun e -> parens (level > 2) ("run " <> render 3 e)
     EWith overlay body -> parens (level > 2) ("with " <> render 3 overlay <> " " <> render 3 body)
     EBg e -> parens (level > 2) ("bg " <> render 3 e)
+    EAnn e written -> "(" <> render 0 e <> " : " <> renderSType written <> ")"
   spine (ELoc _ e) = spine e
   spine (EApp f x) = let (h, args) = spine f in (h, args <> [x])
   spine e = (e, [])

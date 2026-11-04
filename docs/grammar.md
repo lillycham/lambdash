@@ -45,7 +45,8 @@ Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
 atom        = block | with | REF | literal | record | list | accessor | IDENT
-            | "(" expr ")" | "(" OP ")" | "(" OP stage ")" | "(" expr OP ")" ;
+            | "(" expr ")" | "(" OP ")" | "(" OP stage ")" | "(" expr OP ")"
+            | "(" expr ":" type ")" ;
 literal     = INT | STRING | "true" | "false" | "(" ")" ;
 record      = "{" [ field { "," field } ] "}" ;
 field       = IDENT "=" expr ;
@@ -169,7 +170,8 @@ in this rule only. A line may span several input lines while a `do` is open.
 ```ebnf
 line        = [ ":q" | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
               | ":elab" declaration | declaration
-              | fixity | name "=" expr | name "<-" expr | expr ] EOF ;
+              | fixity | name ":" [ context "=>" ] type
+              | name "=" expr | name "<-" expr | expr ] EOF ;
 fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
 
 declaration = "class" [ context "=>" ] UPPER LOWER "where" members(signature | definition)

@@ -217,6 +217,7 @@ eval env expression =
     ELet name value body -> eval (Map.Lazy.insert name (eval env value) env) body
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
     ELoc _ e -> eval env e
+    EAnn e _ -> eval env e
     EBind name e body -> VComp $ \runtime -> do
       value <- runComp runtime (eval env e)
       runComp runtime (eval (Map.insert name value env) body)

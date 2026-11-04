@@ -38,6 +38,7 @@ module Lambdash.Infer
   , elaborateWith
   , elaborateRunWith
   , elaborateInstance
+  , elaborateSigned
   ) where
 
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put, runStateT)
@@ -48,7 +49,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Lambdash.Classes
-import Lambdash.Syntax (Arg (..), Expr (..), Lit (..), Name, Span (..))
+import Lambdash.TypeSyntax (writtenType)
+import Lambdash.Syntax (Arg (..), Expr (..), Lit (..), Name, SPred, SType, Span (..))
 import Lambdash.Unify
 import qualified Data.Set as Set
 
@@ -80,6 +82,8 @@ data InferError
   | -- | An instance needs this, and neither an instance nor its context
     -- gives it.
     Unentailed Pred
+  | -- | A binding needs this, and its signature's context does not give it.
+    SignatureNeeds Pred
   deriving (Eq, Show)
 
 -- | The state is the next unused unknown, and the classes and instances in
@@ -378,6 +382,15 @@ infer env (ESelect expr label) = do
   fieldSub <- unifying (unify recordTy requiredTy)
   pure (fieldSub `compose` exprSub, apply fieldSub fieldTy, ESelect expr' label)
 
+-- An annotation's unknowns are fresh, so it narrows the type and no more:
+-- (1 : Int) is an Int, and (f : a -> a) any f that fits.
+infer env (EAnn e written) = do
+  let (bound, annotated) = writtenType [] written
+  t <- unifying (instantiate (Forall bound annotated))
+  (s1, te, e') <- infer env e
+  s2 <- unifying (unify (apply s1 te) (apply s1 t))
+  pure (s2 `compose` s1, apply s2 te, e')
+
 -- A location changes nothing about the type.
 infer env (ELoc location e) = do
   (s, t, e') <- infer env e
@@ -634,6 +647,7 @@ commands (ERun e) = commands e
 commands (ELoc _ e) = commands e
 commands (EWith overlay body) = commands overlay <> commands body
 commands (EBg e) = commands e
+commands (EAnn e _) = commands e
 commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied. Class
@@ -771,6 +785,68 @@ elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT g
   isVar _ = False
   nubOrd = Set.toList . Set.fromList . map show
   duplicates names = [n | (i, n) <- zip [0 :: Int ..] names, n `elem` take i names]
+
+-- | Check a binding against its signature, and elaborate it. The signature's
+-- unknowns are rigid: the binding must work for every choice of them, so
+-- it is at least as general as the signature says. Its context gives the
+-- dictionaries, which the code takes as parameters in the context's order;
+-- every predicate on a rigid unknown must follow from them. A signature
+-- generalises a binding that the monomorphism restriction would not: with
+-- n : Num a => a, n = 1 is one value per type.
+--
+-- Effect rows and record tails in a signature are not rigid: the binding's
+-- own rows fill them in, so the preflight still sees its commands.
+elaborateSigned :: ClassEnv -> Env -> ([SPred], SType) -> Expr -> Either InferError (Ty, Expr)
+elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go start) classes
+ where
+  (bound, signature) = writtenType context written
+  start = maximum (nextUnknown env : [n + 1 | Var n <- bound])
+  go = do
+    t <- unifying (instantiate (Forall bound signature))
+    let (sigPreds, sigBare) = unclass t
+    (s1, te, code) <- infer env expr
+    s2 <- unifying (unify (apply s1 te) (apply s1 sigBare))
+    (solved, ty) <- finish env (s2 `compose` s1) sigBare
+    let rigid = Set.toList (typeUnknowns sigBare)
+        images = [apply solved (TVar v) | v <- rigid]
+        fixed = ftvEnv (applyEnv solved env)
+        distinct = Set.size (Set.fromList [v | TVar v <- images]) == length images
+    if all isVar images && distinct && not (any (`Set.member` fixed) [v | TVar v <- images])
+      then pure ()
+      else failWith (BadDeclaration "the binding is less general than its signature")
+    givens <- mapM (\p -> (\n -> (n, applyPred solved p)) <$> freshEvidence) sigPreds
+    (bindings, residual) <- simplify [(n, applyPred solved p) | (n, p) <- classPreds solved]
+    env' <- classEnv
+    let rigidVars = Set.fromList [v | TVar v <- images]
+        onRigid (_, p) = not (Set.null (Set.intersection (predVars p) rigidVars))
+    resolved <- mapM (\(n, p@(IsIn c t')) ->
+      case [(g, c') | (g, IsIn c' t'') <- givens, t'' == t', c' == c || c `elem` superclassesOf env' c'] of
+        (g, c') : _ -> pure (n, superPath env' c' c (EVar g))
+        [] -> failWith (SignatureNeeds p)) (filter onRigid residual)
+    -- What the signature leaves open, as in g : Int -> Bool with eq [] [],
+    -- defaults as a line does.
+    (defaulted, chosen) <- defaultPreds (filter (not . onRigid) residual)
+    let final = apply chosen ty
+        shown = if null givens then final else TClass (map snd givens) final
+    pure (shown, foldr ELam (wrapLets (resolved <> defaulted <> bindings) code) (map fst givens))
+  isVar (TVar _) = True
+  isVar _ = False
+  -- The unknowns in type positions: not rows, which stay flexible.
+  typeUnknowns ty = case ty of
+    TVar v -> Set.singleton v
+    TFun a b -> Set.union (typeUnknowns a) (typeUnknowns b)
+    TList a -> typeUnknowns a
+    TRecord row -> rowUnknowns row
+    TComp _ a -> typeUnknowns a
+    TJob _ a -> typeUnknowns a
+    TStream _ i o r -> Set.unions (map typeUnknowns [i, o, r])
+    TStage i o -> Set.union (typeUnknowns i) (typeUnknowns o)
+    TCollector i o -> Set.union (typeUnknowns i) (typeUnknowns o)
+    TQualified _ a -> typeUnknowns a
+    TClass _ a -> typeUnknowns a
+    TCon _ -> Set.empty
+  rowUnknowns (RExtend _ t r) = Set.union (typeUnknowns t) (rowUnknowns r)
+  rowUnknowns _ = Set.empty
 
 -- Include bound names too: a fresh substitution range must not capture a
 -- quantified variable when that substitution reaches another scheme.

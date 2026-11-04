@@ -51,6 +51,7 @@ module Lambdash.Parser
     operatorName,
     parenOperator,
     typeExpr,
+    qualifiedType,
     declaration,
   )
 where
@@ -267,12 +268,17 @@ parenthesised = spanned $ between (symbol "(") (char ')') (withComma False inner
     <|> (try (notFollowedBy (char '-' *> satisfy isDigit)) *> try (SRightSection <$> lexeme operatorName <*> operators))
     <|> do
       e <- expr
-      section <- optional (lexeme operatorName <* lookAhead (char ')'))
-      pure $ case section of
-        Just op -> SLeftSection e op
-        Nothing
-          | Surface _ (SOp _ _ _) <- e, leftmostAccessor e -> SAccessorSection e
-          | Surface _ node <- e -> node
+      annotation <- optional (try (symbol ":" <* notFollowedBy (char ':')) *> typeExpr)
+      section <- case annotation of
+        Just _ -> pure Nothing
+        Nothing -> optional (lexeme operatorName <* lookAhead (char ')'))
+      pure $ case (annotation, section) of
+        (Just written, _) -> SAnn e written
+        (_, Just op) -> SLeftSection e op
+        _ -> plain e
+  plain e
+    | Surface _ (SOp _ _ _) <- e, leftmostAccessor e = SAccessorSection e
+    | Surface _ node <- e = node
   leftmostAccessor (Surface _ (SOp _ left _)) = leftmostAccessor left
   leftmostAccessor (Surface _ (SAccessor _)) = True
   leftmostAccessor _ = False
@@ -645,3 +651,10 @@ declaration = classDeclaration <|> instanceDeclaration
   members item =
         (lexeme (keyword "do") *> (item `sepEndBy1` symbol ";") <* lexeme (keyword "end"))
     <|> ((: []) <$> item)
+
+-- | A type with an optional context: @Eq a => a -> Bool@.
+qualifiedType :: Parser ([SPred], SType)
+qualifiedType = (,) <$> option [] (try (predicates <* symbol "=>")) <*> typeExpr
+ where
+  predicates = between (symbol "(") (symbol ")") (predicate `sepBy1` symbol ",") <|> ((: []) <$> predicate)
+  predicate = SPred <$> lexeme upperName <*> typeAtom
