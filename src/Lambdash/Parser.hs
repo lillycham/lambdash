@@ -326,11 +326,29 @@ postfixSpaced = do
 stringLiteral :: Parser String
 stringLiteral = char '"' *> manyTill L.charLiteral (char '"')
 
--- | One character of a bareword. These end a word because the line needs them.
-wordChar :: Parser Char
-wordChar = do
+-- | A bareword. Space and @|"$;&@ end it, because the line needs them, and
+-- so does a closing bracket that the word did not open: in @[a, b]@ the @]@
+-- ends the list, but @clip[4PQ].webm@ and @f(1).txt@ are one word each.
+-- A backslash keeps the next character in the word, as in @my\\ file@, as
+-- tab completion writes it.
+bareWord :: Parser String
+bareWord = do
   comma <- asks commaDelimiter
-  satisfy (\c -> not (isSpace c) && c `notElem` (")}]|\"$;&" :: String) && not (comma && c == ','))
+  let plain open c =
+        not (isSpace c) && c `notElem` ("|\"$;&\\" :: String) && not (comma && c == ',')
+          && maybe True (\opener -> take 1 open == [opener]) (lookup c closers)
+      -- The brackets the word has opened, innermost first. An escaped
+      -- bracket is only a character.
+      next open =
+            (char '\\' *> anySingle >>= \c -> (c :) <$> option [] (next open))
+        <|> (satisfy (plain open) >>= \c -> (c :) <$> option [] (next (track c open)))
+  next []
+ where
+  closers = [(')', '('), ('}', '{'), (']', '[')]
+  track c open
+    | c `elem` map snd closers = c : open
+    | c `elem` map fst closers = drop 1 open
+    | otherwise = open
 
 -- | The head of an external command: a path, or a word that starts with a name
 -- that nothing binds. A bound name is left for 'application'.
@@ -346,7 +364,7 @@ commandHead = do
       name <- lookAhead identifier
       bound <- asks (isBound name . contextBound)
       when bound (fail "a bound name is not a command")
-  some wordChar
+  bareWord
 
 -- | One argument of an external command.
 argument :: Parser Arg
@@ -357,7 +375,7 @@ argument = do
   when condition (notFollowedBy (keyword "then" <|> keyword "else" <|> keyword "of"))
   AVar <$> (char '$' *> identifier)
     <|> AWord <$> stringLiteral
-    <|> AWord <$> some wordChar
+    <|> AWord <$> bareWord
 
 -- | @git log --oneline $x@. Words end a line or a bracket, and @--@ is an
 -- ordinary word here, not a comment.
@@ -497,7 +515,7 @@ pathArg = do
   arg <- spanned (SVar <$> (char '$' *> identifier))
     <|> spanned (SLit . LStr <$> stringLiteral)
     <|> between (symbol "(") (char ')') (withComma False expr)
-    <|> spanned (SLit . LStr <$> some wordChar)
+    <|> spanned (SLit . LStr <$> bareWord)
   sc
   pure arg
 

@@ -78,7 +78,8 @@ OPRESERVED  = "=" | "->" | "<-" | "|" | "&" | "::" | ":" | "--" { OPCHAR } ;
 
 HEAD        = WORD ;     (* a path, or a word that starts with an unbound name *)
 ARG         = "$" IDENT | STRING | WORD ;
-WORD        = { any character except space and ) } ] | " $ ; & } ;
+WORD        = { "\\" any character | any character except space and \ | " $ ; & } ;
+              (* a ) } or ] that closes no bracket of the word itself ends it *)
 REF         = { LETTER | DIGIT | . _ - / : ~ + @ ? = & # % } ;   (* with at least one # *)
 ```
 
