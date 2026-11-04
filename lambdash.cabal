@@ -12,7 +12,7 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Classes, Lambdash.Declare, Lambdash.Desugar, Lambdash.Eval, Lambdash.Help, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.TypeSyntax, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Check, Lambdash.Classes, Lambdash.Declare, Lambdash.Desugar, Lambdash.Eval, Lambdash.Help, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.TypeSyntax, Lambdash.Unify
   c-sources:       cbits/spawn.c
   build-depends:   base, async, bytestring, containers, directory, megaparsec, mtl, process, stm, text, transformers, unix
 
@@ -20,7 +20,8 @@ executable lambdash
   import:         shared
   hs-source-dirs: app
   main-is:        Main.hs
-  build-depends:  base, directory, haskeline, lambdash
+  other-modules:  Server
+  build-depends:  base, directory, haskeline, lambdash, lsp, lsp-types, text
   ghc-options:    -threaded
 
 -- Job-control spike. The threaded RTS is the point of the test.
@@ -102,3 +103,10 @@ test-suite nix-tests
   hs-source-dirs: test
   main-is:        NixTests.hs
   build-depends:  base, bytestring, containers, lambdash
+
+test-suite check-tests
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        CheckTests.hs
+  build-depends:  base, directory, lambdash

@@ -28,7 +28,7 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             # From nixpkgs, so cabal never fetches from Hackage.
-            (haskellPackages.ghcWithPackages (p: [ p.async p.haskeline p.megaparsec ]))
+            (haskellPackages.ghcWithPackages (p: [ p.async p.haskeline p.lsp p.megaparsec ]))
             cabal-install
             expect
             haskell-language-server

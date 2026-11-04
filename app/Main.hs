@@ -6,6 +6,8 @@ import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (saveShellTerminal, setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runScript, sessionPrompt, startupFile, step)
 import System.Environment (getArgs)
+import System.Exit (ExitCode (..), exitWith)
+import Server (serve)
 import System.Console.Haskeline
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
 import System.Directory (getCurrentDirectory)
@@ -23,6 +25,15 @@ main = do
   setForeignEncoding utf8
   setFileSystemEncoding utf8
   mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
+  -- An editor talks to the server on stdin and stdout, so no terminal setup.
+  lsp <- ("--lsp" `elem`) <$> getArgs
+  if lsp then serve >>= exitWith . code else shell
+ where
+  code 0 = ExitSuccess
+  code n = ExitFailure n
+
+shell :: IO ()
+shell = do
   -- Computations print straight to stdout, beside the output of haskeline.
   hSetBuffering stdout LineBuffering
   setupTerminal
