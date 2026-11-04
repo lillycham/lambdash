@@ -12,6 +12,15 @@ can be used, scoped, inspected and removed without nesting shells.
 
 The syntax is provisional.
 
+## Run
+
+```bash
+nix run github:lillycham/lambdash
+```
+
+The flake's `packages.default` is the `lambdash` binary, so a system
+configuration can install it from the flake input.
+
 ## Build and test
 
 ```bash
