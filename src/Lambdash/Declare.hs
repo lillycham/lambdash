@@ -139,12 +139,18 @@ declare classes env values declaration = case declaration of
         -- A method left out takes the class's default, if it has one.
         code = written <> maybe [] (\info -> [d | d@(m, _) <- classDefaults info, m `notElem` map fst written]) (lookupClass classes cls)
     elaborated <- elaborateInstance withInstance env inst headType code
+    -- Allowed, as the session is open to change, but said: a binding
+    -- checked earlier keeps the dictionary it was given.
+    let replaced = case lookupInstance prelude cls key of
+          Just _ -> "\nwarning: this replaces the builtin instance " <> cls <> " " <> renderHead headTy
+            <> " from here on; earlier bindings that chose it keep the builtin one"
+          Nothing -> ""
     let value = eval (Map.Lazy.insert dictionaryName value values) elaborated
     pure Declared
       { declaredClasses = withInstance
       , declaredTypes = []
       , declaredValues = [(dictionaryName, value)]
-      , declaredMessage = "instance " <> cls <> " " <> renderHead headTy
+      , declaredMessage = "instance " <> cls <> " " <> renderHead headTy <> replaced
       , declaredCode = Just (dictionaryName, elaborated)
       }
  where

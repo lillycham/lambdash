@@ -115,7 +115,8 @@ Several methods go in a block, which may span lines:
   for the lines after it. A binding that already chose a dictionary keeps
   it. A user class declared again replaces the old one and drops its
   instances. The prelude's classes cannot be declared again, but their
-  instances can: `instance Show Int where show = n -> "int"`.
+  instances can: `instance Show Int where show = n -> "int"`. The prompt
+  warns when an instance replaces a builtin one.
 - **Prelude methods** are dictionary fields, and an instance may name them by
   their operators: `(==)` is `eq` and `div` is `/`.
 

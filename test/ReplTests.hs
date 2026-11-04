@@ -471,7 +471,7 @@ tests =
   , ("class: a prelude class stays", final ["class Eq a where foo : a -> a"] == "Eq is a prelude class")
   , ("class: a method mentions the class's unknown", final ["class Bad a where bad : Int"] == "bad must mention a")
   , ("class: redeclaring drops its instances", final [prettyClass, prettyInt, "class Pretty a where pretty : a -> Int", "pretty (length [])"] == "no instance: Pretty Int")
-  , ("show: values print through Show", session ["instance Show Int where show = n -> \"int\"", "1", "{a = 1, b = [true]}", "pure 3", "x -> x"] == ["instance Show Int", "int", "{a = int, b = [true]}", "int", "<function>"])
+  , ("show: values print through Show", session ["instance Show Int where show = n -> \"int\"", "1", "{a = 1, b = [true]}", "pure 3", "x -> x"] == ["instance Show Int\nwarning: this replaces the builtin instance Show Int from here on; earlier bindings that chose it keep the builtin one", "int", "{a = int, b = [true]}", "int", "<function>"])
   , ("show: as before for the prelude", session ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"] == ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"])
   , ("show: the method", final ["show [1, 2] <> show true"] == "\"[1, 2]true\"")
   , ("show: no instance for a function", final ["show (x -> x)"] == "no instance: Show (a -> a)")
@@ -591,6 +591,9 @@ tests =
   , ("case: only the chosen arm runs", prints [maybeData, "case Just 2 of Just n -> print n; Nothing -> print 0 end"] == ("2\n", ["data Maybe a", ""]))
   , ("case: spans lines", scripted (maybeData <> "\nf = m -> case m of\n  Just x -> x;\n  Nothing -> 0\nend\n") ["f (Just 7)"] == ([], ["7"]))
   , ("case: :core", final [":core case x of Just (Cons y _) -> y; _ -> 0 end"] == "case x of Just (Cons y _) -> y; _ -> 0 end")
+  , ("instance: replacing a builtin one warns", session ["instance Show Int where show = n -> \"int\"", "show 1"]
+      == ["instance Show Int\nwarning: this replaces the builtin instance Show Int from here on; earlier bindings that chose it keep the builtin one", "\"int\""])
+  , ("instance: a new one does not warn", session [shapeData, "instance Show Shape where show = s -> \"s\""] == ["data Shape", "instance Show Shape"])
   , ("display: a String without quotes", session ["display \"a\"", "display {name = \"a\", xs = [1]}"] == ["\"a\"", "\"{name = a, xs = [1]}\""])
   , ("fields: labels and displayed values", final ["fields {name = \"a\", n = 3}"] == "[{label = \"name\", value = \"a\"}, {label = \"n\", value = \"3\"}]")
   , ("table: fits the widths, trims each line", fst (prints ["each [{name = \"a\", n = 10, ext = \"\"}, {name = \"bbb\", n = 2, ext = \"x\"}] | table"])
