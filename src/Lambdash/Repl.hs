@@ -50,10 +50,10 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Lambdash.Classes (ClassEnv (..), ClassInfo (..), Instance (..), lookupClass, prelude)
+import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), lookupClass, lookupData, prelude)
 import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
-import Lambdash.Syntax (Declaration, SPred (..), SType (..))
+import Lambdash.Syntax (Declaration, SPred (..), SType (..), renderPattern)
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
@@ -108,7 +108,7 @@ data Entry = Entry
 initial :: Session
 initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty
 
--- | Does this input open more @do@ blocks than it closes? The REPL then reads
+-- | Does this input open more @do@ blocks or @case@s than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals.
 needsMore :: String -> Bool
 needsMore input = depth (tokens (withoutStrings input)) > 0
@@ -123,6 +123,7 @@ needsMore input = depth (tokens (withoutStrings input)) > 0
   tokens = words . map (\c -> if c `elem` (";(){}[]|," :: String) then ' ' else c)
   depth = foldl (\n token -> case token of
     "do" -> n + 1
+    "case" -> n + 1
     "end" -> n - 1
     _ -> n) (0 :: Int)
 
@@ -268,6 +269,7 @@ hideEffects (TFun a b) = TFun (hideEffects a) (hideEffects b)
 hideEffects (TQualified _ ty) = hideEffects ty
 hideEffects (TClass ps ty) = TClass ps (hideEffects ty)
 hideEffects (TList ty) = TList (hideEffects ty)
+hideEffects (TData name ts) = TData name (map hideEffects ts)
 hideEffects (TStage i o) = TStage (hideEffects i) (hideEffects o)
 hideEffects (TCollector i o) = TCollector (hideEffects i) (hideEffects o)
 hideEffects (TComp _ t) = TComp noEffects (hideEffects t)
@@ -299,6 +301,18 @@ renderTy (TCon name) = pure name
 renderTy (TList ty) = do
   text <- renderTy ty
   pure ("[" <> text <> "]")
+renderTy (TData name args) = do
+  parts <- mapM renderTy args
+  let argument ty text = case ty of
+        TData _ (_ : _) -> "(" <> text <> ")"
+        TFun _ _ -> "(" <> text <> ")"
+        TComp _ _ -> "(" <> text <> ")"
+        TJob _ _ -> "(" <> text <> ")"
+        TStream _ _ _ _ -> "(" <> text <> ")"
+        TStage _ _ -> "(" <> text <> ")"
+        TCollector _ _ -> "(" <> text <> ")"
+        _ -> text
+  pure (unwords (name : zipWith argument args parts))
 renderTy (TStage i o) = renderAdapter "Stage" i o
 renderTy (TCollector i o) = renderAdapter "Collector" i o
 -- One context for both kinds of condition: class predicates first, then
@@ -428,6 +442,8 @@ renderError (Unbound name) = "unbound name: " <> name
 renderError (NoInstance p) = "no instance: " <> evalState (renderPred p) Map.empty
 renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.empty
 renderError (BadDeclaration message) = message
+renderError (BadPattern message) = message
+renderError (NotCovered p) = "the case does not cover " <> renderPattern p
 renderError (SignatureNeeds p) = "the binding needs " <> evalState (renderPred p) Map.empty <> ", and its signature does not give it"
 renderError (Unentailed p) = "the instance needs " <> evalState (renderPred p) Map.empty <> ", and its context does not give it"
 renderError (Unify err) = case err of
@@ -940,6 +956,7 @@ helpFor :: Session -> String -> String
 helpFor session word
   | Just text <- Help.topic word = text
   | Just info <- lookupClass classes word = classHelp classes info
+  | Just info <- lookupData classes word = dataHelp info
   | Just scheme <- Map.lookup word types =
       let ty = either (const "?") renderEffectsType (inferWith classes types (EVar word))
           builtin = Map.lookup word typeEnv == Just scheme
@@ -957,6 +974,18 @@ helpFor session word
   assocWord InfixL = "infixl"
   assocWord InfixR = "infixr"
   assocWord InfixN = "infix"
+
+-- | A data type, as declared.
+dataHelp :: DataInfo -> String
+dataHelp info = "data " <> unwords (dataName info : params) <> " = " <> intercalate " | " (map constructor (dataConstructors info))
+ where
+  names = Map.fromList (zip (dataParams info) params)
+  params = take (length (dataParams info)) [[c] | c <- ['a' ..]]
+  constructor (c, fields) = unwords (c : map field fields)
+  field ty = let text = evalState (renderTy ty) names in case ty of
+    TData _ (_ : _) -> "(" <> text <> ")"
+    TFun _ _ -> "(" <> text <> ")"
+    _ -> text
 
 -- | A class: its superclasses, methods and instances.
 classHelp :: ClassEnv -> ClassInfo -> String
@@ -979,9 +1008,10 @@ classHelp classes info = intercalate "\n" (header : methods <> [instancesLine])
     let letters = ["a", "b", "c", "d"]
         args = zip letters (instRequires inst)
         shape = case instHead inst of
-          "List" -> "[a]"
+          "[]" -> "[a]"
           "->" -> "(a -> b)"
-          "Record" -> "records"
-          other -> other
+          "{}" -> "records"
+          other | null (instRequires inst) -> other
+                | otherwise -> other <> " " <> unwords (take (length (instRequires inst)) letters)
         context = [c <> " " <> v | (v, cs) <- args, c <- cs]
     in shape <> if null context then "" else " when " <> intercalate ", " context

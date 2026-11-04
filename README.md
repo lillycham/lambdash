@@ -52,5 +52,6 @@ fresh state directory. `--no-nix` skips the suite that builds a flake.
 | [classes](docs/classes.md) | classes and instances, `Eq`, `Ord`, `Show`, and how dictionary passing works |
 | `:help` | at the prompt: an overview, `:help NAME`, `:help TOPIC`, `:help CLASS` |
 | [types](docs/types.md) | annotations `(e : t)` and signatures `f : t` |
+| [data](docs/data.md) | `data` types, `case` and patterns, `let rec` |
 | [startup](docs/startup.md) | `init.lsh`, run before the first prompt |
 | [equality](docs/equality.md) | design: classes, `Eq`, `Ord`, operators |

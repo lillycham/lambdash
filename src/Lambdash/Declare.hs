@@ -1,5 +1,5 @@
--- | Class and instance declarations: checked against the classes in scope,
--- and turned into what the session holds.
+-- | Class, instance and data declarations: checked against the classes and
+-- types in scope, and turned into what the session holds.
 --
 -- A class gives its methods, each a field of the class's dictionary. An
 -- instance gives a dictionary, the code that 'elaborateInstance' checks and
@@ -18,7 +18,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Lambdash.Classes
 import Lambdash.Desugar (desugar)
-import Lambdash.Eval (Scope, Value, eval, methodValue)
+import Lambdash.Eval (Scope, Value, constructorValue, eval, methodValue)
 import Lambdash.Infer
 import Lambdash.Syntax
 import Lambdash.TypeSyntax
@@ -77,13 +77,49 @@ declare classes env values declaration = case declaration of
       , declaredMessage = "class " <> cls
       , declaredCode = Nothing
       }
+  DeclData name params constructors -> do
+    when (name `elem` builtinTypes) (bad (name <> " is a builtin type"))
+    case [p | (i, p) <- zip [0 :: Int ..] params, p `elem` take i params] of
+      p : _ -> bad ("the parameter " <> p <> " is named twice")
+      [] -> pure ()
+    let names = map fst constructors
+    case [c | (i, c) <- zip [0 :: Int ..] names, c `elem` take i names] of
+      c : _ -> bad (c <> " is declared twice")
+      [] -> pure ()
+    -- Every type a field names exists, with as many arguments as it takes.
+    -- The type itself is known, so a field can be recursive.
+    let arity t = if t == name then Just (length params) else
+          if t `elem` builtinTypes then Just 0 else length . dataParams <$> lookupData classes t
+    mapM_ (\(t, given) -> case arity t of
+      Nothing -> bad ("no type " <> t)
+      Just wanted | wanted /= given -> bad (t <> " takes " <> show wanted <> " arguments, not " <> show given)
+      _ -> pure ()) (concatMap (concatMap namedTypes . snd) constructors)
+    -- The parameters are the first unknowns, so they are Var 0, Var 1, ...
+    -- An omitted row in a field is empty, as in a method's type.
+    let (vars, fields) = evalState (do
+          vs <- mapM unknown params
+          fs <- mapM (\(c, tys) -> (,) c <$> mapM methodTy tys) constructors
+          pure (vs, fs)) (Map.empty, 0)
+    case [ty | (_, tys) <- fields, ty <- tys, not (ftv ty `Set.isSubsetOf` Set.fromList vars)] of
+      _ : _ -> bad "a field mentions an unknown that is not a parameter of the type"
+      [] -> pure ()
+    let info = DataInfo name vars fields
+        result = dataType name (map TVar vars)
+    pure Declared
+      { declaredClasses = addData info classes
+      , declaredTypes = [(c, Forall vars (foldr TFun result tys)) | (c, tys) <- fields]
+      , declaredValues = [(c, constructorValue c (length tys)) | (c, tys) <- fields]
+      , declaredMessage = "data " <> unwords (name : params)
+      , declaredCode = Nothing
+      }
   DeclInstance requires cls headTy definitions -> do
     known cls
     headArgs <- case headTy of
       STCon _ -> pure []
       STList a -> pure [a]
       STFun a b -> pure [a, b]
-      _ -> bad "an instance is for a type constructor: Int, [a], a -> b"
+      STApp _ Nothing args -> pure args
+      _ -> bad "an instance is for a type constructor: Int, [a], a -> b, Maybe a"
     names <- mapM (\arg -> case arg of
       STVar v -> pure v
       _ -> bad "an instance's head takes distinct unknowns: [a], not [Int]") headArgs
@@ -115,6 +151,16 @@ declare classes env values declaration = case declaration of
   bad = Left . BadDeclaration
   known c = maybe (bad ("no class " <> c)) (const (pure ())) (lookupClass classes c)
   preludeNames = map className (envClasses prelude)
+  builtinTypes = ["Int", "Bool", "()", "String", "Status", "Bytes", "Overlay", "Patch", "Comp", "Job", "Stream", "Stage", "Collector"]
+  -- The named types in a field, and how many arguments each has.
+  namedTypes written = case written of
+    STCon t -> [(t, 0)]
+    STApp t _ args | t `notElem` ["Comp", "Job", "Stream", "Stage", "Collector"] -> (t, length args) : concatMap namedTypes args
+    STApp _ _ args -> concatMap namedTypes args
+    STList t -> namedTypes t
+    STFun a b -> namedTypes a <> namedTypes b
+    STRecord fs _ -> concatMap (namedTypes . snd) fs
+    STVar _ -> []
   convert var signatures = do
     v <- unknown var
     methods <- mapM (\(m, ty) -> (,) m <$> methodTy ty) signatures
@@ -122,6 +168,7 @@ declare classes env values declaration = case declaration of
   renderHead (STCon name) = name
   renderHead (STList (STVar a)) = "[" <> a <> "]"
   renderHead (STFun (STVar a) (STVar b)) = "(" <> a <> " -> " <> b <> ")"
+  renderHead (STApp con _ args) = "(" <> unwords (con : [a | STVar a <- args]) <> ")"
   renderHead _ = "?"
 
 -- | A method's type: every unknown bound, and the class on its unknown.

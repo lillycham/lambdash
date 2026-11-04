@@ -28,6 +28,10 @@ application = postfix { slot } { postfix } ;
 external    = HEAD { ARG } ;
 
 block       = "do" statement { ";" statement } [ ";" ] "end" ;
+case        = "case" expr "of" arm { ";" arm } [ ";" ] "end" ;
+arm         = pattern "->" expr ;
+pattern     = UPPER { patom } | patom ;
+patom       = "_" | LOWER | UPPER | INT | STRING | "true" | "false" | "(" ")" | "(" pattern ")" ;
 statement   = IDENT "<-" expr | name "=" expr | expr ;
 with        = "with" postfix block ;
 
@@ -47,7 +51,7 @@ accessor    = "." IDENT { "." IDENT } ;
 Whitespace can appear inside the brackets of an atom, as in syntax rules.
 
 ```ebnf
-atom        = block | with | REF | literal | record | list | accessor | IDENT
+atom        = block | with | case | REF | literal | record | list | accessor | IDENT
             | "(" expr ")" | "(" OP ")" | "(" OP stage ")" | "(" expr OP ")"
             | "(" expr ":" type ")" ;
 literal     = INT | STRING | "true" | "false" | "(" ")" ;
@@ -61,7 +65,7 @@ list        = "[" [ expr { "," expr } ] "]" ;
 ```ebnf
 IDENT       = LETTER { LETTER | DIGIT | "_" | "'" } - RESERVED ;
 RESERVED    = "let" | "in" | "true" | "false" | "do" | "end" | "with"
-            | "if" | "then" | "else" | "rec" | "and" ;
+            | "if" | "then" | "else" | "rec" | "and" | "case" | "of" ;
 INT         = [ "+" | "-" ] DIGIT { DIGIT } ;
 STRING      = a Haskell string literal ;
 COMMENT     = "--" { any character except newline } ;
@@ -184,7 +188,7 @@ aliases of the same kind, `%pkg`, `%use` and `%useLocal`.
 ## REPL lines
 
 The REPL parses one `line` at a time. `:t`, `:core`, `:elab`, `:q` and `:env` are reserved words
-in this rule only. A line may span several input lines while a `do` is open.
+in this rule only. A line may span several input lines while a `do` or a `case` is open.
 
 ```ebnf
 line        = [ ":q" | ":help" [ NAME ] | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
@@ -194,7 +198,8 @@ line        = [ ":q" | ":help" [ NAME ] | ":t" expr | ":core" expr | ":elab" [ n
 fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
 
 declaration = "class" [ context "=>" ] UPPER LOWER "where" members(signature | definition)
-            | "instance" [ context "=>" ] UPPER tatom "where" members(definition) ;
+            | "instance" [ context "=>" ] UPPER tatom "where" members(definition)
+            | "data" UPPER { LOWER } "=" UPPER { tatom } { "|" UPPER { tatom } } ;
 context     = pred | "(" pred { "," pred } ")" ;
 pred        = UPPER tatom ;
 members(x)  = x | "do" x { ";" x } [ ";" ] "end" ;
@@ -204,7 +209,8 @@ definition  = name "=" expr ;
 type        = btype [ "->" type ] ;
 btype       = "Comp" [ row ] tatom | "Job" [ row ] tatom
             | "Stream" [ row ] tatom tatom tatom
-            | "Stage" tatom tatom | "Collector" tatom tatom | tatom ;
+            | "Stage" tatom tatom | "Collector" tatom tatom
+            | UPPER tatom { tatom } | tatom ;            (* a declared type: Maybe Int *)
 tatom       = LOWER | UPPER | "(" ")" | "(" type ")" | "[" type "]"
             | "{" [ IDENT ":" type { "," IDENT ":" type } ] [ "|" LOWER ] "}" ;
 row         = "{" [ label { "," label } ] [ "|" LOWER ] "}" ;   (* only when the arguments follow *)
@@ -238,6 +244,8 @@ See [structured streams](streams.md) for lists, line framing, filters and collec
 - A bare `cd` means `cd ~`, also under `:t`. The function is `x -> cd $x`.
 - `--` starts a comment in expression position, which is why flags such as
   `--local` are not syntax.
+- `case`, `of`, `rec` and `and` are reserved. In a `case` scrutinee, `of` ends a
+  command line, as `then` does after `if`. See [data types](data.md).
 - `class` and `instance` start a declaration only before a capital or a
   parenthesis, so either is still a name. `where` is not reserved. In a
   type, a lowercase name is an unknown and a capitalised one a constructor.

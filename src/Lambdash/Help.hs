@@ -17,9 +17,10 @@ overview = unlines'
   , "shell   jobs  fg [n]  bg [n]  allow  deny            Ctrl-Z stops, Ctrl-C cancels"
   , "lines   x = e  bind          x <- e  run, then bind  f : t  signature"
   , "        let rec f = x -> … and g = y -> …  recursive functions"
-  , "        class …  instance …  infixl 6 <+>  fixity"
+  , "        class …  instance …  data T = A | B t  infixl 6 <+>  fixity"
   , "exprs   x -> e   f x   a | f | collect   do a; b end   with o do … end   e &"
-  , "        if c then a else b   let x = e in b   let rec f = x -> … in b"
+  , "        if c then a else b   case e of p -> a; _ -> b end"
+  , "        let x = e in b   let rec f = x -> … in b"
   , "        {a = 1}  r.a  .a   [1, 2]   \"s\"   (e : t)   (+ 1)   (.size > 1)"
   , "        git log --oneline   ls src   nixpkgs#jq   -- comment"
   , ""
@@ -36,7 +37,7 @@ topics :: [(String, String)]
 topics =
   [ ("syntax", unlines'
       [ "A line is an expression, a binding (x = e, x <- e), a signature (f : t),"
-      , "a declaration (class, instance) or a fixity line."
+      , "a declaration (class, instance, data) or a fixity line."
       , "An unbound name at the head is an external command: its words are"
       , "strings, $x is a variable. A bound name is a function."
       , "do a; b; c end runs in order; x <- e and x = e bind for what follows."
@@ -79,6 +80,12 @@ topics =
       , "Rows as :t prints them: Comp {exec git, console | e} a. A closed row is"
       , "a ceiling. (e : t) narrows; f : Eq a => a -> Bool before f = … is rigid."
       , "   docs/types.md, docs/effects.md" ])
+  , ("data", unlines'
+      [ "data Maybe a = Nothing | Just a declares a type; Just is a function."
+      , "case m of Just x -> x; Nothing -> 0 end: the first arm that matches."
+      , "Patterns: _  x  Just p  0  \"s\"  true  (). Every value must be covered."
+      , "let rec f = x -> … and g = y -> … binds recursive functions."
+      , "   docs/data.md" ])
   , ("startup", unlines'
       [ "~/.config/lambdash/init.lsh ($XDG_CONFIG_HOME) runs before the first"
       , "prompt, line by line. Errors name their line.  --no-init skips it."

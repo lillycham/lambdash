@@ -11,6 +11,9 @@ module Lambdash.Syntax
   , Surface (..)
   , Node (..)
   , Statement (..)
+  , Pattern (..)
+  , patternVars
+  , renderPattern
   , Expr (..)
   , SType (..)
   , SRow (..)
@@ -96,7 +99,45 @@ data Node
     SAnn Surface SType
   | -- | @if c then a else b@.
     SIf Surface Surface Surface
+  | -- | @case e of p -> a; q -> b end@.
+    SCase Surface [(Pattern, Surface)]
   deriving (Eq, Show)
+
+-- | A pattern in a @case@ arm.
+data Pattern
+  = -- | @_@: anything, bound to nothing.
+    PWild
+  | -- | @x@: anything, bound to @x@.
+    PVar Name
+  | -- | @Just x@: a constructor of a declared type, and a pattern for each
+    -- of its fields.
+    PCon Name [Pattern]
+  | -- | @0@, @"s"@, @true@, @()@: that value only.
+    PLit Lit
+  deriving (Eq, Show)
+
+-- | A pattern as written. A constructor with fields is bracketed where it is
+-- itself a field.
+renderPattern :: Pattern -> String
+renderPattern = go False
+ where
+  go nested p = case p of
+    PWild -> "_"
+    PVar name -> name
+    PCon name [] -> name
+    PCon name fields -> (if nested then \s -> "(" <> s <> ")" else id) (unwords (name : map (go True) fields))
+    PLit (LInt n) -> (if nested && n < 0 then \s -> "(" <> s <> ")" else id) (show n)
+    PLit (LBool b) -> if b then "true" else "false"
+    PLit LUnit -> "()"
+    PLit (LStr s) -> show s
+    PLit (LRef s) -> s
+
+-- | The names a pattern binds, left to right.
+patternVars :: Pattern -> [Name]
+patternVars p = case p of
+  PVar name -> [name]
+  PCon _ fields -> concatMap patternVars fields
+  _ -> []
 
 data Statement
   = -- | @x <- e@.
@@ -130,7 +171,7 @@ data SRow = SRow [String] (Maybe Name)
 data SPred = SPred Name SType
   deriving (Eq, Show)
 
--- | A line that declares a class or an instance.
+-- | A line that declares a class, an instance or a data type.
 data Declaration
   = -- | @class (Eq a) => Hashable a where hash : a -> Int@: the superclasses,
     -- the class, its unknown, its methods' types, and default definitions.
@@ -138,6 +179,9 @@ data Declaration
   | -- | @instance Show a => Show [a] where show = ...@: the context, the
     -- class, the head, and the methods.
     DeclInstance [SPred] Name SType [(Name, Surface)]
+  | -- | @data Maybe a = Nothing | Just a@: the type, its parameters, and
+    -- each constructor with the types of its fields.
+    DeclData Name [Name] [(Name, [SType])]
   deriving (Eq, Show)
 
 -- | Core: what desugaring leaves, for the checker and the evaluator.
@@ -179,4 +223,7 @@ data Expr
   | -- | @if c then a else b@. Two computations join their rows: the line
     -- may do either.
     EIf Expr Expr Expr
+  | -- | @case e of p -> a; q -> b end@: the first arm whose pattern
+    -- matches. The checker makes sure that some arm always does.
+    ECase Expr [(Pattern, Expr)]
   deriving (Eq, Show)

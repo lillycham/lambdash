@@ -11,6 +11,7 @@
 -- > git log --oneline $x        external command, when nothing binds the head
 -- > source | stage | stage      pipeline, below application precedence
 -- > do x <- e; f x end           a block of statements, run in order
+-- > case m of Just x -> x end   pattern matching; arms joined by ;
 -- > with o do e end              a block with one more environment layer
 -- > sleep 10 &                   a background job; gives its handle
 -- > nixpkgs#ffmpeg  .#dev        a flake reference: a String
@@ -42,6 +43,8 @@ module Lambdash.Parser
     letIn,
     recGroup,
     doBlock,
+    caseOf,
+    casePattern,
     expr,
     parseExpr,
     parseSurfaceIn,
@@ -101,8 +104,8 @@ data ParseContext = ParseContext
   , commaDelimiter :: Bool
   , -- | Inside @do ... end@, the word @end@ ends a command line.
     inBlock :: Bool
-  , -- | Between @if@ and @else@, the words @then@ and @else@ end a command
-    -- line.
+  , -- | Between @if@ and @else@, and between @case@ and @of@, the words
+    -- @then@, @else@ and @of@ end a command line.
     inCondition :: Bool
   , -- | Each operator's precedence and associativity. An operator not here
     -- is @infixl 9@.
@@ -197,7 +200,9 @@ reservedNames =
     "then",
     "else",
     "rec",
-    "and"
+    "and",
+    "case",
+    "of"
   ]
 
 -- | A reserved word. @let@ matches in @let x@, but not in @letter@.
@@ -261,6 +266,7 @@ atom =
     <|> parenthesised
     <|> doBlock
     <|> withBlock
+    <|> caseOf
     <|> spanned (SLit . LRef <$> flakeRef)
     <|> spanned (SLit <$> literal)
     <|> record
@@ -348,7 +354,7 @@ argument = do
   block <- asks inBlock
   when block (notFollowedBy (keyword "end"))
   condition <- asks inCondition
-  when condition (notFollowedBy (keyword "then" <|> keyword "else"))
+  when condition (notFollowedBy (keyword "then" <|> keyword "else" <|> keyword "of"))
   AVar <$> (char '$' *> identifier)
     <|> AWord <$> stringLiteral
     <|> AWord <$> some wordChar
@@ -487,7 +493,7 @@ pathArg = do
   block <- asks inBlock
   when block (notFollowedBy (keyword "end"))
   condition <- asks inCondition
-  when condition (notFollowedBy (keyword "then" <|> keyword "else"))
+  when condition (notFollowedBy (keyword "then" <|> keyword "else" <|> keyword "of"))
   arg <- spanned (SVar <$> (char '$' *> identifier))
     <|> spanned (SLit . LStr <$> stringLiteral)
     <|> between (symbol "(") (char ')') (withComma False expr)
@@ -594,6 +600,44 @@ doBlock = spanned $ do
     <|> (StmtLet <$> try ((lexeme identifier <|> lexeme parenOperator) <* symbol "=" <* notFollowedBy (char '=')) <*> expr)
     <|> (StmtRun <$> expr)
 
+-- | @case e of p -> a; q -> b end@. Each arm binds its pattern's names in
+-- its body. As in a block, @;@ and a bare @end@ end a command line.
+--
+-- The scrutinee ends at @of@, which ends a command line there, as @then@
+-- does after @if@.
+caseOf :: Parser Surface
+caseOf = spanned $ do
+  lexeme (keyword "case")
+  scrutinee <- local (\c -> c {inCondition = True}) expr
+  lexeme (keyword "of")
+  arms <- local (\context -> context {inBlock = True, commaDelimiter = False}) (arm `sepEndBy1` symbol ";")
+  keyword "end"
+  pure (SCase scrutinee arms)
+ where
+  arm = do
+    p <- casePattern
+    _ <- symbol "->"
+    body <- binding (patternVars p) expr
+    pure (p, body)
+
+-- | A pattern: @_@, @x@, @Just x@, @Cons x (Cons y rest)@, @0@, @"s"@,
+-- @true@ or @()@. A capitalised name is a constructor, and any other name
+-- binds.
+casePattern :: Parser Pattern
+casePattern = (PCon <$> lexeme upperName <*> many patternAtom) <|> patternAtom
+
+patternAtom :: Parser Pattern
+patternAtom =
+      (PWild <$ lexeme (try (char '_' <* notFollowedBy identifierChar)))
+  <|> (PLit LUnit <$ try (symbol "(" *> symbol ")"))
+  <|> between (symbol "(") (symbol ")") casePattern
+  <|> (PLit . LStr <$> lexeme stringLiteral)
+  <|> (PLit . LInt <$> try (lexeme signedInteger))
+  <|> (PLit (LBool True) <$ lexeme (keyword "true"))
+  <|> (PLit (LBool False) <$ lexeme (keyword "false"))
+  <|> (PCon <$> lexeme upperName <*> pure [])
+  <|> (PVar <$> lexeme lowerName)
+
 -- | @with overlay do ... end@.
 -- A bare reference resolves with pkg first: see "Lambdash.Desugar".
 withBlock :: Parser Surface
@@ -639,6 +683,7 @@ parseSurfaceIn bound = first errorBundlePretty . runIn bound (sc *> expr <* eof)
 -- > Int  String  ()  [a]        constructors, lists
 -- > {name : String | r}         a record, open with a tail
 -- > Comp a  Job a  Stream i o r  Stage i o  Collector i o
+-- > Maybe Int  Either e a        a declared type and its arguments
 typeExpr :: Parser SType
 typeExpr = do
   t <- appliedType
@@ -657,6 +702,11 @@ typeExpr = do
         if applied `elem` ["Comp", "Job", "Stream"]
           then withRow <|> (STApp applied Nothing <$> count n typeAtom)
           else STApp applied Nothing <$> count n typeAtom
+      -- A declared type takes its arguments: Maybe Int, Either e a.
+      Nothing | Just con <- name -> do
+        _ <- lexeme upperName
+        args <- many typeAtom
+        pure (if null args then STCon con else STApp con Nothing args)
       Nothing -> typeAtom
   arities = [("Comp", 1), ("Job", 1), ("Stream", 3), ("Stage", 2), ("Collector", 2)]
 
@@ -695,7 +745,7 @@ upperName = try (lookAhead upperChar *> identifier)
 -- | @class ... where ...@ or @instance ... where ...@. Several methods go in
 -- a block: @where do m : t; n : u end@.
 declaration :: Parser Declaration
-declaration = classDeclaration <|> instanceDeclaration
+declaration = classDeclaration <|> instanceDeclaration <|> dataDeclaration
  where
   start word = try (lexeme (keyword word) <* lookAhead (upperChar <|> char '('))
   classDeclaration = do
@@ -706,6 +756,13 @@ declaration = classDeclaration <|> instanceDeclaration
     lexeme (keyword "where")
     items <- classMembers
     pure (DeclClass supers cls var [x | Left x <- items] [x | Right x <- items])
+  -- data List a = Nil | Cons a (List a)
+  dataDeclaration = do
+    start "data"
+    typeName <- lexeme upperName
+    params <- many (lexeme lowerName)
+    _ <- symbol "=" <* notFollowedBy (char '=')
+    DeclData typeName params <$> (((,) <$> lexeme upperName <*> many typeAtom) `sepBy1` symbol "|")
   instanceDeclaration = do
     start "instance"
     requires <- context

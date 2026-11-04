@@ -44,13 +44,13 @@ module Lambdash.Infer
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put, runStateT)
 import Control.Monad.Trans.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad (foldM)
+import Control.Monad (foldM, when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Lambdash.Classes
 import Lambdash.TypeSyntax (writtenType)
-import Lambdash.Syntax (Arg (..), Expr (..), Lit (..), Name, SPred, SType, Span (..))
+import Lambdash.Syntax (Arg (..), Expr (..), Lit (..), Name, Pattern (..), SPred, SType, Span (..), patternVars)
 import Lambdash.Unify
 import qualified Data.Set as Set
 
@@ -84,6 +84,11 @@ data InferError
     Unentailed Pred
   | -- | A binding needs this, and its signature's context does not give it.
     SignatureNeeds Pred
+  | -- | A pattern that cannot stand: an unknown constructor, the wrong
+    -- number of fields, or a name bound twice.
+    BadPattern String
+  | -- | A case that no arm matches for values like this one.
+    NotCovered Pattern
   deriving (Eq, Show)
 
 -- | The state is the next unused unknown, and the classes and instances in
@@ -121,6 +126,7 @@ ftv (TStream eff i o r) = Set.unions (ftvEffects eff : map ftv [i, o, r])
 ftv (TQualified cs ty) = Set.unions (ftv ty : map constraintVars cs)
 ftv (TClass ps ty) = Set.unions (ftv ty : map predVars ps)
 ftv (TList ty) = ftv ty
+ftv (TData _ ts) = Set.unions (map ftv ts)
 ftv (TStage i o) = ftv i `Set.union` ftv o
 ftv (TCollector i o) = ftv i `Set.union` ftv o
 
@@ -441,21 +447,37 @@ infer env (EIf c a b) = do
   (s3, ta, a') <- infer (applyEnv known env) a
   let known' = s3 `compose` known
   (s4, tb, b') <- infer (applyEnv known' env) b
-  let ta' = apply s4 ta
-  (s5, joined) <- case (ta', tb) of
-    (TComp r x, TComp r' y) -> do
-      s <- unifying (unify x y)
-      pure (s, TComp (unionEffects (applyEffects s r) (applyEffects s r')) (apply s x))
-    (TJob r x, TJob r' y) -> do
-      s <- unifying (unify x y)
-      pure (s, TJob (unionEffects (applyEffects s r) (applyEffects s r')) (apply s x))
-    (TStream r i o x, TStream r' i' o' x') -> do
-      s <- unifying (unify (TFun i (TFun o x)) (TFun i' (TFun o' x')))
-      pure (s, TStream (unionEffects (applyEffects s r) (applyEffects s r')) (apply s i) (apply s o) (apply s x))
-    _ -> do
-      s <- unifying (unify ta' tb)
-      pure (s, apply s tb)
+  (s5, joined) <- joinBranches (apply s4 ta) tb
   pure (s5 `compose` s4 `compose` known', joined, EIf c' a' b')
+
+-- Every arm's pattern has the scrutinee's type, and the arms join as the
+-- branches of an if do. Some arm must match every value: see 'uncovered'.
+infer env (ECase scrutinee arms) = do
+  (s0, scrutineeTy, scrutinee') <- infer env scrutinee
+  let arm (known, sofar, done) (p, body) = do
+        case [n | (i, n) <- zip [0 :: Int ..] (patternVars p), n `elem` take i (patternVars p)] of
+          n : _ -> failWith (BadPattern (n <> " is bound twice in one pattern"))
+          [] -> pure ()
+        (sp, patternTy, binds) <- inferPattern p
+        let k1 = sp `compose` known
+        u <- unifying (unify (apply k1 scrutineeTy) (apply k1 patternTy))
+        let k2 = u `compose` k1
+            env' = foldr (\(n, t) -> Map.insert n (mono (apply k2 t))) (applyEnv k2 env) binds
+        (sb, bodyTy, body') <- infer env' body
+        let k3 = sb `compose` k2
+        case sofar of
+          Nothing -> pure (k3, Just bodyTy, done <> [(p, body')])
+          Just previous -> do
+            -- The pattern can teach the earlier arms something too.
+            (sj, joined) <- joinBranches (apply k3 previous) (apply k3 bodyTy)
+            pure (sj `compose` k3, Just joined, done <> [(p, body')])
+  (sub, joined, arms') <- foldM arm (s0, Nothing, []) arms
+  classes <- classEnv
+  case uncovered classes [[p] | (p, _) <- arms] 1 of
+    Just (p : _) -> failWith (NotCovered p)
+    _ -> pure ()
+  ty <- maybe fresh pure joined
+  pure (sub, ty, ECase scrutinee' arms')
 
 -- A location changes nothing about the type.
 infer env (ELoc location e) = do
@@ -508,6 +530,108 @@ infer env (EBg e) = do
   (s, eff, result, e') <- inferRun env e
   pure (s, TComp eff (TJob eff result), EBg e')
 
+-- | Two branches have one type, except their rows: two computations, jobs
+-- or streams give the union of their rows, as the line may do either.
+joinBranches :: Ty -> Ty -> Infer (Subst, Ty)
+joinBranches ta tb = case (ta, tb) of
+  (TComp r x, TComp r' y) -> do
+    s <- unifying (unify x y)
+    pure (s, TComp (unionEffects (applyEffects s r) (applyEffects s r')) (apply s x))
+  (TJob r x, TJob r' y) -> do
+    s <- unifying (unify x y)
+    pure (s, TJob (unionEffects (applyEffects s r) (applyEffects s r')) (apply s x))
+  (TStream r i o x, TStream r' i' o' x') -> do
+    s <- unifying (unify (TFun i (TFun o x)) (TFun i' (TFun o' x')))
+    pure (s, TStream (unionEffects (applyEffects s r) (applyEffects s r')) (apply s i) (apply s o) (apply s x))
+  _ -> do
+    s <- unifying (unify ta tb)
+    pure (s, apply s tb)
+
+-- | The type of the values a pattern matches, and the type of each name it
+-- binds. A literal pattern has its literal's type, and an integer is an
+-- Int: there is no class for matching on a number of any type.
+inferPattern :: Pattern -> Infer (Subst, Ty, [(Name, Ty)])
+inferPattern p = case p of
+  PWild -> (\t -> (emptySubst, t, [])) <$> fresh
+  PVar name -> (\t -> (emptySubst, t, [(name, t)])) <$> fresh
+  PLit lit -> pure (emptySubst, literalTy lit, [])
+  PCon name fields -> do
+    classes <- classEnv
+    (info, fieldTys) <- maybe (failWith (BadPattern ("no constructor " <> name))) pure (lookupConstructor classes name)
+    when (length fields /= length fieldTys) $
+      failWith (BadPattern (name <> " has " <> count (length fieldTys) <> ", not " <> show (length fields)))
+    args <- mapM (const fresh) (dataParams info)
+    let at = emptySubst {getSubst = Map.fromList (zip (dataParams info) args)}
+        step (known, binds) (field, wanted) = do
+          (s, t, more) <- inferPattern field
+          let sofar = s `compose` known
+          u <- unifying (unify (apply sofar t) (apply sofar wanted))
+          pure (u `compose` sofar, binds <> more)
+    (sub, binds) <- foldM step (emptySubst, []) (zip fields (map (apply at) fieldTys))
+    pure (sub, apply sub (dataType (dataName info) args), [(n, apply sub t) | (n, t) <- binds])
+ where
+  count 1 = "1 field"
+  count n = show n <> " fields"
+  literalTy (LInt _) = TInt
+  literalTy (LBool _) = TBool
+  literalTy LUnit = TUnit
+  literalTy (LStr _) = TString
+  literalTy (LRef _) = TString
+
+-- | A row of values that no row of patterns matches, if there is one. Each
+-- row is one arm, with one pattern for each of the @n@ values; a case is
+-- one column. This is Maranget's check of whether a row of wildcards is
+-- useful, which builds the missing values as it goes.
+--
+-- A column whose patterns name every constructor of a type splits by
+-- constructor. Otherwise only the rows with a wildcard there can match a
+-- missing constructor, which is the example. Booleans and unit are
+-- constructors; integers and strings never have them all.
+uncovered :: ClassEnv -> [[Pattern]] -> Int -> Maybe [Pattern]
+uncovered _ rows 0 = if null rows then Just [] else Nothing
+uncovered env rows n = case signature of
+  Just constructors | all (`elem` present) (map fst constructors) ->
+    firstJust [ rebuild c arity <$> uncovered env (specialise c arity) (arity + n - 1) | (c, arity) <- constructors ]
+  _ -> do
+    rest <- uncovered env [ps | (p : ps) <- rows, wild p] (n - 1)
+    let example = case [(c, arity) | (c, arity) <- maybe [] id signature, c `notElem` present] of
+          (c, arity) : _ | not (null present) -> build c (replicate arity PWild)
+          _ -> PWild
+    Just (example : rest)
+ where
+  heads = [p | (p : _) <- rows, not (wild p)]
+  present = [c | Just (c, _) <- map key heads]
+  -- Every constructor of the first column's type, and each one's arity.
+  signature = case heads of
+    PCon c _ : _ -> (\(info, _) -> [(c', length fs) | (c', fs) <- dataConstructors info]) <$> lookupConstructor env c
+    PLit (LBool _) : _ -> Just [("true", 0), ("false", 0)]
+    PLit LUnit : _ -> Just [("()", 0)]
+    _ -> Nothing
+  specialise c arity = [fields <> ps | (p : ps) <- rows, Just fields <- [matchKey c arity p]]
+  matchKey c arity p
+    | wild p = Just (replicate arity PWild)
+    | Just (c', fields) <- key p, c' == c = Just fields
+    | otherwise = Nothing
+  rebuild c arity values = let (fields, rest) = splitAt arity values in build c fields : rest
+  build "true" [] = PLit (LBool True)
+  build "false" [] = PLit (LBool False)
+  build "()" [] = PLit LUnit
+  build c fields = PCon c fields
+  key p = case p of
+    PCon c fields -> Just (c, fields)
+    PLit (LBool b) -> Just (if b then "true" else "false", [])
+    PLit LUnit -> Just ("()", [])
+    PLit (LInt i) -> Just (show i, [])
+    PLit (LStr s) -> Just (show s, [])
+    PLit (LRef s) -> Just (show s, [])
+    _ -> Nothing
+  wild PWild = True
+  wild (PVar _) = True
+  wild _ = False
+  firstJust xs = case [x | Just x <- xs] of
+    x : _ -> Just x
+    [] -> Nothing
+
 -- | Close the effect tails that only recursion put in a group's types. A
 -- recursive call unifies a member's row with a row that holds it, as in
 -- r = {console} + r, and the solution leaves a tail that nothing else
@@ -531,6 +655,7 @@ closeRecursion env s tys = closing `compose` s
     TJob eff t -> tails p eff <> polarities p t
     TStream eff i o r -> tails p eff <> polarities (not p) i <> polarities p o <> polarities p r
     TList t -> polarities p t
+    TData _ ts -> concatMap (polarities p) ts
     TRecord row -> concatMap (polarities p . snd) (fst (flatten row))
     TStage i o -> polarities (not p) i <> polarities p o
     TCollector i o -> polarities (not p) i <> polarities p o
@@ -635,7 +760,7 @@ simplify ((evidence, IsIn cls ty) : rest) = do
     TVar _ -> pure (bindings, (evidence, IsIn cls ty) : residual)
     -- A record is an instance when every field is, and an open tail is a
     -- predicate on the tail: Eq {a : Int | r} needs Eq Int and Eq { | r}.
-    TRecord row -> case lookupInstance env cls "Record" of
+    TRecord row -> case lookupInstance env cls "{}" of
       Nothing -> failWith ((NoInstance (IsIn cls ty)))
       Just _ -> case flatten row of
         ([], RVar _) -> pure (bindings, (evidence, IsIn cls ty) : residual)
@@ -649,7 +774,7 @@ simplify ((evidence, IsIn cls ty) : rest) = do
               base = case tailEvidence of
                 [(n, _)] -> ESelect (EVar n) recordFields
                 _ -> ERecord []
-              dictionary = EApp (EVar (instanceName cls "Record")) (EApp (EApp (EVar extendFields) known) base)
+              dictionary = EApp (EVar (instanceName cls "{}")) (EApp (EApp (EVar extendFields) known) base)
           pure (inner <> [(evidence, dictionary)] <> bindings, innerResidual <> residual)
     _ -> case tyKey ty of
       Nothing -> failWith ((NoInstance (IsIn cls ty)))
@@ -788,6 +913,7 @@ commands (EWith overlay body) = commands overlay <> commands body
 commands (EBg e) = commands e
 commands (EAnn e _) = commands e
 commands (EIf c a b) = commands c <> commands a <> commands b
+commands (ECase scrutinee arms) = commands scrutinee <> concatMap (commands . snd) arms
 commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied. Class
@@ -980,6 +1106,7 @@ elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go 
     TVar v -> Set.singleton v
     TFun a b -> Set.union (typeUnknowns a) (typeUnknowns b)
     TList a -> typeUnknowns a
+    TData _ ts -> Set.unions (map typeUnknowns ts)
     TRecord row -> rowUnknowns row
     TComp _ a -> typeUnknowns a
     TJob _ a -> typeUnknowns a

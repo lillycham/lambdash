@@ -16,6 +16,7 @@ module Lambdash.Eval
     scope,
     summarise,
     methodValue,
+    constructorValue,
   )
 where
 
@@ -37,6 +38,7 @@ import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, g
 import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
+import Lambdash.Syntax (Pattern (..))
 import Lambdash.Nix (resolveDev, resolvePkg)
 import Lambdash.Overlay
 import Lambdash.Runtime
@@ -59,6 +61,8 @@ data Value
   | VBytes BS.ByteString
   | VRecord [(Label, Value)]
   | VList [Value]
+  | -- | A value of a declared data type: its constructor, and its fields.
+    VData Name [Value]
   | -- | The name identifies the builtin.
     VBuiltin Name (Value -> Value)
   | VClosure Name Expr Scope
@@ -95,6 +99,11 @@ render (VRecord fields) = "{" <> commaSep (map renderField fields) <> "}"
   where
     renderField (label, value) = label <> " = " <> render value
 render (VList values) = "[" <> commaSep (map render values) <> "]"
+render (VData name fields) = unwords (name : map field fields)
+  where
+    field value@(VData _ (_ : _)) = "(" <> render value <> ")"
+    field value@(VInt n) | n < 0 = "(" <> render value <> ")"
+    field value = render value
 render (VBuiltin _ _) = "<function>"
 render (VClosure _ _ _) = "<function>"
 render (VComp _) = "<computation>"
@@ -223,6 +232,11 @@ eval env expression =
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
     ELoc _ e -> eval env e
     EAnn e _ -> eval env e
+    ECase scrutinee arms ->
+      let value = eval env scrutinee
+      in case [(binds, body) | (p, body) <- arms, Just binds <- [match p value]] of
+        (binds, body) : _ -> eval (foldr (uncurry Map.insert) env binds) body
+        [] -> error "eval: no arm matched, and the checker said one would"
     EIf c a b -> case eval env c of
       VBool True -> eval env a
       VBool False -> eval env b
@@ -247,6 +261,27 @@ eval env expression =
     word (AVar name) = case Map.lookup name env of
       Just (VStr s) -> s
       _ -> error "eval: the checker passed a non-String argument"
+
+-- | The names a pattern binds, if it matches the value.
+match :: Pattern -> Value -> Maybe [(Name, Value)]
+match p value = case (p, value) of
+  (PWild, _) -> Just []
+  (PVar name, _) -> Just [(name, value)]
+  (PCon name fields, VData name' values)
+    | name == name' && length fields == length values -> concat <$> sequence (zipWith match fields values)
+  (PLit (LInt n), VInt m) | n == m -> Just []
+  (PLit (LBool b), VBool c) | b == c -> Just []
+  (PLit LUnit, VUnit) -> Just []
+  (PLit (LStr s), VStr t) | s == t -> Just []
+  _ -> Nothing
+
+-- | A constructor with this many fields: a function of each field, in
+-- turn, or the value itself when it has none.
+constructorValue :: Name -> Int -> Value
+constructorValue name arity = go arity []
+ where
+  go 0 fields = VData name (reverse fields)
+  go k fields = VBuiltin name (\field -> go (k - 1) (field : fields))
 
 -- | What @ls@ gives for each entry. @ext@ is the part after the last dot, or
 -- empty.
@@ -561,20 +596,20 @@ dictionaries =
            , ("%", intOp "%" mod) ])
        , (instanceName "Semigroup" "String", semigroup (\a b -> case (a, b) of (VStr x, VStr y) -> VStr (x <> y); _ -> error "<>: String"))
        , (instanceName "Semigroup" "Bytes", semigroup (\a b -> case (a, b) of (VBytes x, VBytes y) -> VBytes (x <> y); _ -> error "<>: Bytes"))
-       , (instanceName "Semigroup" "List", semigroup (\a b -> case (a, b) of (VList x, VList y) -> VList (x <> y); _ -> error "<>: List"))
+       , (instanceName "Semigroup" "[]", semigroup (\a b -> case (a, b) of (VList x, VList y) -> VList (x <> y); _ -> error "<>: List"))
        -- One overlay, whose later patches win, as use would apply them.
        , (instanceName "Semigroup" "Overlay", semigroup (\a b -> case (a, b) of
            (VOverlay (Overlay x px), VOverlay (Overlay y py)) -> VOverlay (Overlay (x <> "+" <> y) (px <> py))
            _ -> error "<>: Overlay"))
-       , (instanceName "Eq" "List", VBuiltin "Eq List" listEq)
-       , (instanceName "Ord" "List", VBuiltin "Ord List" listOrd)
-       , (instanceName "Eq" "Record", VBuiltin "Eq Record" recordEq)
-       , (instanceName "Show" "List", VBuiltin "Show List" (\d -> showDictionary (\v -> case v of
+       , (instanceName "Eq" "[]", VBuiltin "Eq List" listEq)
+       , (instanceName "Ord" "[]", VBuiltin "Ord List" listOrd)
+       , (instanceName "Eq" "{}", VBuiltin "Eq Record" recordEq)
+       , (instanceName "Show" "[]", VBuiltin "Show List" (\d -> showDictionary (\v -> case v of
            VList xs -> "[" <> commaSep [shown d x | x <- xs] <> "]"
            _ -> error "Show List: the checker passed a non-list")))
        -- A record shows each field through its own dictionary, so that a
        -- declared instance for a field's type shows there too.
-       , (instanceName "Show" "Record", VBuiltin "Show Record" (\fields -> case fields of
+       , (instanceName "Show" "{}", VBuiltin "Show Record" (\fields -> case fields of
            VRecord ds -> case showDictionary (\v -> case v of
                VRecord values -> "{" <> commaSep [label <> " = " <> maybe (render x) (`shown` x) (lookup label ds) | (label, x) <- values] <> "}"
                _ -> error "Show Record: the checker passed a non-record") of

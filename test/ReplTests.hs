@@ -397,7 +397,7 @@ tests =
   , ("record: the rest is compared too", final ["f = r s -> {x = r.name, y = eq r s}", "f {name = \"n\", size = 3} {name = \"n\", size = 4}"] == "{x = \"n\", y = false}")
   , ("record: ls entries", final ["r <- ls / | filter (e -> eq {t = e.type, n = e.name} {t = \"dir\", n = \"usr\"}) | .name | collect", "r.items"] == "[\"usr\"]")
   , ("record: :elab shows the row evidence", let code = final [":elab f = r -> {x = r.name, y = eq r r}"]
-      in all (`isInfixOf` code) ["(%instance Eq Record) (%extendFields {name = %d", ".%fields)"])
+      in all (`isInfixOf` code) ["(%instance Eq {}) (%extendFields {name = %d", ".%fields)"])
   , ("class: a computation has no Eq", final ["eq (pure true) (pure true)"] == "no instance: Eq (Comp Bool)")
   , ("class: Bytes have no Ord", final ["lt (encodeUtf8 \"a\") (encodeUtf8 \"b\")"] == "no instance: Ord Bytes")
   , ("class: a rebound method is an ordinary function", final ["eq = x -> x", "eq 1"] == "1")
@@ -405,7 +405,7 @@ tests =
   , ("class: a defaulted element dictionary is bound first", final ["eq [[]] [[]]"] == "true")
   , (":elab: a dictionary", session [":elab eq true false"] == ["let %d5 = (%instance Eq Bool) in eq %d5 true false"])
   , (":elab: a literal is fromInt", ("%fromInt %d" `isInfixOf`) (final [":elab print 1"]))
-  , (":elab: an instance needs its argument's, first", session [":elab eq [] []"] == ["let %d10 = (%instance Eq ()) in let %d5 = (%instance Eq List) %d10 in eq %d5 [] []"])
+  , (":elab: an instance needs its argument's, first", session [":elab eq [] []"] == ["let %d10 = (%instance Eq ()) in let %d5 = (%instance Eq []) %d10 in eq %d5 [] []"])
   , (":elab: a binding takes its dictionaries", session [":elab f = x -> eq x x"] == ["f = %d6 x -> eq %d6 x x"])
   , (":elab: a superclass is a field", ("let %d6 = %d10.%Eq" `isInfixOf`) (final [":elab p = x -> {a = eq x x, b = lt x x}"]))
   , (":elab: no classes, no change", session [":elab print true"] == ["print true"])
@@ -475,7 +475,7 @@ tests =
   , ("show: as before for the prelude", session ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"] == ["1", "\"s\"", "[[1], []]", "{a = (), b = false}"])
   , ("show: the method", final ["show [1, 2] <> show true"] == "\"[1, 2]true\"")
   , ("show: no instance for a function", final ["show (x -> x)"] == "no instance: Show (a -> a)")
-  , (":elab: an instance's dictionary", ("(%instance Show List) = %d" `isInfixOf`) (final [":elab instance Show a => Show [a] where show = xs -> \"n\""]))
+  , (":elab: an instance's dictionary", ("(%instance Show []) = %d" `isInfixOf`) (final [":elab instance Show a => Show [a] where show = xs -> \"n\""]))
   , (":elab: a superclass field", ("%Eq = " `isInfixOf`) (final [hashClass, ":elab " <> hashInt]))
   , ("default: a method left out takes it", session ["class Pretty a where do pretty : a -> String; prettyAll : [a] -> String; prettyAll = xs -> \"many\" end", "instance Pretty Int where pretty = n -> \"#\"", "prettyAll [1]"] == ["class Pretty", "instance Pretty Int", "\"many\""])
   , ("default: an instance may still define it", final ["class Pretty a where do pretty : a -> String; prettyAll : [a] -> String; prettyAll = xs -> \"many\" end", "instance Pretty Bool where do pretty = b -> \"b\"; prettyAll = xs -> \"bools\" end", "prettyAll [true]"] == "\"bools\"")
@@ -557,9 +557,46 @@ tests =
   , ("let rec: a parameter's row stays open", ty' ["let rec times = m n -> if n == 0 then pure () else do m; times m (n - 1) end"] "times" "(Eq a, Num a) => Comp { | b} c -> a -> Comp { | b} ()")
   , ("let rec: :core", final [":core let rec f = x -> g x and g = y -> f y in f"] == "let rec f = x -> g x and g = y -> f y in f")
   , ("let rec: quiet in the startup file", fst (scripted "let rec f = x -> x\n" []) == [])
+  , ("data: declares a type and its constructors", session [maybeData, ":t Just", ":t Nothing"] == ["data Maybe a", "a -> Maybe a", "Maybe a"])
+  , ("data: values show by their constructors", session [maybeData, listData, "Just (Just (-3))", "Cons 1 (Cons 2 Nil)", "Nothing"] == ["data Maybe a", "data List a", "Just (Just (-3))", "Cons 1 (Cons 2 Nil)", "Nothing"])
+  , ("data: a constructor is a function", final [maybeData, "each [1, 2] | map Just | collect"] == "{items = [Just 1, Just 2], status = (), statuses = []}")
+  , ("data: in a signature", session [maybeData, "f : Maybe Int -> Int", "f = m -> 0", ":t f"] == ["data Maybe a", "", "f : Maybe Int -> Int", "Maybe Int -> Int"])
+  , ("data: fields name known types", final ["data Bad = Bad Foo"] == "no type Foo")
+  , ("data: with the right arguments", final [maybeData, "data Bad = Bad (Maybe Int Int)"] == "Maybe takes 1 arguments, not 2")
+  , ("data: fields mention only parameters", final ["data Bad = Bad a"] == "a field mentions an unknown that is not a parameter of the type")
+  , ("data: not a builtin type", final ["data Int = I"] == "Int is a builtin type")
+  , ("data: constructors are distinct", final ["data T = A | A"] == "A is declared twice")
+  , ("data: :help shows it", final [listData, ":help List"] == "data List a = Nil | Cons a (List a)")
+  , ("data: an instance for it", session [maybeData, "instance Show a => Show (Maybe a) where show = m -> case m of Nothing -> \"none\"; Just x -> \"just \" <> show x end", "Just 4", "show (Just [1])"]
+      == ["data Maybe a", "instance Show (Maybe a)", "just 4", "\"just [1]\""])
+  , ("data: :help lists its instances", (", Maybe a when Eq a" `isInfixOf`) (final [maybeData, "instance Eq a => Eq (Maybe a) where eq = a b -> true", ":help Eq"]))
+  , ("data: redeclaring drops its instances", final [maybeData, "instance Show (Maybe a) where show = m -> \"m\"", maybeData, "show Nothing"] == "no instance: Show (Maybe a)")
+  , ("data: the builtin list keeps its instances", final [listData, "{a = [1] == [1], b = show [2]}"] == "{a = true, b = \"[2]\"}")
+  , ("case: picks the first arm that matches", session [maybeData, "fromMaybe = d m -> case m of Nothing -> d; Just x -> x end", "fromMaybe 0 (Just 5)", "fromMaybe 0 Nothing"] == ["data Maybe a", "fromMaybe : a -> Maybe a -> a", "5", "0"])
+  , ("case: constructors of one size", session ["data Colour = Red | Green | Blue", "case Green of Red -> 1; Green -> 2; Blue -> 3 end"] == ["data Colour", "2"])
+  , ("case: with let rec", session [listData, "let rec len = xs -> case xs of Nil -> 0; Cons _ rest -> 1 + len rest end", "len (Cons 1 (Cons 2 (Cons 3 Nil)))"] == ["data List a", "len : Num a => List b -> a", "3"])
+  , ("case: map over a list", final [listData, "let rec mapL = f xs -> case xs of Nil -> Nil; Cons y rest -> Cons (f y) (mapL f rest) end", "mapL (x -> x * 2) (Cons 1 (Cons 2 Nil))"] == "Cons 2 (Cons 4 Nil)")
+  , ("case: literals", session ["case 3 of 0 -> \"zero\"; n -> \"many\" end", "case -1 of -1 -> \"neg\"; _ -> \"other\" end", "case \"b\" of \"a\" -> 1; _ -> 2 end", "case false of true -> 1; false -> 0 end"] == ["\"many\"", "\"neg\"", "2", "0"])
+  , ("case: arms agree", final [maybeData, "case Just 1 of Just x -> x; Nothing -> true end"] == "no instance: Num Bool")
+  , ("case: patterns agree with the scrutinee", final [maybeData, listData, "case Just 1 of Cons x r -> 1; _ -> 0 end"] == "type mismatch: Maybe a and List b")
+  , ("case: must cover every constructor", final [maybeData, "case Just 1 of Just x -> x end"] == "the case does not cover Nothing")
+  , ("case: nested patterns must cover too", session [maybeData, listData, "case Cons 1 Nil of Nil -> 0; Cons x Nil -> x end", "case Just (Just 1) of Just (Just x) -> x; Nothing -> 0 end"]
+      == ["data Maybe a", "data List a", "the case does not cover Cons _ (Cons _ _)", "the case does not cover Just Nothing"])
+  , ("case: numbers need a catch-all", final ["case 3 of 0 -> 1; 1 -> 2 end"] == "the case does not cover _")
+  , ("case: booleans can be covered", final ["case true of true -> 1 end"] == "the case does not cover false")
+  , ("case: unknown constructors", final ["case 1 of Nope -> 1; _ -> 0 end"] == "no constructor Nope")
+  , ("case: the number of fields", final [maybeData, "case Just 1 of Just x y -> x; _ -> 0 end"] == "Just has 1 field, not 2")
+  , ("case: a name binds once", final [shapeData, "case Rect 1 2 of Rect x x -> x; _ -> 0 end"] == "x is bound twice in one pattern")
+  , ("case: computations join their rows", ty' [maybeData] "m -> case m of Just x -> print x; Nothing -> pure () end" "Maybe a -> Comp {console} ()")
+  , ("case: only the chosen arm runs", prints [maybeData, "case Just 2 of Just n -> print n; Nothing -> print 0 end"] == ("2\n", ["data Maybe a", ""]))
+  , ("case: spans lines", scripted (maybeData <> "\nf = m -> case m of\n  Just x -> x;\n  Nothing -> 0\nend\n") ["f (Just 7)"] == ([], ["7"]))
+  , ("case: :core", final [":core case x of Just (Cons y _) -> y; _ -> 0 end"] == "case x of Just (Cons y _) -> y; _ -> 0 end")
   ]
  where
   builtinNames = words "print pure andThen collect map filter lines each pipefail length sort sortOn contains startsWith isEmpty stringLength byteLength encodeUtf8 encodeLine not add show eq ne lt le gt ge min max negate div mod cd ls overlay set unset prepend append prependWith appendWith use useLocal unuse environments pkg dev wait fg && || >>> <<< <> + - * / % == != < <= > >="
+  maybeData = "data Maybe a = Nothing | Just a"
+  listData = "data List a = Nil | Cons a (List a)"
+  shapeData = "data Shape = Circle Int | Rect Int Int"
   greetClass = "class Greet a where greet : a -> Comp {console} ()"
   prettyClass = "class Pretty a where pretty : a -> String"
   prettyInt = "instance Pretty Int where pretty = n -> \"#\" <> show n"

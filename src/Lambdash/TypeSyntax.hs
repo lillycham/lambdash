@@ -90,7 +90,9 @@ sTyIn omitted written = case written of
   STApp "Stream" row [i, o, r] -> TStream <$> effects row <*> go i <*> go o <*> go r
   STApp "Stage" _ [i, o] -> TStage <$> go i <*> go o
   STApp "Collector" _ [i, o] -> TCollector <$> go i <*> go o
-  STApp name _ _ -> pure (TCon name)
+  -- A declared type: Maybe Int. One with no arguments is a constructor.
+  STApp name _ [] -> pure (TCon name)
+  STApp name _ args -> TData name <$> mapM go args
  where
   go = sTyIn omitted
   effects Nothing = case omitted of

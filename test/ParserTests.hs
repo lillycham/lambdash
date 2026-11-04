@@ -9,7 +9,7 @@ import Data.Set qualified as Set
 import Lambdash.Infer
 import Lambdash.Desugar (desugar, stripLocations)
 import Lambdash.Parser
-import Lambdash.Syntax (Declaration (..), SPred (..), SRow (..), SType (..), Surface)
+import Lambdash.Syntax (Declaration (..), Pattern (..), SPred (..), SRow (..), SType (..), Surface)
 import Lambdash.Unify
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
@@ -98,6 +98,18 @@ tests =
   , ("let rec: only lambdas", bad "let rec x = 1 in x" && bad "let rec f = x -> x and y = f in y")
   , ("let rec: needs in in an expression", bad "let rec f = x -> x")
   , ("identifier: rec and and are reserved", run identifier "rec" == Nothing && run identifier "and" == Nothing && run identifier "record" == Just "record")
+  , ("case: arms", is "case x of Just y -> y; _ -> 0 end" (ECase (v "x") [(PCon "Just" [PVar "y"], v "y"), (PWild, int 0)]))
+  , ("case: a ; before end", is "case x of y -> y; end" (ECase (v "x") [(PVar "y", v "y")]))
+  , ("case: an arm binds its names", parseExprIn (BoundNames Set.empty) "case 1 of x -> x end" == Right (ECase (int 1) [(PVar "x", v "x")]))
+  , ("case: of ends a command", parseExprIn (BoundNames Set.empty) "case git status of _ -> 0 end" == Right (ECase (ECmd "git" [AWord "status"]) [(PWild, int 0)]))
+  , ("case: needs an arm and end", bad "case x of end" && bad "case x of y -> y")
+  , ("pattern: nested constructors", run casePattern "Cons x (Cons y _)" == Just (PCon "Cons" [PVar "x", PCon "Cons" [PVar "y", PWild]]))
+  , ("pattern: literals", map (run casePattern) ["-1", "\"s\"", "true", "()"] == map Just [PLit (LInt (-1)), PLit (LStr "s"), PLit (LBool True), PLit LUnit])
+  , ("pattern: a constructor alone", run casePattern "Nothing" == Just (PCon "Nothing" []))
+  , ("identifier: case and of are reserved", run identifier "case" == Nothing && run identifier "of" == Nothing && run identifier "offset" == Just "offset")
+  , ("data: a declaration", run declaration "data Maybe a = Nothing | Just a" == Just (DeclData "Maybe" ["a"] [("Nothing", []), ("Just", [STVar "a"])]))
+  , ("data: recursive fields", run declaration "data List a = Nil | Cons a (List a)" == Just (DeclData "List" ["a"] [("Nil", []), ("Cons", [STVar "a", STApp "List" Nothing [STVar "a"]])]))
+  , ("type: a declared type takes arguments", run typeExpr "Maybe Int -> Either e a" == Just (STFun (STApp "Maybe" Nothing [STCon "Int"]) (STApp "Either" Nothing [STVar "e", STVar "a"])))
   , ("expr: a name can start with a keyword", is "letter" (v "letter") && is "f inner" (EApp (v "f") (v "inner")))
   , ("expr: application is not a lambda", is "f x" (EApp (v "f") (v "x")))
   , ("expr: lambda in parentheses as an argument", is "f (x -> x) 1" (EApp (EApp (v "f") (ELam "x" (v "x"))) (int 1)))

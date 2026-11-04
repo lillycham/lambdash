@@ -124,7 +124,7 @@ nothing:
 
 ```text
 λ> :elab instance Show a => Show [a] where show = xs -> "n"
-(%instance Show List) = %d5 -> {show = xs -> "n"}
+(%instance Show []) = %d5 -> {show = xs -> "n"}
 ```
 
 ## Show
@@ -176,7 +176,7 @@ the ones it knows itself:
 
 ```text
 λ> :elab f = r -> {x = r.name, y = eq r r}
-f = %d14 %d15 -> let %d11 = (%instance Eq Record) (%extendFields {name = %d14} %d15.%fields) in …
+f = %d14 %d15 -> let %d11 = (%instance Eq {}) (%extendFields {name = %d14} %d15.%fields) in …
 ```
 
 An ambiguous row defaults to the empty row.
@@ -214,7 +214,7 @@ run, and `:elab x = e` the code a binding would hold.
 
 ```text
 λ> :elab eq [1] [2]
-let %d10 = (%instance Eq Int) in let %d5 = (%instance Eq List) %d10 in eq %d5 [1] [2]
+let %d10 = (%instance Eq Int) in let %d5 = (%instance Eq []) %d10 in eq %d5 [1] [2]
 λ> :elab f = x -> eq x x
 f = %d6 x -> eq %d6 x x
 λ> :elab p = x -> {a = eq x x, b = lt x x}

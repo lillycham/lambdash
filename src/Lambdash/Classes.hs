@@ -8,6 +8,11 @@ module Lambdash.Classes
   ( ClassInfo (..)
   , Instance (..)
   , ClassEnv (..)
+  , DataInfo (..)
+  , addData
+  , lookupData
+  , lookupConstructor
+  , dataType
   , prelude
   , lookupClass
   , lookupInstance
@@ -51,15 +56,26 @@ data Instance = Instance
   , instRequires :: [[String]]
   }
 
--- | The classes and instances in scope.
+-- | The classes, instances and data types in scope. Data types are here
+-- because the checker reads them as it reads classes: for patterns, and
+-- for whether a case covers every value.
 data ClassEnv = ClassEnv
   { envClasses :: [ClassInfo]
   , envInstances :: [Instance]
+  , envData :: [DataInfo]
+  }
+
+-- | A declared data type: its parameters, and each constructor with the
+-- types of its fields, which mention only the parameters.
+data DataInfo = DataInfo
+  { dataName :: String
+  , dataParams :: [Var]
+  , dataConstructors :: [(String, [Ty])]
   }
 
 -- | The prelude's classes and instances.
 prelude :: ClassEnv
-prelude = ClassEnv preludeClasses preludeInstances
+prelude = ClassEnv preludeClasses preludeInstances []
 
 preludeClasses :: [ClassInfo]
 preludeClasses =
@@ -89,21 +105,22 @@ preludeClasses =
 preludeInstances :: [Instance]
 preludeInstances =
   [Instance "Eq" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
-    <> [Instance "Eq" "List" [["Eq"]]]
+    <> [Instance "Eq" "[]" [["Eq"]]]
     -- Structural: a record is Eq when every field is. See 'recordFields'.
-    <> [Instance "Eq" "Record" []]
+    <> [Instance "Eq" "{}" []]
     <> [Instance "Ord" ty [] | ty <- ["Int", "Bool", "String", "()"]]
-    <> [Instance "Ord" "List" [["Ord"]]]
+    <> [Instance "Ord" "[]" [["Ord"]]]
     <> [Instance "Num" "Int" [], Instance "Integral" "Int" []]
     <> [Instance "Semigroup" ty [] | ty <- ["String", "Bytes", "Overlay"]]
-    <> [Instance "Semigroup" "List" [[]]]
+    <> [Instance "Semigroup" "[]" [[]]]
     <> [Instance "Show" ty [] | ty <- ["Int", "Bool", "String", "()", "Status", "Bytes", "Patch", "Overlay"]]
-    <> [Instance "Show" "List" [["Show"]], Instance "Show" "Record" []]
+    <> [Instance "Show" "[]" [["Show"]], Instance "Show" "{}" []]
 
 -- | The constructor of a type, for instance lookup, and its arguments.
 tyKey :: Ty -> Maybe (String, [Ty])
 tyKey (TCon name) = Just (name, [])
-tyKey (TList item) = Just ("List", [item])
+tyKey (TList item) = Just ("[]", [item])
+tyKey (TData name args) = Just (name, args)
 tyKey (TFun a b) = Just ("->", [a, b])
 tyKey _ = Nothing
 
@@ -120,9 +137,10 @@ superclassesOf env cls = nub (concat [supers <> concatMap (superclassesOf env) s
 -- | Declare a class. A class declared again replaces the old one, and its
 -- instances go with it: they have the old methods.
 addClass :: ClassInfo -> ClassEnv -> ClassEnv
-addClass info env = ClassEnv
-  (filter ((/= className info) . className) (envClasses env) <> [info])
-  (filter ((/= className info) . instClass) (envInstances env))
+addClass info env = env
+  { envClasses = filter ((/= className info) . className) (envClasses env) <> [info]
+  , envInstances = filter ((/= className info) . instClass) (envInstances env)
+  }
 
 -- | Declare an instance. One for the same class and type replaces it, for
 -- the lines after.
@@ -168,3 +186,27 @@ defaultCandidates = [TUnit, TInt]
 -- | The builtin that extends a record of field dictionaries with more.
 extendFields :: String
 extendFields = "%extendFields"
+
+-- | Declare a data type. One declared again replaces the old one, and the
+-- instances for it go: they were for the old constructors.
+addData :: DataInfo -> ClassEnv -> ClassEnv
+addData info env = env
+  { envData = filter ((/= dataName info) . dataName) (envData env) <> [info]
+  , envInstances = filter ((/= dataName info) . instHead) (envInstances env)
+  }
+
+lookupData :: ClassEnv -> String -> Maybe DataInfo
+lookupData env name = find ((== name) . dataName) (envData env)
+
+-- | The data type a constructor belongs to, and the types of its fields.
+-- A later declaration wins, as it does for names.
+lookupConstructor :: ClassEnv -> String -> Maybe (DataInfo, [Ty])
+lookupConstructor env name =
+  case [(info, fields) | info <- reverse (envData env), (c, fields) <- dataConstructors info, c == name] of
+    found : _ -> Just found
+    [] -> Nothing
+
+-- | The type a data type's values have, at these arguments.
+dataType :: String -> [Ty] -> Ty
+dataType name [] = TCon name
+dataType name args = TData name args

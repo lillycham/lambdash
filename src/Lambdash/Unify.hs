@@ -59,6 +59,7 @@ module Lambdash.Unify
   )
 where
 
+import Control.Monad (foldM)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, get, put)
 import Data.Map.Strict (Map)
@@ -93,6 +94,9 @@ data Ty
     -- predicate into a dictionary parameter.
     TClass [Pred] Ty
   | TList Ty
+  | -- | A declared data type applied to its arguments: @Maybe Int@. A
+    -- declared type with no parameters is a 'TCon', like the builtins.
+    TData String [Ty]
   | -- | Pure adapters and collectors. Neither runs until connected.
     TStage Ty Ty
   | TCollector Ty Ty
@@ -123,6 +127,7 @@ predVars (IsIn _ ty) = tyVars ty
   tyVars (TVar v) = Set.singleton v
   tyVars (TFun a b) = Set.union (tyVars a) (tyVars b)
   tyVars (TList t) = tyVars t
+  tyVars (TData _ ts) = Set.unions (map tyVars ts)
   tyVars (TRecord row) = rowVars row
   tyVars (TComp (EffRow _ vs) t) = Set.union vs (tyVars t)
   tyVars (TJob (EffRow _ vs) t) = Set.union vs (tyVars t)
@@ -162,6 +167,7 @@ unqualify (TComp eff ty) = let (cs, bare) = unqualify ty in (cs, TComp eff bare)
 unqualify (TClass ps ty) = let (cs, bare) = unqualify ty in (cs, TClass ps bare)
 unqualify (TJob eff ty) = let (cs, bare) = unqualify ty in (cs, TJob eff bare)
 unqualify (TList ty) = let (cs, bare) = unqualify ty in (cs, TList bare)
+unqualify (TData name ts) = let parts = map unqualify ts in (concatMap fst parts, TData name (map snd parts))
 unqualify (TStage i o) = let (ci, i') = unqualify i; (co, o') = unqualify o in (ci <> co, TStage i' o')
 unqualify (TCollector i o) = let (ci, i') = unqualify i; (co, o') = unqualify o in (ci <> co, TCollector i' o')
 unqualify (TStream eff i o r) =
@@ -275,6 +281,7 @@ apply s (TStream eff i o r) = TStream (applyEffects s eff) (apply s i) (apply s 
 apply s (TQualified cs ty) = qualify (map (applyConstraint s) cs) (apply s ty)
 apply s (TClass ps ty) = TClass (map (applyPred s) ps) (apply s ty)
 apply s (TList t) = TList (apply s t)
+apply s (TData name ts) = TData name (map (apply s) ts)
 apply s (TStage i o) = TStage (apply s i) (apply s o)
 apply s (TCollector i o) = TCollector (apply s i) (apply s o)
 apply _ t = t
@@ -315,6 +322,7 @@ occurs v (TStream (EffRow _ vars) i o r) = Set.member v vars || any (occurs v) [
 occurs v (TQualified cs ty) = any (Set.member v . constraintVars) cs || occurs v ty
 occurs v (TClass ps ty) = any (Set.member v . predVars) ps || occurs v ty
 occurs v (TList t) = occurs v t
+occurs v (TData _ ts) = any (occurs v) ts
 occurs v (TStage i o) = occurs v i || occurs v o
 occurs v (TCollector i o) = occurs v i || occurs v o
 occurs _ _ = False
@@ -380,6 +388,8 @@ unifyBare (TFun l1 r1) (TFun l2 r2) = do
   pure (s2 `compose` s1)
 unifyBare (TRecord r1) (TRecord r2) = unifyRow r1 r2
 unifyBare (TList a) (TList b) = unify a b
+unifyBare (TData n as) (TData m bs)
+  | n == m && length as == length bs = foldM (\known (a, b) -> (`compose` known) <$> unify (apply known a) (apply known b)) emptySubst (zip as bs)
 unifyBare (TStage i o) (TStage i' o') = unify (TFun i o) (TFun i' o')
 unifyBare (TCollector i o) (TCollector i' o') = unify (TFun i o) (TFun i' o')
 unifyBare (TComp eff a) (TComp eff' b) = do
