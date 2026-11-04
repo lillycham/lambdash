@@ -18,6 +18,7 @@ overview = unlines'
   , "lines   x = e  bind          x <- e  run, then bind  f : t  signature"
   , "        class …  instance …  infixl 6 <+>  fixity"
   , "exprs   x -> e   f x   a | f | collect   do a; b end   with o do … end   e &"
+  , "        if c then a else b   let x = e in b"
   , "        {a = 1}  r.a  .a   [1, 2]   \"s\"   (e : t)   (+ 1)   (.size > 1)"
   , "        git log --oneline   ls src   nixpkgs#jq   -- comment"
   , ""
@@ -38,6 +39,7 @@ topics =
       , "An unbound name at the head is an external command: its words are"
       , "strings, $x is a variable. A bound name is a function."
       , "do a; b; c end runs in order; x <- e and x = e bind for what follows."
+      , "if c then a else b: two computations join their effect rows."
       , "An open do asks for more lines; Ctrl-C drops it.   docs/grammar.md" ])
   , ("operators", unlines'
       [ "Loosest first: >>> <<< (r1)  || (r2)  && (r3)  == != < <= > >= (4)"

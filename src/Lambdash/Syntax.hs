@@ -91,6 +91,8 @@ data Node
     SAccessorSection Surface
   | -- | @(e : t)@.
     SAnn Surface SType
+  | -- | @if c then a else b@.
+    SIf Surface Surface Surface
   deriving (Eq, Show)
 
 data Statement
@@ -167,4 +169,7 @@ data Expr
     EBg Expr
   | -- | @(e : t)@: @e@, at a type no more general than @t@.
     EAnn Expr SType
+  | -- | @if c then a else b@. Two computations join their rows: the line
+    -- may do either.
+    EIf Expr Expr Expr
   deriving (Eq, Show)

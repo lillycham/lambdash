@@ -66,6 +66,7 @@ go (Surface location node) = ELoc location <$> case node of
     pure (ELam x (EApp (EApp (EVar op) (EVar x)) e))
   SLeftSection operand op -> EApp (EVar op) <$> go operand
   SAnn e written -> (`EAnn` written) <$> go e
+  SIf c a b -> EIf <$> go c <*> go a <*> go b
   SAccessorSection body -> do
     record <- fresh
     ELam record <$> go (replaceLeftmost record body)
@@ -111,6 +112,7 @@ stripLocations expression = case expression of
   EWith overlay body -> EWith (stripLocations overlay) (stripLocations body)
   EBg e -> EBg (stripLocations e)
   EAnn e written -> EAnn (stripLocations e) written
+  EIf c a b -> EIf (stripLocations c) (stripLocations a) (stripLocations b)
   other -> other
 
 -- | Core as text, for @:core@. It reads like the surface syntax where core
@@ -154,6 +156,7 @@ renderCore = render 0
     ERun e -> parens (level > 2) ("run " <> render 3 e)
     EWith overlay body -> parens (level > 2) ("with " <> render 3 overlay <> " " <> render 3 body)
     EBg e -> parens (level > 2) ("bg " <> render 3 e)
+    EIf c a b -> parens (level > 0) ("if " <> render 0 c <> " then " <> render 0 a <> " else " <> render 0 b)
     EAnn e written -> "(" <> render 0 e <> " : " <> renderSType written <> ")"
   spine (ELoc _ e) = spine e
   spine (EApp f x) = let (h, args) = spine f in (h, args <> [x])

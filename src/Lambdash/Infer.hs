@@ -391,6 +391,31 @@ infer env (EAnn e written) = do
   s2 <- fitting (apply s1 te) (apply s1 t)
   pure (s2 `compose` s1, apply s2 (apply s1 t), e')
 
+-- Both branches have one type, except their rows: two computations, jobs
+-- or streams give the union of their rows, as the line may do either.
+infer env (EIf c a b) = do
+  (s1, tc, c') <- infer env c
+  s2 <- unifying (unify tc TBool)
+  let known = s2 `compose` s1
+  (s3, ta, a') <- infer (applyEnv known env) a
+  let known' = s3 `compose` known
+  (s4, tb, b') <- infer (applyEnv known' env) b
+  let ta' = apply s4 ta
+  (s5, joined) <- case (ta', tb) of
+    (TComp r x, TComp r' y) -> do
+      s <- unifying (unify x y)
+      pure (s, TComp (unionEffects (applyEffects s r) (applyEffects s r')) (apply s x))
+    (TJob r x, TJob r' y) -> do
+      s <- unifying (unify x y)
+      pure (s, TJob (unionEffects (applyEffects s r) (applyEffects s r')) (apply s x))
+    (TStream r i o x, TStream r' i' o' x') -> do
+      s <- unifying (unify (TFun i (TFun o x)) (TFun i' (TFun o' x')))
+      pure (s, TStream (unionEffects (applyEffects s r) (applyEffects s r')) (apply s i) (apply s o) (apply s x))
+    _ -> do
+      s <- unifying (unify ta' tb)
+      pure (s, apply s tb)
+  pure (s5 `compose` s4 `compose` known', joined, EIf c' a' b')
+
 -- A location changes nothing about the type.
 infer env (ELoc location e) = do
   (s, t, e') <- infer env e
@@ -678,6 +703,7 @@ commands (ELoc _ e) = commands e
 commands (EWith overlay body) = commands overlay <> commands body
 commands (EBg e) = commands e
 commands (EAnn e _) = commands e
+commands (EIf c a b) = commands c <> commands a <> commands b
 commands _ = []
 
 -- | Infer in a starting environment, with the final solution applied. Class

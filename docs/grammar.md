@@ -13,9 +13,10 @@ Whitespace and comments can appear between any two items in a syntax rule.
 ```ebnf
 program     = expr EOF ;
 
-expr        = let | lambda | pipeline ;
+expr        = let | if | lambda | pipeline ;
 
 let         = "let" name "=" expr "in" expr ;
+if          = "if" expr "then" expr "else" expr ;
 lambda      = IDENT { IDENT } "->" expr ;
 pipeline    = stage { "|" stage } [ "&" ] ;
 stage       = operand { OP operand } ;            (* resolved by fixity *)
@@ -57,7 +58,8 @@ list        = "[" [ expr { "," expr } ] "]" ;
 
 ```ebnf
 IDENT       = LETTER { LETTER | DIGIT | "_" | "'" } - RESERVED ;
-RESERVED    = "let" | "in" | "true" | "false" | "do" | "end" | "with" ;
+RESERVED    = "let" | "in" | "true" | "false" | "do" | "end" | "with"
+            | "if" | "then" | "else" ;
 INT         = [ "+" | "-" ] DIGIT { DIGIT } ;
 STRING      = a Haskell string literal ;
 COMMENT     = "--" { any character except newline } ;
@@ -81,6 +83,11 @@ follow it. So `letter` is an `IDENT`, not `let` and `ter`.
 - `lambda` and `application` can start with the same tokens. The parser tries
   `lambda` first, and goes back if no `->` arrives. So `f x` is an application,
   and `f x -> x` is a lambda with two parameters.
+- `if c then a else b`: between `if` and `else`, the words `then` and `else`
+  end an external, as `end` does in a block; quote them to pass them. The
+  `else` branch goes as far right as it can. Both branches have one type,
+  but two computations, jobs or streams join their effect rows: the line may
+  do either, so the preflight checks both. Only the chosen branch runs.
 - The body of a `lambda` or a `let` goes as far right as it can. A lambda
   argument needs parentheses: `f (x -> x)`.
 - `application` goes to the left: `f x y` is `(f x) y`.

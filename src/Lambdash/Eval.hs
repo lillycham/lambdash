@@ -218,6 +218,10 @@ eval env expression =
     ECmd name args -> VStream [External name (map word args)] ReturnStatus
     ELoc _ e -> eval env e
     EAnn e _ -> eval env e
+    EIf c a b -> case eval env c of
+      VBool True -> eval env a
+      VBool False -> eval env b
+      _ -> error "eval: the checker passed a non-Bool condition"
     EBind name e body -> VComp $ \runtime -> do
       value <- runComp runtime (eval env e)
       runComp runtime (eval (Map.insert name value env) body)

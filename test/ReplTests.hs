@@ -535,6 +535,15 @@ tests =
   , ("help: every topic has text", all (\t -> not (null (final [":help " <> t]))) ["syntax", "operators", "pipelines", "jobs", "environments", "nix", "classes", "types", "startup"])
   , ("help: every builtin is described", null [n | n <- builtinNames, "nothing named" `isInfixOf` final [":help " <> n] || length (lines (final [":help " <> n])) < 2])
   , ("help: nothing by that name", final [":help nope"] == "nothing named nope; :help lists the topics")
+  , ("if: picks a branch", session ["if 1 < 2 then \"yes\" else \"no\"", "if false then 1 else 2"] == ["\"yes\"", "2"])
+  , ("if: the condition is a Bool", final ["if 1 then 2 else 3"] == "no instance: Num Bool")
+  , ("if: branches agree", final ["if true then 1 else \"s\""] == "no instance: Num String")
+  , ("if: computations join their rows", ty "c -> if c then print 1 else pure ()" "Bool -> Comp {console} ()")
+  , ("if: streams too", ty "c -> if c then echo hi else git status" "Bool -> Stream {exec echo, exec git} Bytes Bytes Status")
+  , ("if: only the chosen branch runs", prints ["if true then print 1 else print 2"] == ("1\n", [""]))
+  , ("if: in a block", prints ["do print 1; if false then print 2 else print 3; print 4 end"] == ("1\n3\n4\n", [""]))
+  , ("if: recursion-free abs", final ["abs = n -> if n < 0 then negate n else n", "abs -5"] == "5")
+  , ("if: :core", final [":core if a then b else c"] == "if a then b else c")
   , (":elab: declares nothing", ("exec pretty" `isInfixOf`) (final [":elab " <> prettyClass, ":t pretty"]))
   ]
  where

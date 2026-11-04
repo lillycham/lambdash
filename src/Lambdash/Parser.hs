@@ -99,6 +99,9 @@ data ParseContext = ParseContext
   , commaDelimiter :: Bool
   , -- | Inside @do ... end@, the word @end@ ends a command line.
     inBlock :: Bool
+  , -- | Between @if@ and @else@, the words @then@ and @else@ end a command
+    -- line.
+    inCondition :: Bool
   , -- | Each operator's precedence and associativity. An operator not here
     -- is @infixl 9@.
     contextFixities :: Fixities
@@ -134,7 +137,7 @@ runIn = runWith defaultFixities
 
 -- | The same, with the session's fixities.
 runWith :: Fixities -> Bound -> Parser a -> String -> Either (ParseErrorBundle String Void) a
-runWith fixities bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False False fixities)
+runWith fixities bound p input = runReader (runParserT p "<input>" input) (ParseContext bound False False False fixities)
 
 operatorChars :: String
 operatorChars = "!%&*+-/<=>?@^|~:"
@@ -187,7 +190,10 @@ reservedNames =
     "false",
     "do",
     "end",
-    "with"
+    "with",
+    "if",
+    "then",
+    "else"
   ]
 
 -- | A reserved word. @let@ matches in @let x@, but not in @letter@.
@@ -337,6 +343,8 @@ argument :: Parser Arg
 argument = do
   block <- asks inBlock
   when block (notFollowedBy (keyword "end"))
+  condition <- asks inCondition
+  when condition (notFollowedBy (keyword "then" <|> keyword "else"))
   AVar <$> (char '$' *> identifier)
     <|> AWord <$> stringLiteral
     <|> AWord <$> some wordChar
@@ -474,6 +482,8 @@ pathArg :: Parser Surface
 pathArg = do
   block <- asks inBlock
   when block (notFollowedBy (keyword "end"))
+  condition <- asks inCondition
+  when condition (notFollowedBy (keyword "then" <|> keyword "else"))
   arg <- spanned (SVar <$> (char '$' *> identifier))
     <|> spanned (SLit . LStr <$> stringLiteral)
     <|> between (symbol "(") (char ')') (withComma False expr)
@@ -489,6 +499,19 @@ lambda :: Parser Surface
 lambda = spanned $ do
   names <- try (some (lexeme identifier) <* symbol "->")
   SLam names <$> binding names expr
+
+-- | @if c then a else b@. The @else@ branch goes as far right as it can,
+-- like a lambda's body.
+ifThenElse :: Parser Surface
+ifThenElse = spanned $ do
+  lexeme (keyword "if")
+  condition <- guarded expr
+  lexeme (keyword "then")
+  yes <- guarded expr
+  lexeme (keyword "else")
+  SIf condition yes <$> local (\c -> c {inCondition = False}) expr
+ where
+  guarded = local (\c -> c {inCondition = True})
 
 -- | @let x = bound in body@.
 letIn :: Parser Surface
@@ -543,7 +566,7 @@ withBlock = spanned $ do
 -- A trailing @&@ starts the whole pipeline before it as a background job:
 -- @a | b &@ is @(a | b) &@.
 expr :: Parser Surface
-expr = letIn <|> lambda <|> pipeline
+expr = letIn <|> ifThenElse <|> lambda <|> pipeline
  where
   pipeline = do
     firstStage <- operators

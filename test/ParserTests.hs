@@ -172,6 +172,14 @@ tests =
   , ("type: a record, not a row", run typeExpr "Comp {name : String}" == Just (STApp "Comp" Nothing [STRecord [("name", STCon "String")] Nothing]))
   , ("type: an open record, not a row", run typeExpr "Comp {| r}" == Just (STApp "Comp" Nothing [STRecord [] (Just "r")]))
   , ("type: a stream's row", run typeExpr "Stream {fs} Bytes a ()" == Just (STApp "Stream" (Just (SRow ["fs"] Nothing)) [STCon "Bytes", STVar "a", STCon "()"]))
+  , ("if: then and else", is "if c then a else b" (EIf (v "c") (v "a") (v "b")))
+  , ("if: else goes right", is "if c then a else b | f" (EIf (v "c") (v "a") (EPipe (v "b") (v "f"))))
+  , ("if: nested in else", is "if a then b else if c then d else e" (EIf (v "a") (v "b") (EIf (v "c") (v "d") (v "e"))))
+  , ("if: a command stops at then and else", parseExprIn (BoundNames Set.empty) "if test -f x then echo y else echo n"
+      == Right (EIf (ECmd "test" [AWord "-f", AWord "x"]) (ECmd "echo" [AWord "y"]) (ECmd "echo" [AWord "n"])))
+  , ("if: else keeps its words", parseExprIn (BoundNames Set.empty) "if a then b else echo then" == Right (EIf (ECmd "a" []) (ECmd "b" []) (ECmd "echo" [AWord "then"])))
+  , ("if: the words are reserved", all (\w -> run identifier w == Nothing) ["if", "then", "else"])
+  , ("if: needs both branches", bad "if c then a")
   , ("decl: a class", run declaration "class Pretty a where pretty : a -> String" == Just (DeclClass [] "Pretty" "a" [("pretty", STFun (STVar "a") (STCon "String"))] []))
   , ("decl: superclasses and a block", run declaration "class (Eq a, Show a) => H a where do h : a -> Int; (<+>) : a -> a -> a end"
       == Just (DeclClass [SPred "Eq" (STVar "a"), SPred "Show" (STVar "a")] "H" "a" [("h", STFun (STVar "a") (STCon "Int")), ("<+>", STFun (STVar "a") (STFun (STVar "a") (STVar "a")))] []))
