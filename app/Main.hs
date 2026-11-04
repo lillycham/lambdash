@@ -5,7 +5,8 @@ import Lambdash.Nix (withRootDirectory)
 import Lambdash.Process (saveShellTerminal, setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runScript, sessionPrompt, startupFile, step)
 import System.Environment (getArgs, lookupEnv)
-import System.Console.Isocline (enableAutoTab, enableMultiline, readlineMaybe, setHistory)
+import Lambdash.Complete (Candidate (..), completeName, isNameChar)
+import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (..), enableAutoTab, enableMultiline, readlineExMaybe, setHistory)
 import Foreign.C.String (CString, withCString)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory, getHomeDirectory)
@@ -83,18 +84,19 @@ data Input
 -- a signal. Patched isocline gives it as "\x03"; no line is end of input.
 -- End of input in a block stops reading, and the parser reports the
 -- unclosed block.
-readInput :: String -> IO Input
-readInput prompt = readlineMaybe (escape prompt) >>= \first -> case first of
+readInput :: Session -> String -> IO Input
+readInput session prompt = readline (escape prompt) >>= \first -> case first of
   Nothing -> pure End
   Just line -> more line
  where
   more "\x03" = pure Cancelled
   more input
-    | needsMore input = readlineMaybe ".. " >>= \next -> case next of
+    | needsMore input = readline ".. " >>= \next -> case next of
         Nothing -> pure (Line input)
         Just "\x03" -> pure Cancelled
         Just line -> more (input <> "\n" <> line)
     | otherwise = pure (Line input)
+  readline text = readlineExMaybe text (Just (complete session)) Nothing
 
 -- | The prompt as plain text: the editor reads @[@ as the start of a style,
 -- and an overlay's prompt has one.
@@ -108,7 +110,7 @@ loop restoreTerminal before = do
   (session, messages) <- notices before
   mapM_ putStrLn messages
   cwd <- getCurrentDirectory
-  input <- readInput (sessionPrompt cwd session)
+  input <- readInput session (sessionPrompt cwd session)
   case input of
     End -> pure ()
     Cancelled -> loop restoreTerminal session
@@ -125,3 +127,12 @@ loop restoreTerminal before = do
         Continue next output -> do
           unless (null output) (putStrLn output)
           loop restoreTerminal next
+
+-- | Tab: the session's names that start with the word before the cursor,
+-- each with its type in the menu, then file names. Paths and the arguments
+-- of a command are often both, so both show.
+complete :: Session -> CompletionEnv -> String -> IO ()
+complete session env input = do
+  completeWord env input (Just isNameChar) $ \word ->
+    [Completion (candidateText c) (candidateText c) (candidateHelp c) | c <- completeName session input word]
+  completeFileName env input (Just '/') ["."] []

@@ -7,6 +7,7 @@ import Control.Monad (unless, when)
 import Data.List (isInfixOf)
 import Data.Set qualified as Set
 import Lambdash.Desugar (stripLocations)
+import Lambdash.Complete (Candidate (..), completeName)
 import Lambdash.Infer
 import Lambdash.Parser (Bound (..))
 import Lambdash.Repl
@@ -84,6 +85,31 @@ fromFile message = case breakOn ".lsh:" message of
 
 pad :: String
 pad = "let rec rep = n s -> if n <= 0 then \"\" else s <> rep (n - 1) s\npadRight = w s -> s <> rep (w - stringLength s) \" \"\n"
+
+-- | The session after some lines.
+after :: [String] -> Session
+after = afterIn []
+
+-- | The same, with module files in a new directory where imports start.
+afterIn :: [(FilePath, String)] -> [String] -> Session
+afterIn files input = unsafePerformIO $ do
+  base <- getTemporaryDirectory
+  (marker, h) <- openTempFile base "modules"
+  hClose h
+  removeFile marker
+  let dir = marker <> ".d"
+  createDirectoryIfMissing True dir
+  mapM_ (\(name, text) -> writeFile (dir <> "/" <> name) text) files
+  done <- go initial {sessionDirectory = Just dir} input
+  removeDirectoryRecursive dir
+  pure done
+ where
+  go s [] = pure s
+  go s (l : ls) = do
+    result <- step s l
+    case result of
+      Continue next _ -> go next ls
+      _ -> go s ls
 
 -- | Tests are plain values, so this hides the 'IO'. Each call is one session.
 session :: [String] -> [String]
@@ -546,6 +572,14 @@ tests =
   , ("import: a module's imports start at its own directory", withModules [("lib/pad.lsh", pad), ("m.lsh", "import \"./lib/pad.lsh\"\ncell = w -> padRight w \"x\"\n")] ["m = import \"m.lsh\"", "m.cell 2", "padRight"] == ["imported m.cell", "\"x \"", "command not found: padRight"])
   , ("import: a cycle stops", any ("an import cycle" `isInfixOf`) ((withModules [("m.lsh", "import \"m.lsh\"\n")] ["import \"m.lsh\""])))
   , ("import: a missing module", withModules [] ["import \"none.lsh\""] == ["no module at none.lsh"])
+  , ("complete: a builtin, with its type", completeName initial "stringL" "stringL" == [Candidate "stringLength" (final [":t stringLength"])])
+  , ("complete: every name with the prefix, in order", map candidateText (completeName initial "fi" "fi") == ["fields", "filter"])
+  , ("complete: an empty word gives nothing", null (completeName initial "" ""))
+  , ("complete: a binding of the session", completeName (after ["padRight = w s -> s"]) "pad" "pad" == [Candidate "padRight" "a -> b -> b"])
+  , ("complete: a module's names, prefix and all", map candidateText (completeName (afterIn [("pad.lsh", pad)] ["p = import \"pad.lsh\""]) "p.pa" "p.pa") == ["p.padRight"])
+  , ("complete: help topics after :help", Candidate "pipelines" "topic" `elem` completeName initial ":help pi" "pi")
+  , ("complete: no topics elsewhere", Candidate "pipelines" "topic" `notElem` completeName initial "pi" "pi")
+  , ("complete: never the checker's own names", null (completeName initial "%" "%"))
   , ("annotate: narrows a type", session ["(1 : Int)", ":t (x -> x : Int -> Int)", ":t ([] : [String])"] == ["1", "Int -> Int", "[String]"])
   , ("annotate: must fit", final ["(true : Int)"] == "type mismatch: Bool and Int")
   , ("annotate: :core shows it", final [":core (1 : Int)"] == "(1 : Int)")

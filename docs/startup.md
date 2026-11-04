@@ -39,3 +39,11 @@ The prompt keeps up to 1000 lines of history in
 `$XDG_STATE_HOME/lambdash/history`, or `~/.local/state/lambdash/history`
 without `XDG_STATE_HOME`. Up and down move through it, and Ctrl-R searches it.
 Lines of one character and lines dropped with Ctrl-C are not kept.
+
+## Tab
+
+Tab completes the word before the cursor. The menu shows the session's
+names that start with it, each with its type, and then file names. After
+`:help`, it shows the help topics too. `tab.` completes the names of a module
+imported as `tab`. With one match, Tab takes it at once. With more, a digit
+picks one.
