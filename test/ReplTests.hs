@@ -44,6 +44,47 @@ promptAfter = unsafePerformIO . go initial
       Continue next _ -> go next ls
       Failed _ -> go s ls
 
+-- | Write module files to a new directory, then run lines in a session
+-- whose imports start there, and collect what each shows.
+withModules :: [(FilePath, String)] -> [String] -> [String]
+withModules files input = unsafePerformIO $ do
+  base <- getTemporaryDirectory
+  (marker, h) <- openTempFile base "modules"
+  hClose h
+  removeFile marker
+  let dir = marker <> ".d"
+  createDirectoryIfMissing True (dir <> "/lib")
+  mapM_ (\(name, text) -> writeFile (dir <> "/" <> name) text) files
+  shown <- go initial {sessionDirectory = Just dir} input
+  _ <- evaluate (length (concat shown))
+  removeDirectoryRecursive dir
+  pure shown
+ where
+  go _ [] = pure []
+  go s (l : ls) = do
+    result <- step s l
+    case result of
+      Quit -> pure ["<quit>"]
+      Continue next out -> (out :) <$> go next ls
+      Failed out -> (out :) <$> go s ls
+
+-- | A failure's message without the module's directory: from its last
+-- path part on.
+fromFile :: String -> String
+fromFile message = case breakOn ".lsh:" message of
+  Just (before, after) -> reverse (takeWhile (/= '/') (reverse before)) <> ".lsh:" <> after
+  Nothing -> message
+ where
+  breakOn needle text = go' "" text
+   where
+    go' _ [] = Nothing
+    go' acc rest@(c : cs)
+      | take (length needle) rest == needle = Just (reverse acc, drop (length needle) rest)
+      | otherwise = go' (c : acc) cs
+
+pad :: String
+pad = "let rec rep = n s -> if n <= 0 then \"\" else s <> rep (n - 1) s\npadRight = w s -> s <> rep (w - stringLength s) \" \"\n"
+
 -- | Tests are plain values, so this hides the 'IO'. Each call is one session.
 session :: [String] -> [String]
 session = unsafePerformIO . sessionIO
@@ -492,6 +533,19 @@ tests =
   , ("init: :q ends the file", ("exec y" `isInfixOf`) (last (snd (scripted "x = 1\n:q\ny = 2\n" [":t y"]))))
   , ("init: a missing file is none", unsafePerformIO (snd <$> runScript "/lsh-no-such/init.lsh" initial) == [])
   , ("init: comments and blank lines", scripted "-- setup\n\nx = 2 -- two\n" ["x"] == ([], ["2"]))
+  , ("import: parses with a quoted path", parsed names "import \"./a.lsh\"" == Right (Import Nothing "./a.lsh") && parsed names "t = import \"a.lsh\"" == Right (Import (Just "t") "a.lsh"))
+  , ("import: an unquoted word is still a command", case parsed names "import shot.png" of Right (Run _) -> True; _ -> False)
+  , ("import: under a prefix", withModules [("pad.lsh", pad)] ["p = import \"pad.lsh\"", "p.padRight 4 \"ab\" <> \"|\"", ":t p.padRight"] == ["imported p.rep, p.padRight", "\"ab  |\"", "Int -> String -> String"])
+  , ("import: without a prefix", withModules [("pad.lsh", pad)] ["import \"pad.lsh\"", "padRight 3 \"a\""] == ["imported rep, padRight", "\"a  \""])
+  , ("import: the prefix alone is not a command", last (withModules [("pad.lsh", pad)] ["p = import \"pad.lsh\"", "p"]) == "unbound name: p")
+  , ("import: a local name hides the prefix", last (withModules [("pad.lsh", pad)] ["p = import \"pad.lsh\"", "(p -> p.padRight) {padRight = 7}"]) == "7")
+  , ("import: a module does not see the importer, so x there is a command", last (withModules [("m.lsh", "y = x + 1\n")] ["x = 1", "import \"m.lsh\"", ":t y"]) == "Stream {exec x} Bytes Bytes Status")
+  , ("import: a line that runs stops the load", map fromFile (withModules [("m.lsh", "x = 1\necho hi\n")] ["import \"m.lsh\"", ":t x"]) == ["m.lsh:2: a module holds only definitions, and this line would run", "Stream {exec x} Bytes Bytes Status"])
+  , ("import: a run binding stops the load", concatMap fromFile (take 1 (withModules [("m.lsh", "x <- echo hi\n")] ["import \"m.lsh\""])) == "m.lsh:1: a module holds only definitions, and this line would run")
+  , ("import: data, instances and operators go in as they are", withModules [("m.lsh", "data Box = Box Int\ninstance Display Box where display = b -> case b of Box n -> \"box \" <> display n end\ninfixr 5 <+>\n(<+>) = a b -> a <> \" \" <> b\n")] ["m = import \"m.lsh\"", "display (Box 2)", "\"a\" <+> \"b\" <+> \"c\""] == ["imported Box, (<+>)", "\"box 2\"", "\"a b c\""])
+  , ("import: a module's imports start at its own directory", withModules [("lib/pad.lsh", pad), ("m.lsh", "import \"./lib/pad.lsh\"\ncell = w -> padRight w \"x\"\n")] ["m = import \"m.lsh\"", "m.cell 2", "padRight"] == ["imported m.cell", "\"x \"", "command not found: padRight"])
+  , ("import: a cycle stops", any ("an import cycle" `isInfixOf`) ((withModules [("m.lsh", "import \"m.lsh\"\n")] ["import \"m.lsh\""])))
+  , ("import: a missing module", withModules [] ["import \"none.lsh\""] == ["no module at none.lsh"])
   , ("annotate: narrows a type", session ["(1 : Int)", ":t (x -> x : Int -> Int)", ":t ([] : [String])"] == ["1", "Int -> Int", "[String]"])
   , ("annotate: must fit", final ["(true : Int)"] == "type mismatch: Bool and Int")
   , ("annotate: :core shows it", final [":core (1 : Int)"] == "(1 : Int)")

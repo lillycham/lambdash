@@ -69,6 +69,11 @@ topics =
       [ "pkg \"nixpkgs#jq\" and dev \".#\" resolve to overlays. A bare reference"
       , "is sugar: use nixpkgs#jq, with .#bench do … end. A directory's flake"
       , "activates on arrival once you allow it; deny withdraws.   docs/nix.md" ])
+  , ("modules", unlines'
+      [ "pad = import \"lib/pad.lsh\" brings its bindings in as pad.padRight;"
+      , "import \"lib/pad.lsh\" brings them in as they are. A module holds only"
+      , "definitions, so an import runs nothing. Data, classes, instances and"
+      , "operators are global. Paths start at the importing file.   docs/modules.md" ])
   , ("classes", unlines'
       [ "class Pretty a where pretty : a -> String"
       , "instance Pretty Int where pretty = n -> show n"

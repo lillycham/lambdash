@@ -28,7 +28,7 @@ import Data.Bifunctor (first)
 import Data.Char (chr, ord)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.List (intercalate)
+import Data.List (intercalate, isPrefixOf, nub, partition)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, catch, fromException, throwIO)
 import Control.Exception qualified as Exception
@@ -50,14 +50,15 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), lookupClass, lookupData, prelude)
+import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, lookupClass, lookupData, prelude)
 import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Syntax (Declaration, SPred (..), SType (..), renderPattern)
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
-import System.Directory (XdgDirectory (..), doesFileExist, getCurrentDirectory, getXdgDirectory)
+import System.Directory (XdgDirectory (..), canonicalizePath, doesFileExist, getCurrentDirectory, getHomeDirectory, getXdgDirectory, makeAbsolute)
+import System.FilePath (takeDirectory, (</>))
 
 import System.Environment (lookupEnv)
 
@@ -85,6 +86,11 @@ data Session = Session
     sessionClasses :: ClassEnv
   , -- | Signatures waiting for their binding: @f : t@, then @f = e@.
     sessionSignatures :: Map.Map Name ([SPred], SType)
+  , -- | Where a relative import starts: the directory of the file that the
+    -- lines come from. Without one, the current directory.
+    sessionDirectory :: Maybe FilePath
+  , -- | The modules being loaded, innermost first, so that a cycle stops.
+    sessionImporting :: [FilePath]
   }
 
 -- | A job in the table: a line that Ctrl-Z stopped, or a job that @&@
@@ -106,7 +112,7 @@ data Entry = Entry
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty
+initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty Nothing []
 
 -- | Does this input open more @do@ blocks or @case@s than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals.
@@ -179,6 +185,9 @@ data Command
   | -- | @:elab instance ...@: an instance's dictionary, as code. Nothing is
     -- declared.
     ShowElabDeclaration Declaration
+  | -- | @import "./lib.lsh"@ brings a module's names in as they are, and
+    -- @tab = import "./lib.lsh"@ brings them in as @tab.name@.
+    Import (Maybe Name) FilePath
   deriving (Eq, Show)
 
 -- | One line.
@@ -196,6 +205,9 @@ command =
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> (Help <$> (lexeme (keyword ":help" <|> keyword ":h") *> optionalName))
   <|> fixityLine
+  -- Only a quoted path, and nothing after it, makes an import: import
+  -- shot.png is still ImageMagick.
+  <|> try (Import <$> optional (try (name <* symbol "=" <* notFollowedBy (char '='))) <*> (lexeme (keyword "import") *> lexeme stringLiteral <* eof))
   <|> (Declare <$> declaration)
   <|> (uncurry . Signature <$> try (name <* symbol ":" <* notFollowedBy (char ':')) <*> qualifiedType)
   <|> (Bind <$> try (name <* symbol "=" <* notFollowedBy (char '=')) <*> core)
@@ -703,7 +715,7 @@ step session input = do
 
 stepLine :: Session -> String -> IO Step
 stepLine session input =
-  case parseCommandWith (sessionFixities session) (BoundWith (Map.keysSet types) builtinNames) input of
+  case parseCommandWith (sessionFixities session) (sessionBound session) input of
     Left err -> pure (Failed err)
     Right Blank -> pure (Continue session "")
     Right Exit
@@ -778,6 +790,16 @@ stepLine session input =
       Left err -> pure (Failed (renderError err))
       Right done -> pure (Continue session (maybe (declaredMessage done) (\(name, code) -> "(" <> name <> ") = " <> renderCore code) (declaredCode done)))
     Right (ShowCore expression) -> pure (Continue session (renderCore expression))
+    Right (Import alias path) -> do
+      loaded <- loadModule session path
+      pure $ case loaded of
+        Left message -> Failed message
+        Right found ->
+          let (next, added) = mergeModule alias found session
+              shown = case filter ((/= "%") . take 1) added of
+                [] -> "imported nothing"
+                visible -> "imported " <> intercalate ", " (map displayName visible)
+          in Continue next (intercalate "\n" (shown : moduleWarnings found))
     Right (ShowElab named expression) ->
       let mode = maybe Defaulting (const Generalising) named
       in checked (elaborateWith classes mode types expression) $ \(_, code) ->
@@ -837,8 +859,6 @@ stepLine session input =
     types = sessionTypes session
     values = sessionValues session
     start = sessionShell session
-    -- A builtin's signature guides parsing only while it is still the builtin.
-    builtinNames = Map.keysSet (Map.filterWithKey (\name scheme -> Map.lookup name typeEnv == Just scheme) types)
     checked result onSuccess = case result of
       Left err -> pure (Failed (renderError err))
       Right ty -> onSuccess ty
@@ -873,7 +893,7 @@ stepLine session input =
 -- | A name as the prompt shows it: an operator in parentheses.
 displayName :: Name -> String
 displayName name
-  | not (null name), all (`elem` ("!%&*+-/<=>?@^|~:" :: String)) name = "(" <> name <> ")"
+  | isOperator name = "(" <> name <> ")"
   | otherwise = name
 
 -- | A value as the prompt shows it: through Show, where its type has an
@@ -897,8 +917,9 @@ startupFile = (<> "/init.lsh") <$> getXdgDirectory XdgConfig "lambdash"
 -- | Run a file's lines as if typed, in order: bindings, fixity lines,
 -- declarations and commands. A @do@ block may span lines, as at the prompt.
 -- A line that fails is reported with its line number and the rest still
--- run; @:q@ stops the file, not the shell. Bindings and declarations say
--- nothing, so only output and errors show. A missing file is no file.
+-- run; @:q@ stops the file, not the shell. Bindings, declarations and
+-- imports say nothing but their warnings, so only output and errors show.
+-- An import starts from the file's directory. A missing file is no file.
 runScript :: FilePath -> Session -> IO (Session, [String])
 runScript path session = do
   exists <- doesFileExist path
@@ -907,13 +928,10 @@ runScript path session = do
     else do
       text <- readFile path
       _ <- Exception.evaluate (length text)
-      go session (chunks (zip [1 :: Int ..] (lines text)))
+      directory <- takeDirectory <$> makeAbsolute path
+      (done, reports) <- go session {sessionDirectory = Just directory} (scriptChunks text)
+      pure (done {sessionDirectory = sessionDirectory session}, reports)
  where
-  chunks [] = []
-  chunks ((n, line) : rest) = gather n line rest
-  gather n acc rest
-    | needsMore acc, (_, next) : more <- rest = gather n (acc <> "\n" <> next) more
-    | otherwise = (n, acc) : chunks rest
   go now [] = pure (now, [])
   go now ((n, chunk) : rest) = do
     result <- step now chunk
@@ -921,7 +939,9 @@ runScript path session = do
       Quit -> pure (now, [])
       Failed message -> fmap ((path <> ":" <> show n <> ": " <> message) :) <$> go now rest
       Continue next output -> do
-        let shown = [output | not (null output), not (quiet next chunk)]
+        let shown
+              | quiet next chunk = filter ("warning:" `isPrefixOf`) (lines output)
+              | otherwise = [output | not (null output)]
         fmap (shown <>) <$> go next rest
   quiet now chunk = case parseCommandWith (sessionFixities now) AllBound chunk of
     Right (Bind _ _) -> True
@@ -929,7 +949,153 @@ runScript path session = do
     Right (BindRun _ _) -> True
     Right (Declare _) -> True
     Right (Signature {}) -> True
+    Right (Import _ _) -> True
     _ -> False
+
+-- | A file's lines, numbered, with a @do@ block or @case@ that spans lines
+-- joined into one chunk, as the prompt joins them.
+scriptChunks :: String -> [(Int, String)]
+scriptChunks = chunks . zip [1 ..] . lines
+ where
+  chunks [] = []
+  chunks ((n, line) : rest) = gather n line rest
+  gather n acc rest
+    | needsMore acc, (_, next) : more <- rest = gather n (acc <> "\n" <> next) more
+    | otherwise = (n, acc) : chunks rest
+
+-- | What a session's lines are parsed against: its names, and the builtins
+-- that are still the builtin, whose signatures guide parsing.
+sessionBound :: Session -> Bound
+sessionBound session = BoundWith (Map.keysSet types) builtinNames
+ where
+  types = sessionTypes session
+  builtinNames = Map.keysSet (Map.filterWithKey (\name scheme -> Map.lookup name typeEnv == Just scheme) types)
+
+-- | A loaded module: the session that its lines built, the names its
+-- bindings made, and the names its declarations made. An import may put
+-- the first under a prefix. The second always go in as they are, because
+-- data types, classes and instances are global.
+data Module = Module
+  { moduleSession :: Session
+  , moduleNames :: [Name]
+  , moduleGlobals :: [Name]
+  , moduleWarnings :: [String]
+  }
+
+-- | Load a module. It starts from the prelude, not from the importer, and
+-- holds only definitions: a line that would run something stops the load,
+-- so an import never runs code. A relative path starts at the importing
+-- file's directory.
+loadModule :: Session -> FilePath -> IO (Either String Module)
+loadModule session written = do
+  base <- maybe getCurrentDirectory pure (sessionDirectory session)
+  home <- getHomeDirectory
+  let path = case written of
+        '~' : '/' : rest -> home </> rest
+        _ -> base </> written
+  exists <- doesFileExist path
+  if not exists
+    then pure (Left ("no module at " <> written))
+    else do
+      canonical <- canonicalizePath path
+      if canonical `elem` sessionImporting session
+        then pure (Left ("an import cycle: " <> intercalate " -> " (reverse (canonical : sessionImporting session))))
+        else do
+          text <- readFile canonical
+          _ <- Exception.evaluate (length text)
+          let start = initial
+                { sessionRoots = sessionRoots session
+                , sessionDirectory = Just (takeDirectory canonical)
+                , sessionImporting = canonical : sessionImporting session
+                }
+          go canonical (Module start [] [] []) (scriptChunks text)
+ where
+  go _ found [] = pure (Right found)
+  go path found ((n, chunk) : rest) = do
+    let now = moduleSession found
+        at message = pure (Left (path <> ":" <> show n <> ": " <> message))
+    case parseCommandWith (sessionFixities now) (sessionBound now) chunk of
+      Left err -> at err
+      -- A module's own imports are not exported, but their declarations
+      -- are global, so they come along.
+      Right (Import alias inner) -> do
+        loaded <- loadModule now inner
+        case loaded of
+          Left message -> at message
+          Right nested ->
+            let (next, _) = mergeModule alias nested now
+            in go path found
+                 { moduleSession = next
+                 , moduleGlobals = moduleGlobals found <> moduleGlobals nested
+                 , moduleWarnings = moduleWarnings found <> moduleWarnings nested
+                 } rest
+      Right line -> case defines now line of
+        Nothing -> at "a module holds only definitions, and this line would run"
+        Just (names, globals) -> do
+          result <- stepLine now chunk
+          case result of
+            Continue next output -> go path found
+              { moduleSession = next
+              , moduleNames = moduleNames found <> names
+              , moduleGlobals = moduleGlobals found <> globals
+              , moduleWarnings = moduleWarnings found <> filter ("warning:" `isPrefixOf`) (lines output)
+              } rest
+            Failed message -> at message
+            Quit -> at "a module cannot quit"
+
+-- | The names a definition makes: those that a binding makes, which an
+-- import may qualify, and those that a declaration makes, which it does
+-- not. An operator cannot be written with a prefix, so it goes in as it
+-- is. Nothing for a line that would run, or that is not a definition.
+defines :: Session -> Command -> Maybe ([Name], [Name])
+defines session line = case line of
+  Blank -> Just ([], [])
+  SetFixity _ _ -> Just ([], [])
+  Signature {} -> Just ([], [])
+  Bind name _ -> Just (partition (not . isOperator) [name])
+  BindRec group -> Just (partition (not . isOperator) (map fst group))
+  Declare written -> Just ([], either (const []) made (declare (sessionClasses session) (sessionTypes session) (sessionValues session) written))
+  _ -> Nothing
+ where
+  made done = map fst (declaredTypes done) <> map fst (declaredValues done)
+
+-- | Bring a module's names into a session, with its classes, data types,
+-- instances and fixities. Its bindings go under the prefix, if there is
+-- one. Gives the names added.
+mergeModule :: Maybe Name -> Module -> Session -> (Session, [Name])
+mergeModule alias found session =
+  ( session
+      { sessionTypes = foldl (\types (to, ty, _) -> maybe types (\known -> Map.insert to known types) ty) (sessionTypes session) added
+      , sessionValues = foldl (\values (to, _, value) -> Map.Lazy.insert to value values) (sessionValues session) added
+      , sessionClasses = mergeClasses (sessionClasses inner) (sessionClasses session)
+      , sessionFixities = Map.union (Map.differenceWith same (sessionFixities inner) defaultFixities) (sessionFixities session)
+      }
+  , [to | (to, _, _) <- added]
+  )
+ where
+  inner = moduleSession found
+  prefixed name = maybe name (\prefix -> prefix <> "." <> name) alias
+  pairs = [(prefixed name, name) | name <- nub (moduleNames found)] <> [(name, name) | name <- nub (moduleGlobals found)]
+  -- The lookup leaves the value itself unevaluated. An instance's
+  -- dictionary has a value and no type.
+  added = [(to, Map.lookup from (sessionTypes inner), value) | (to, from) <- pairs, Just value <- [Map.Lazy.lookup from (sessionValues inner)]]
+  same theirs builtin = if theirs == builtin then Nothing else Just theirs
+
+-- | Add a module's classes, data types and instances to a session's. The
+-- module started from the prelude, so what is not the prelude's is its own.
+-- Instances go last, because a class or data type declared again drops the
+-- instances it had.
+mergeClasses :: ClassEnv -> ClassEnv -> ClassEnv
+mergeClasses theirs ours = foldl (flip addInstance) withData newInstances
+ where
+  withClasses = foldl (flip addClass) ours [info | info <- envClasses theirs, className info `notElem` map className (envClasses prelude)]
+  withData = foldl (flip addData) withClasses (envData theirs)
+  newInstances = [inst | inst <- envInstances theirs, key inst `notElem` map key (envInstances prelude)]
+  key inst = (instClass inst, instHead inst)
+
+-- | Whether a name is an operator, such as @<+>@.
+isOperator :: Name -> Bool
+isOperator name = not (null name) && all (`elem` ("!%&*+-/<=>?@^|~:" :: String)) name
 
 -- | Whether a signature can stand: its classes exist, and its context
 -- constrains only its own unknowns.

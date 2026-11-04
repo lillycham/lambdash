@@ -24,6 +24,8 @@
 module Lambdash.Parser
   ( Parser,
     Bound (..),
+    isModule,
+    stringLiteral,
     runIn,
     parseExprIn,
     binding,
@@ -89,6 +91,17 @@ isBound :: Name -> Bound -> Bool
 isBound _ AllBound = True
 isBound name (BoundWith names _) = Set.member name names
 isBound name (BoundNames names) = Set.member name names
+
+-- | Whether a name is a module: nothing binds it, but an import bound names
+-- under it, such as @tab.tabulate@.
+isModule :: Name -> Bound -> Bool
+isModule name bound = not (isBound name bound) && case bound of
+  AllBound -> False
+  BoundNames names -> under names
+  BoundWith names _ -> under names
+ where
+  prefix = name <> "."
+  under names = maybe False (\found -> take (length prefix) found == prefix) (Set.lookupGT prefix names)
 
 -- | Add names for the length of a parser.
 binding :: [Name] -> Parser a -> Parser a
@@ -319,7 +332,13 @@ postfixSpaced = do
  where
   selects e = option e $ do
     field <- char '.' *> identifier
-    extend e (SSelect e field) >>= selects
+    -- A module's name and a field is one name: tab.tabulate.
+    selected <- case e of
+      Surface _ (SVar name) -> do
+        module_ <- asks (isModule name . contextBound)
+        pure (if module_ then SVar (name <> "." <> field) else SSelect e field)
+      _ -> pure (SSelect e field)
+    extend e selected >>= selects
 
 -- | One or more 'postfix', applied to the left: @f x y@ is @(f x) y@.
 -- | A string in double quotes, with the escapes of Haskell.
@@ -364,6 +383,8 @@ commandHead = do
       name <- lookAhead identifier
       bound <- asks (isBound name . contextBound)
       when bound (fail "a bound name is not a command")
+      module_ <- asks (isModule name . contextBound)
+      when module_ (fail "a module is not a command")
   bareWord
 
 -- | One argument of an external command.

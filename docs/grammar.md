@@ -198,6 +198,7 @@ in this rule only. A line may span several input lines while a `do` or a `case` 
 line        = [ ":q" | ":help" [ NAME ] | ":t" expr | ":core" expr | ":elab" [ name "=" ] expr | ":env" [ NAME ] | command
               | ":elab" declaration | declaration
               | fixity | name ":" [ context "=>" ] type
+              | [ name "=" ] "import" STRING
               | name "=" expr | "let" "rec" recgroup | name "<-" expr | expr ] EOF ;
 fixity      = ( "infixl" | "infixr" | "infix" ) DIGIT OP { OP } ;
 

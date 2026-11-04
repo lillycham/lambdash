@@ -20,7 +20,9 @@ end
 
 - Each line runs as if typed at the prompt, in order, after the directory's
   flake (if allowed) activates. A `do` block may span lines.
-- Bindings, fixity lines and declarations say nothing. Output, and the value
+- An import starts at the directory of `init.lsh`. See [modules](modules.md).
+- Bindings, fixity lines, declarations and imports say nothing but their
+  warnings. Output, and the value
   of a bare expression, show as at the prompt.
 - A line that fails is reported with its line number, and the lines after it
   still run:
