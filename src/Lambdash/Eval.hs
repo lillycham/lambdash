@@ -273,6 +273,8 @@ match p value = case (p, value) of
   (PLit (LBool b), VBool c) | b == c -> Just []
   (PLit LUnit, VUnit) -> Just []
   (PLit (LStr s), VStr t) | s == t -> Just []
+  (PRecord fields, VRecord values) ->
+    concat <$> traverse (\(label, field) -> lookup label values >>= match field) fields
   _ -> Nothing
 
 -- | A constructor with this many fields: a function of each field, in

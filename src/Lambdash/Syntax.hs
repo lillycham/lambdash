@@ -21,6 +21,7 @@ module Lambdash.Syntax
   , Declaration (..)
   ) where
 
+import Data.List (intercalate)
 import Lambdash.Unify (Label)
 
 type Name = String
@@ -114,6 +115,9 @@ data Pattern
     PCon Name [Pattern]
   | -- | @0@, @"s"@, @true@, @()@: that value only.
     PLit Lit
+  | -- | @{name = p, size}@: a record with at least these fields. The
+    -- record may have more. A field written alone binds its own name.
+    PRecord [(Label, Pattern)]
   deriving (Eq, Show)
 
 -- | A pattern as written. A constructor with fields is bracketed where it is
@@ -131,12 +135,14 @@ renderPattern = go False
     PLit LUnit -> "()"
     PLit (LStr s) -> show s
     PLit (LRef s) -> s
+    PRecord fields -> "{" <> intercalate ", " [label <> " = " <> go False field | (label, field) <- fields] <> "}"
 
 -- | The names a pattern binds, left to right.
 patternVars :: Pattern -> [Name]
 patternVars p = case p of
   PVar name -> [name]
   PCon _ fields -> concatMap patternVars fields
+  PRecord fields -> concatMap (patternVars . snd) fields
   _ -> []
 
 data Statement

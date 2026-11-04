@@ -47,6 +47,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad (foldM, when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.List (nub, sort)
 import Data.Set (Set)
 import Lambdash.Classes
 import Lambdash.TypeSyntax (writtenType)
@@ -569,6 +570,17 @@ inferPattern p = case p of
           pure (u `compose` sofar, binds <> more)
     (sub, binds) <- foldM step (emptySubst, []) (zip fields (map (apply at) fieldTys))
     pure (sub, apply sub (dataType (dataName info) args), [(n, apply sub t) | (n, t) <- binds])
+  -- Open: the record has these fields and perhaps more.
+  PRecord fields -> do
+    case [l | (i, (l, _)) <- zip [0 :: Int ..] fields, l `elem` map fst (take i fields)] of
+      l : _ -> failWith (BadPattern ("the field " <> l <> " is in one pattern twice"))
+      [] -> pure ()
+    rest <- unifying (RVar <$> freshVar)
+    let step (known, row, binds) (label, field) = do
+          (s, t, more) <- inferPattern field
+          pure (s `compose` known, \tail' -> row (RExtend label t tail'), binds <> more)
+    (sub, row, binds) <- foldM step (emptySubst, id, []) fields
+    pure (sub, apply sub (TRecord (row rest)), [(n, apply sub t) | (n, t) <- binds])
  where
   count 1 = "1 field"
   count n = show n <> " fields"
@@ -602,7 +614,11 @@ uncovered env rows n = case signature of
   heads = [p | (p : _) <- rows, not (wild p)]
   present = [c | Just (c, _) <- map key heads]
   -- Every constructor of the first column's type, and each one's arity.
+  -- A record is one constructor whose fields are every label the column
+  -- names. A label that a pattern leaves out is a wildcard there.
+  labels = nub (sort [l | PRecord fs <- heads, (l, _) <- fs])
   signature = case heads of
+    PRecord _ : _ -> Just [("{}", length labels)]
     PCon c _ : _ -> (\(info, _) -> [(c', length fs) | (c', fs) <- dataConstructors info]) <$> lookupConstructor env c
     PLit (LBool _) : _ -> Just [("true", 0), ("false", 0)]
     PLit LUnit : _ -> Just [("()", 0)]
@@ -616,9 +632,12 @@ uncovered env rows n = case signature of
   build "true" [] = PLit (LBool True)
   build "false" [] = PLit (LBool False)
   build "()" [] = PLit LUnit
+  -- The example names only the fields that matter: the pattern is open.
+  build "{}" fields = PRecord [(l, f) | (l, f) <- zip labels fields, not (wild f)]
   build c fields = PCon c fields
   key p = case p of
     PCon c fields -> Just (c, fields)
+    PRecord fs -> Just ("{}", [maybe PWild id (lookup l fs) | l <- labels])
     PLit (LBool b) -> Just (if b then "true" else "false", [])
     PLit LUnit -> Just ("()", [])
     PLit (LInt i) -> Just (show i, [])

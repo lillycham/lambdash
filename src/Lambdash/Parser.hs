@@ -621,7 +621,7 @@ caseOf = spanned $ do
     pure (p, body)
 
 -- | A pattern: @_@, @x@, @Just x@, @Cons x (Cons y rest)@, @0@, @"s"@,
--- @true@ or @()@. A capitalised name is a constructor, and any other name
+-- @true@, @()@ or @{name = p, size}@. A capitalised name is a constructor, and any other name
 -- binds.
 casePattern :: Parser Pattern
 casePattern = (PCon <$> lexeme upperName <*> many patternAtom) <|> patternAtom
@@ -630,6 +630,7 @@ patternAtom :: Parser Pattern
 patternAtom =
       (PWild <$ lexeme (try (char '_' <* notFollowedBy identifierChar)))
   <|> (PLit LUnit <$ try (symbol "(" *> symbol ")"))
+  <|> recordPattern
   <|> between (symbol "(") (symbol ")") casePattern
   <|> (PLit . LStr <$> lexeme stringLiteral)
   <|> (PLit . LInt <$> try (lexeme signedInteger))
@@ -637,6 +638,15 @@ patternAtom =
   <|> (PLit (LBool False) <$ lexeme (keyword "false"))
   <|> (PCon <$> lexeme upperName <*> pure [])
   <|> (PVar <$> lexeme lowerName)
+
+-- | @{name = p, size}@: a field alone binds its own name. The pattern is
+-- open, so the record may have more fields.
+recordPattern :: Parser Pattern
+recordPattern = PRecord <$> between (symbol "{") (symbol "}") (field `sepBy` symbol ",")
+ where
+  field = do
+    name <- lexeme identifier
+    (,) name <$> ((symbol "=" *> casePattern) <|> pure (PVar name))
 
 -- | @with overlay do ... end@.
 -- A bare reference resolves with pkg first: see "Lambdash.Desugar".

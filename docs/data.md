@@ -50,10 +50,22 @@ The first arm whose pattern matches gives the value. A pattern is one of:
 | `x` | anything, and binds `x` in the arm |
 | `Just p`, `Cons p q`, `Nothing` | that constructor, with patterns for its fields |
 | `0`, `-1`, `"s"`, `true`, `()` | that value |
+| `{name = p, size}` | a record with at least these fields; `size` alone binds `size` |
 
 A capitalised name is a constructor, and any other name binds. An integer
 pattern is an `Int`: there is no class for matching a number of any type.
 A name binds once in one pattern.
+
+A record pattern is open: `{size = 0}` matches any record with a `size`
+field, and its type is `{size : Int | r}`. A field written alone, as in
+`{size}`, binds its own name. A field is in one pattern once.
+
+```text
+λ> size = r -> case r of {size = 0} -> "empty"; {size} -> show size end
+size : {size : Int | a} -> String
+λ> size {name = "a", size = 3}
+"3"
+```
 
 Every arm's pattern has the scrutinee's type, and the arms join as the
 branches of an `if` do: two computations, jobs or streams join their effect
@@ -70,6 +82,9 @@ the case does not cover Cons _ (Cons _ _)
 λ> case n of 0 -> "zero" end
 the case does not cover _
 ```
+
+For coverage a record is one constructor whose fields are all the labels
+that the arms name. A label that an arm leaves out is a wildcard there.
 
 Integers and strings never have all their values listed, so a `case` on
 them needs a catch-all. Booleans and `()` can be covered. The check is

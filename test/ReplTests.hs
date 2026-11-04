@@ -591,6 +591,14 @@ tests =
   , ("case: only the chosen arm runs", prints [maybeData, "case Just 2 of Just n -> print n; Nothing -> print 0 end"] == ("2\n", ["data Maybe a", ""]))
   , ("case: spans lines", scripted (maybeData <> "\nf = m -> case m of\n  Just x -> x;\n  Nothing -> 0\nend\n") ["f (Just 7)"] == ([], ["7"]))
   , ("case: :core", final [":core case x of Just (Cons y _) -> y; _ -> 0 end"] == "case x of Just (Cons y _) -> y; _ -> 0 end")
+  , ("case: record patterns are open", session ["size = r -> case r of {size = 0} -> \"empty\"; {size} -> show size end", "size {name = \"a\", size = 0}", "size {size = 3}"]
+      == ["size : {size : Int | a} -> String", "\"empty\"", "\"3\""])
+  , ("case: arms name different fields", session ["area = s -> case s of {kind = \"sq\", side} -> side * side; {w, h} -> w * h end", "area {kind = \"rect\", side = 0, w = 2, h = 5, extra = true}"]
+      == ["area : Num a => {kind : String, side : a, w : a, h : a | b} -> a", "10"])
+  , ("case: records must cover too", session ["case {a = true, b = true} of {a = true} -> 1; {b = false} -> 2 end", shapeData, "case {s = Circle 1} of {s = Circle r} -> r end", "case {a = true} of {} -> 1 end"]
+      == ["the case does not cover {a = false, b = true}", "data Shape", "the case does not cover {s = Rect _ _}", "1"])
+  , ("case: a field once in a pattern", final ["case {a = 1} of {a = _, a = _} -> 1 end"] == "the field a is in one pattern twice")
+  , ("case: a record pattern needs its fields", final ["case {a = 1} of {b} -> b end"] == "no field: b")
   ]
  where
   builtinNames = words "print pure andThen collect map filter lines each pipefail length sort sortOn contains startsWith isEmpty stringLength byteLength encodeUtf8 encodeLine not add show eq ne lt le gt ge min max negate div mod cd ls overlay set unset prepend append prependWith appendWith use useLocal unuse environments pkg dev wait fg && || >>> <<< <> + - * / % == != < <= > >="

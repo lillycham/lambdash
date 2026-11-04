@@ -106,6 +106,7 @@ tests =
   , ("pattern: nested constructors", run casePattern "Cons x (Cons y _)" == Just (PCon "Cons" [PVar "x", PCon "Cons" [PVar "y", PWild]]))
   , ("pattern: literals", map (run casePattern) ["-1", "\"s\"", "true", "()"] == map Just [PLit (LInt (-1)), PLit (LStr "s"), PLit (LBool True), PLit LUnit])
   , ("pattern: a constructor alone", run casePattern "Nothing" == Just (PCon "Nothing" []))
+  , ("pattern: records, with puns", run casePattern "{name = Just n, size}" == Just (PRecord [("name", PCon "Just" [PVar "n"]), ("size", PVar "size")]) && run casePattern "{}" == Just (PRecord []))
   , ("identifier: case and of are reserved", run identifier "case" == Nothing && run identifier "of" == Nothing && run identifier "offset" == Just "offset")
   , ("data: a declaration", run declaration "data Maybe a = Nothing | Just a" == Just (DeclData "Maybe" ["a"] [("Nothing", []), ("Just", [STVar "a"])]))
   , ("data: recursive fields", run declaration "data List a = Nil | Cons a (List a)" == Just (DeclData "List" ["a"] [("Nil", []), ("Cons", [STVar "a", STApp "List" Nothing [STVar "a"]])]))

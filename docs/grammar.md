@@ -31,7 +31,9 @@ block       = "do" statement { ";" statement } [ ";" ] "end" ;
 case        = "case" expr "of" arm { ";" arm } [ ";" ] "end" ;
 arm         = pattern "->" expr ;
 pattern     = UPPER { patom } | patom ;
-patom       = "_" | LOWER | UPPER | INT | STRING | "true" | "false" | "(" ")" | "(" pattern ")" ;
+patom       = "_" | LOWER | UPPER | INT | STRING | "true" | "false" | "(" ")" | "(" pattern ")" | precord ;
+precord     = "{" [ pfield { "," pfield } ] "}" ;
+pfield      = LOWER [ "=" pattern ] ;
 statement   = IDENT "<-" expr | name "=" expr | expr ;
 with        = "with" postfix block ;
 

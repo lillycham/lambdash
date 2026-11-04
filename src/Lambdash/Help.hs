@@ -83,7 +83,7 @@ topics =
   , ("data", unlines'
       [ "data Maybe a = Nothing | Just a declares a type; Just is a function."
       , "case m of Just x -> x; Nothing -> 0 end: the first arm that matches."
-      , "Patterns: _  x  Just p  0  \"s\"  true  (). Every value must be covered."
+      , "Patterns: _  x  Just p  {name = p, size}  0  \"s\"  true  (). Every value must be covered."
       , "let rec f = x -> … and g = y -> … binds recursive functions."
       , "   docs/data.md" ])
   , ("startup", unlines'
