@@ -97,3 +97,7 @@ Like the host, the evaluator can diverge.
 | [modules](docs/modules.md) | `import`, and what a module may hold |
 | [editors](docs/editors.md) | `lambdash --lsp`, for Helix and Neovim |
 | [equality](docs/equality.md) | design: classes, `Eq`, `Ord`, operators |
+
+## Licence
+
+λsh uses the MIT licence. See [LICENSE](LICENSE).

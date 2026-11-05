@@ -2,6 +2,10 @@ cabal-version:   3.0
 name:            lambdash
 version:         0.1.0.0
 synopsis:        A functional shell with composable environments
+license:         MIT
+license-file:    LICENSE
+author:          Lilly Cham
+copyright:       2026 Lilly Cham
 build-type:      Simple
 extra-source-files: examples/metacircular.lsh
 
