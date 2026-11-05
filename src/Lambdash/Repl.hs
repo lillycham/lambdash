@@ -1115,6 +1115,8 @@ writtenCheck classes context written =
        | otherwise -> Nothing
  where
   onOwn (SPred _ (STVar v)) = v `elem` names written
+  -- A class on a record's tail, as in Show { | r} => {name : String | r} -> String.
+  onOwn (SPred _ (STRecord [] (Just v))) = v `elem` names written
   onOwn _ = False
   names t = case t of
     STVar v -> [v]

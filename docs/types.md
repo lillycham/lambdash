@@ -72,9 +72,15 @@ the binding needs Num a, and its signature does not give it
   `Eq a`, not the other way round.
 - A signature lifts the monomorphism restriction: after `n : Num a => a`,
   `n = 1` is one value per type.
-- Effect rows and record tails are not rigid: the binding fills them in. So
+- Effect rows are not rigid: the binding fills them in. So
   `c : Int -> Comp ()` with `c = n -> print n` is `Int -> Comp {console} ()`,
   and the preflight still sees its commands.
+- A record's tail is rigid, like an unknown: `n : {name : String | r} -> String`
+  must take any record with a name. A binding that reads another field, or
+  closes the record, is less general than its signature. A class that the
+  binding needs on the tail must come from the context:
+  `Show { | r} => {name : String | r} -> String`. (Before 2026-11-05, tails
+  were filled in, and a class on a tail defaulted to `()`.)
 - What a signature leaves open defaults as a line does.
 - The first binding that type-checks uses the signature up. One that fails
   leaves it waiting. A binding of another name in between does not touch it.
