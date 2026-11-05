@@ -1096,17 +1096,23 @@ elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go 
     (s1, te, code) <- infer env expr
     s2 <- fitting (apply s1 te) (apply s1 sigBare)
     (solved, ty) <- finish env (s2 `compose` s1) sigBare
+    -- A written row tail is rigid too: in {name : String | r} -> String the
+    -- binding must take any record with a name, so it may not close r or
+    -- fill it with fields.
     let rigid = Set.toList (typeUnknowns sigBare)
+        rigidRows = Set.toList (rowTails sigBare)
         images = [apply solved (TVar v) | v <- rigid]
+        rowImages = [applyRow solved (RVar v) | v <- rigidRows]
+        imageVars = [v | TVar v <- images] <> [v | RVar v <- rowImages]
         fixed = ftvEnv (applyEnv solved env)
-        distinct = Set.size (Set.fromList [v | TVar v <- images]) == length images
-    if all isVar images && distinct && not (any (`Set.member` fixed) [v | TVar v <- images])
+        distinct = Set.size (Set.fromList imageVars) == length images + length rowImages
+    if all isVar images && all isRowVar rowImages && distinct && not (any (`Set.member` fixed) imageVars)
       then pure ()
       else failWith (BadDeclaration "the binding is less general than its signature")
     givens <- mapM (\p -> (\n -> (n, applyPred solved p)) <$> freshEvidence) sigPreds
     (bindings, residual) <- simplify [(n, applyPred solved p) | (n, p) <- classPreds solved]
     env' <- classEnv
-    let rigidVars = Set.fromList [v | TVar v <- images]
+    let rigidVars = Set.fromList imageVars
         onRigid (_, p) = not (Set.null (Set.intersection (predVars p) rigidVars))
     resolved <- mapM (\(n, p@(IsIn c t')) ->
       case [(g, c') | (g, IsIn c' t'') <- givens, t'' == t', c' == c || c `elem` superclassesOf env' c'] of
@@ -1120,7 +1126,26 @@ elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go 
     pure (shown, foldr ELam (wrapLets (resolved <> defaulted <> bindings) code) (map fst givens))
   isVar (TVar _) = True
   isVar _ = False
-  -- The unknowns in type positions: not rows, which stay flexible.
+  isRowVar (RVar _) = True
+  isRowVar _ = False
+  -- The tails of the records in a type, which a signature writes as | r.
+  rowTails ty = case ty of
+    TFun a b -> Set.union (rowTails a) (rowTails b)
+    TList a -> rowTails a
+    TData _ ts -> Set.unions (map rowTails ts)
+    TRecord row -> tailOf row
+    TComp _ a -> rowTails a
+    TJob _ a -> rowTails a
+    TStream _ i o r -> Set.unions (map rowTails [i, o, r])
+    TStage i o -> Set.union (rowTails i) (rowTails o)
+    TCollector i o -> Set.union (rowTails i) (rowTails o)
+    TQualified _ a -> rowTails a
+    TClass _ a -> rowTails a
+    _ -> Set.empty
+  tailOf (RExtend _ t r) = Set.union (rowTails t) (tailOf r)
+  tailOf (RVar v) = Set.singleton v
+  tailOf REmpty = Set.empty
+  -- The unknowns in type positions. Row tails are in rowTails.
   typeUnknowns ty = case ty of
     TVar v -> Set.singleton v
     TFun a b -> Set.union (typeUnknowns a) (typeUnknowns b)

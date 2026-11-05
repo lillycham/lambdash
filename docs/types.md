@@ -72,10 +72,45 @@ the binding needs Num a, and its signature does not give it
   `Eq a`, not the other way round.
 - A signature lifts the monomorphism restriction: after `n : Num a => a`,
   `n = 1` is one value per type.
-- Effect rows and record tails are not rigid: the binding fills them in. So
+- Effect rows are not rigid: the binding fills them in. So
   `c : Int -> Comp ()` with `c = n -> print n` is `Int -> Comp {console} ()`,
   and the preflight still sees its commands.
+- A record's tail is rigid, like an unknown: `n : {name : String | r} -> String`
+  must take any record with a name. A binding that reads another field, or
+  closes the record, is less general than its signature. A class that the
+  binding needs on the tail must come from the context:
+  `Show { | r} => {name : String | r} -> String`. (Before 2026-11-05, tails
+  were filled in, and a class on a tail defaulted to `()`.)
 - What a signature leaves open defaults as a line does.
 - The first binding that type-checks uses the signature up. One that fails
   leaves it waiting. A binding of another name in between does not touch it.
 - In the startup file, signatures are quiet, like bindings.
+
+## Search by type: `:find t`
+
+`:find` lists the names whose type fits a written type, best first, as
+Hoogle does:
+
+```text
+λ> :find [Int] -> [Int]
+sort : Ord a => [a] -> [a]
+λ> :find Int -> Int -> Int
+add : Int -> Int -> Int
+(*) : Num a => a -> a -> a
+…
+```
+
+- A name fits when its type is at least as general as the query: you can
+  use it where the query's type is wanted. `sort` fits `[Int] -> [Int]`, but
+  `stringLength` does not fit `a -> Int`.
+- The query is a signature, so it means what `f : t` means. Its unknowns are
+  rigid, and its context must give every class that the name needs:
+  `:find a -> String` does not find `show`, and `:find Show a => a -> String`
+  does.
+- An effect row that the query does not write is open: `:find Comp [String]`
+  finds `environments : Comp {env} [String]`.
+- The arguments may come in another order, for up to four arguments. Such a
+  name comes after the others and says `(arguments in another order)`.
+- Names that fit as they are come first. Among them, the more specific type
+  comes first.
+- At most 20 names show, with a count of the rest.

@@ -14,6 +14,7 @@ overview = unlines'
   , ""
   , "prompt  :t e   type          :core e  desugared      :elab e  with dictionaries"
   , "        :env [VAR]  layers   :help [x]  this         :q  quit"
+  , "        :find t  names whose type fits t, as Hoogle:  :find [Int] -> [Int]"
   , "shell   jobs  fg [n]  bg [n]  allow  deny            Ctrl-Z stops, Ctrl-C cancels"
   , "lines   x = e  bind          x <- e  run, then bind  f : t  signature"
   , "        let rec f = x -> … and g = y -> …  recursive functions"
