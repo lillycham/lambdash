@@ -1083,8 +1083,8 @@ elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT g
 -- generalises a binding that the monomorphism restriction would not: with
 -- n : Num a => a, n = 1 is one value per type.
 --
--- Effect rows and record tails in a signature are not rigid: the binding's
--- own rows fill them in, so the preflight still sees its commands.
+-- Record tails are rigid too. Effect rows stay flexible: the binding's own
+-- effects fill them in, so the preflight still sees its commands.
 elaborateSigned :: ClassEnv -> Env -> ([SPred], SType) -> Expr -> Either InferError (Ty, Expr)
 elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go start) classes
  where

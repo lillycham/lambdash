@@ -613,7 +613,7 @@ tests =
   , ("signature: rigid unknowns", final ["h : a -> b", "h = x -> x"] == "the binding is less general than its signature")
   , ("signature: lifts the restriction", session ["n : Num a => a", "n = 1", "{a = (n : Int), b = n}"] == ["", "n : Num a => a", "{a = 1, b = 1}"])
   , ("signature: what it leaves open defaults", final ["r : b -> Bool", "r = x -> eq [] []", "r 1"] == "true")
-  , ("signature: a record tail is flexible", final ["s : {name : String | r} -> String", "s = x -> x.name", "s {name = \"n\", size = 1}"] == "\"n\"")
+  , ("signature: accepts extra record fields", final ["s : {name : String | r} -> String", "s = x -> x.name", "s {name = \"n\", size = 1}"] == "\"n\"")
   , ("signature: rows reach the preflight", session ["c : Int -> Comp ()", "c = n -> print n", ":t c"] == ["", "c : Int -> Comp ()", "Int -> Comp {console} ()"])
   , ("signature: waits for its own name", session ["z : Int", "y = 2", "z = 3", ":t z"] == ["", "y : Int", "z : Int", "Int"])
   , ("signature: used up by its binding", final ["g : Int -> Int", "g = x -> x", "g = x -> true"] == "g : a -> Bool")
