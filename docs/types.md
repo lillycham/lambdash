@@ -79,3 +79,32 @@ the binding needs Num a, and its signature does not give it
 - The first binding that type-checks uses the signature up. One that fails
   leaves it waiting. A binding of another name in between does not touch it.
 - In the startup file, signatures are quiet, like bindings.
+
+## Search by type: `:find t`
+
+`:find` lists the names whose type fits a written type, best first, as
+Hoogle does:
+
+```text
+λ> :find [Int] -> [Int]
+sort : Ord a => [a] -> [a]
+λ> :find Int -> Int -> Int
+add : Int -> Int -> Int
+(*) : Num a => a -> a -> a
+…
+```
+
+- A name fits when its type is at least as general as the query: you can
+  use it where the query's type is wanted. `sort` fits `[Int] -> [Int]`, but
+  `stringLength` does not fit `a -> Int`.
+- The query is a signature, so it means what `f : t` means. Its unknowns are
+  rigid, and its context must give every class that the name needs:
+  `:find a -> String` does not find `show`, and `:find Show a => a -> String`
+  does.
+- An effect row that the query does not write is open: `:find Comp [String]`
+  finds `environments : Comp {env} [String]`.
+- The arguments may come in another order, for up to four arguments. Such a
+  name comes after the others and says `(arguments in another order)`.
+- Names that fit as they are come first. Among them, the more specific type
+  comes first.
+- At most 20 names show, with a count of the rest.

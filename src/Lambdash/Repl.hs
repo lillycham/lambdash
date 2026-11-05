@@ -53,6 +53,7 @@ import Lambdash.Unify
 import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, lookupClass, lookupData, prelude)
 import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
+import Lambdash.Find (Found (..), findByType)
 import Lambdash.Syntax (Declaration, SPred (..), SType (..), renderPattern)
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
@@ -180,6 +181,9 @@ data Command
     Declare Declaration
   | -- | @f : Eq a => a -> Bool@: the signature of the next @f = e@.
     Signature Name [SPred] SType
+  | -- | @:find Ord a => [a] -> [a]@: the names whose type is at least as
+    -- general as this one.
+    Find [SPred] SType
   | -- | @:help@, @:help NAME@ or @:help TOPIC@.
     Help (Maybe String)
   | -- | @:elab instance ...@: an instance's dictionary, as code. Nothing is
@@ -203,6 +207,7 @@ command =
   <|> try (lexeme (keyword ":elab") *> (ShowElabDeclaration <$> declaration))
   <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (name <* symbol "=" <* notFollowedBy (char '='))) <*> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
+  <|> (uncurry Find <$> (lexeme (keyword ":find") *> qualifiedType))
   <|> (Help <$> (lexeme (keyword ":help" <|> keyword ":h") *> optionalName))
   <|> fixityLine
   -- Only a quoted path, and nothing after it, makes an import: import
@@ -776,6 +781,9 @@ stepLine session input =
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
     Right (Help Nothing) -> pure (Continue session Help.overview)
     Right (Help (Just word)) -> pure (Continue session (helpFor session word))
+    Right (Find context written) -> case writtenCheck classes context written of
+      Just problem -> pure (Failed problem)
+      Nothing -> pure (Continue session (foundMessage session (findByType classes types (context, written))))
     Right (Signature name context written) -> case writtenCheck classes context written of
       Just problem -> pure (Failed problem)
       Nothing -> pure (Continue session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)} "")
@@ -1181,3 +1189,17 @@ classHelp classes info = intercalate "\n" (header : methods <> [instancesLine])
                 | otherwise -> other <> " " <> unwords (take (length (instRequires inst)) letters)
         context = [c <> " " <> v | (v, cs) <- args, c <- cs]
     in shape <> if null context then "" else " when " <> intercalate ", " context
+
+-- | What @:find@ shows: each name with its type, as @:t@ shows it, best
+-- first. A name whose arguments had to change order says so. Twenty at
+-- most, with a count of the rest.
+foundMessage :: Session -> [Found] -> String
+foundMessage _ [] = "nothing has that type"
+foundMessage session found = intercalate "\n" (map line shown <> more)
+ where
+  (shown, rest) = splitAt 20 found
+  more = [ "… and " <> show (length rest) <> " more" | not (null rest)]
+  line (Found name reordered) =
+    displayName name <> " : " <> typeOf name <> (if reordered then "   (arguments in another order)" else "")
+  typeOf name = either (const "?") renderEffectsType
+    (inferWith (sessionClasses session) (sessionTypes session) (EVar name))
