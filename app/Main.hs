@@ -8,6 +8,8 @@ import System.Environment (getArgs, lookupEnv)
 import Lambdash.Complete (Candidate (..), completeField, completeName, isNameChar)
 import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (..), enableAutoTab, enableMultiline, readlineExMaybe, setHistory)
 import Foreign.C.String (CString, withCString)
+import System.Exit (ExitCode (..), exitWith)
+import Server (serve)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory, getHomeDirectory)
 import System.FilePath ((</>))
@@ -22,6 +24,15 @@ main = do
   setForeignEncoding utf8
   setFileSystemEncoding utf8
   mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
+  -- An editor talks to the server on stdin and stdout, so no terminal setup.
+  lsp <- ("--lsp" `elem`) <$> getArgs
+  if lsp then serve >>= exitWith . code else shell
+ where
+  code 0 = ExitSuccess
+  code n = ExitFailure n
+
+shell :: IO ()
+shell = do
   -- Computations print straight to stdout, between reads of the editor.
   hSetBuffering stdout LineBuffering
   setupTerminal

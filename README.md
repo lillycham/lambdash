@@ -95,4 +95,5 @@ Like the host, the evaluator can diverge.
 | [data](docs/data.md) | `data` types, `case` and patterns, `let rec` |
 | [startup](docs/startup.md) | `init.lsh`, run before the first prompt |
 | [modules](docs/modules.md) | `import`, and what a module may hold |
+| [editors](docs/editors.md) | `lambdash --lsp`, for Helix and Neovim |
 | [equality](docs/equality.md) | design: classes, `Eq`, `Ord`, operators |
