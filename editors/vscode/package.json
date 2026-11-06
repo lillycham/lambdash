@@ -1,7 +1,7 @@
 {
   "name": "lambdash",
   "displayName": "λsh",
-  "description": "λsh language support: highlighting, and diagnostics and hover from lambdash --lsp",
+  "description": "λsh (lambdash) language support: highlighting, diagnostics, hover, outline, go to definition, completion, and running files",
   "version": "0.2.0",
   "publisher": "lillycham",
   "license": "MIT",
@@ -39,7 +39,7 @@
       }
     ],
     "configuration": {
-      "title": "λsh",
+      "title": "Lambdash",
       "properties": {
         "lambdash.path": {
           "type": "string",
@@ -52,23 +52,23 @@
       {
         "command": "lambdash.runFile",
         "title": "Run File",
-        "category": "λsh",
+        "category": "Lambdash",
         "icon": "$(play)"
       },
       {
         "command": "lambdash.sendSelection",
-        "title": "Send Selection to the λsh Prompt",
-        "category": "λsh"
+        "title": "Send Selection to the Prompt",
+        "category": "Lambdash"
       },
       {
         "command": "lambdash.openPrompt",
-        "title": "Open a λsh Prompt",
-        "category": "λsh"
+        "title": "Open a Prompt",
+        "category": "Lambdash"
       },
       {
         "command": "lambdash.restart",
         "title": "Restart the Language Server",
-        "category": "λsh"
+        "category": "Lambdash"
       }
     ],
     "keybindings": [

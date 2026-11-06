@@ -117,16 +117,16 @@ code --extensionDevelopmentPath="$PWD/result/share/vscode/extensions/lillycham.l
 | --- | --- | --- |
 | `lambdash.path` | `lambdash` | the program, as a name on `PATH` or an absolute path |
 
-`λsh: Restart the Language Server` restarts it, as a change to
+`Lambdash: Restart the Language Server` restarts it, as a change to
 `lambdash.path` does.
 
 Three commands run code:
 
 | Command | Key | |
 | --- | --- | --- |
-| `λsh: Run File` | ▶ in the editor title | saves the file, then runs `lambdash FILE` in a new terminal |
-| `λsh: Send Selection to the λsh Prompt` | Shift+Enter | types the selection, or the line, at a λsh prompt |
-| `λsh: Open a λsh Prompt` | | shows that prompt |
+| `Lambdash: Run File` | ▶ in the editor title | saves the file, then runs `lambdash FILE` in a new terminal |
+| `Lambdash: Send Selection to the Prompt` | Shift+Enter | types the selection, or the line, at a λsh prompt |
+| `Lambdash: Open a Prompt` | | shows that prompt |
 
 Run File starts in the workspace folder, or in the file's directory when
 the file is outside a workspace, and closes the terminal of the last run.
