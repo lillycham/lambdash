@@ -2,7 +2,7 @@
 -- the text it would show.
 module Main (main) where
 
-import Control.Exception (SomeException, evaluate, try)
+import Control.Exception (ErrorCall (..), SomeException, evaluate, toException, try)
 import Control.Monad (unless, when)
 import Data.List (isInfixOf)
 import Data.Set qualified as Set
@@ -246,8 +246,21 @@ tests =
         == ["class E", "a superclass cycle: E -> E"])
   , ("step: a superclass two steps up gives its dictionary",
       last (session ["class Eq a => O a where o : a -> Int", "class O a => O2 a where o2 : a -> Int", "k : O2 a => a -> Bool", "k = x -> eq x x", "instance O Int where o = x -> x", "instance O2 Int where o2 = x -> x", "k 3"]) == "true")
-  , ("step: an internal error fails the line, not the shell",
-      last (session ["data T = A Int", "x = A 1", "data T = A String", "case x of A s -> stringLength s end", "2"]) == "2")
+  , ("lineFailure: an error call is an internal error",
+      lineFailure (toException (ErrorCall "oops")) == Just "internal error: oops")
+  , ("data: a value of a type declared again keeps the old type",
+      session ["data T = A Int", "x = A 1", "data T = A String", ":t x", "case x of A s -> stringLength s end"]
+        == ["data T", "x : T", "data T", "T#1", "type mismatch: T#1 and T\n  T#1 is an earlier declaration of T"])
+  , ("data: a case on the new constructors does not cover an old value",
+      last (session ["data T = A", "x = A", "data T = B", "case x of B -> true end"]) == "type mismatch: T#1 and T\n  T#1 is an earlier declaration of T")
+  , ("data: old constructors and instances still work with old values",
+      session ["data T = A", "instance Show T where show = t -> \"old\"", "x = A", "data T = B", "case x of A -> true end", "show x", "show B"]
+        == ["data T", "instance Show T", "x : T", "data T", "true", "\"old\"", "no instance: Show T"])
+  , ("data: each declaration retires to the next name",
+      drop 4 (session ["data T = A", "x = A", "data T = B", "y = B", "data T = C", ":t x", ":t y", ":help T#2"])
+        == ["data T", "T#1", "T#2", "data T#2 = B\n  T#2 is an earlier declaration of T"])
+  , ("data: a signature names the current type",
+      last (session ["data T = A", "data T = B", "f : T -> Bool", "f = t -> case t of B -> true end", "f B"]) == "true")
   , ("step: a function", session ["x -> x"] == ["<function>"])
   , ("step: a record", session ["{a = 1}"] == ["{a = 1}"])
   , ("step: quit", session [":q", "1"] == ["<quit>"])
@@ -592,6 +605,11 @@ tests =
       last (withModules [("m.lsh", "instance Show a => Show [a] where show = xs -> \"mine\"\n")] ["instance Show [a] where show = xs -> \"prompt\"", "import \"m.lsh\"", "show [true]"]) == "\"mine\"")
   , ("import: a module that does not touch an instance keeps the prompt's",
       last (withModules [("m.lsh", "x = 1\n")] ["instance Show [a] where show = xs -> \"prompt\"", "import \"m.lsh\"", "show [true]"]) == "\"prompt\"")
+  , ("import: a module's data type retires ours of the same name",
+      drop 2 (withModules [("m.lsh", "data T = A String\nlen = t -> case t of A s -> stringLength s end\n")] ["data T = A Int", "x = A 1", "import \"m.lsh\"", "len (A \"abc\")", ":t x"])
+        == ["imported len, A", "3", "T#1"])
+  , ("import: a module cannot declare a data type twice",
+      any ("the module declares the data type T twice" `isInfixOf`) (withModules [("m.lsh", "data T = A\ndata T = B\n")] ["import \"m.lsh\""]))
   , ("import: a module's imports start at its own directory", withModules [("lib/pad.lsh", pad), ("m.lsh", "import \"./lib/pad.lsh\"\ncell = w -> padRight w \"x\"\n")] ["m = import \"m.lsh\"", "m.cell 2", "padRight"] == ["imported m.cell", "\"x \"", "command not found: padRight"])
   , ("import: a cycle stops", any ("an import cycle" `isInfixOf`) ((withModules [("m.lsh", "import \"m.lsh\"\n")] ["import \"m.lsh\""])))
   , ("import: a missing module", withModules [] ["import \"none.lsh\""] == ["no module at none.lsh"])

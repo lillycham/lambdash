@@ -25,9 +25,38 @@ The checks:
 - The builtin types (`Int`, `String`, `Comp` and the rest) cannot be declared.
 - The constructors of one type are distinct.
 
-A type declared again replaces the old one, and the instances for it go.
 Constructors are ordinary names: a later binding can shadow one. A pattern
 always means the constructor.
+
+### A type declared again
+
+A type declared again is a new type. The old one retires under a name that
+no written type can spell, `T#1`, then `T#2`, and so on:
+
+```text
+λ> data T = A Int
+data T
+λ> x = A 1
+x : T
+λ> data T = A String
+data T
+λ> :t x
+T#1
+λ> case x of A s -> stringLength s end
+type mismatch: T#1 and T
+  T#1 is an earlier declaration of T
+```
+
+- Bindings keep the old type, and its constructors and instances go with it.
+  A constructor that the new declaration does not reuse still makes old
+  values, and a pattern with it still matches them.
+- A written type, in a signature or an instance head, names the newest `T`.
+  The new type starts with no instances.
+- `:help T#1` shows the old declaration.
+- An import whose module declares `T` retires the session's `T` in the same
+  way. Importing a module again retires the types of the first import, so
+  values from the two imports do not mix. A module cannot declare one type
+  twice.
 
 `:help List` shows the declaration. There is no `deriving` yet: write the
 instances you need.

@@ -26,6 +26,7 @@ tests =
   -- y is then unbound, so the second line is the external command y.
   , ("a failed line binds nothing", problems ["y = 1 + true", "y"] == [(1, Nothing, "no instance: Num Bool")])
   , ("a signature waits for its binding", problems ["f : Int -> Int", "f = x -> x", "f true"] /= [])
+  , ("a data type declared again is a new type", map (\(line, _, _) -> line) (problems ["data T = A Int", "x = A 1", "data T = A String", "case x of A s -> stringLength s end"]) == [4])
   , ("declarations and let rec", problems ["data Maybe a = Nothing | Just a", "let rec len = m -> case m of Nothing -> 0; Just _ -> 1 end", "len (Just 1)"] == [])
   , ("a block spans lines", problems ["f = m -> do", "  print m", "end", "f 1"] == [])
   , ("hover: a name has its type there", hover ["f = x -> x + 1", "w = f 1"] 2 5 == Just (2, 5, 6, "f : Num a => a -> a"))

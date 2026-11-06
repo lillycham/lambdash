@@ -17,6 +17,8 @@ module Lambdash.Repl
   , renderError
   , Step (..)
   , step
+  , lineFailure
+  , declareIn
   , runScript
   , startupFile
   , Entry
@@ -25,7 +27,7 @@ module Lambdash.Repl
 import Control.Monad (filterM)
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.Bifunctor (first)
-import Data.Char (chr, ord)
+import Data.Char (chr, isAlphaNum, ord)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.List (intercalate, isPrefixOf, nub, partition)
@@ -50,11 +52,11 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, instanceName, lookupClass, lookupData, prelude)
+import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, instanceName, lookupClass, lookupData, prelude, retireData, retiredName)
 import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Find (Found (..), findByType)
-import Lambdash.Syntax (Declaration, SPred (..), SType (..), renderPattern)
+import Lambdash.Syntax (Declaration (..), SPred (..), SType (..), renderPattern)
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
@@ -464,7 +466,7 @@ renderError (NotCovered p) = "the case does not cover " <> renderPattern p
 renderError (SignatureNeeds p) = "the binding needs " <> evalState (renderPred p) Map.empty <> ", and its signature does not give it"
 renderError (Unentailed p) = "the instance needs " <> evalState (renderPred p) Map.empty <> ", and its context does not give it"
 renderError (Unify err) = case err of
-  Mismatch left right -> renderPair "type mismatch: " left right
+  Mismatch left right -> renderPair "type mismatch: " left right <> retiredNote (renderPair "" left right)
   Infinite var ty -> renderPair "infinite type: " (TVar var) ty
   InfiniteRow var row ->
     renderPair "infinite row: " (TRecord (RVar var)) (TRecord row)
@@ -678,6 +680,39 @@ arrive dir session = do
                  }
              , messages <> [name <> " activated"] )
 
+-- | Check a declaration and add it to the session, with the text it shows.
+-- A data type declared again is a new type: the old one is retired first.
+declareIn :: Session -> Declaration -> Either InferError (Session, String)
+declareIn session written = do
+  let ready = case written of
+        DeclData name _ _ | Just _ <- lookupData (sessionClasses session) name -> retire name session
+        _ -> session
+  done <- declare (sessionClasses ready) (sessionTypes ready) (sessionValues ready) written
+  pure
+    ( ready
+        { sessionClasses = declaredClasses done
+        , sessionTypes = foldr (uncurry Map.insert) (sessionTypes ready) (declaredTypes done)
+        , sessionValues = foldr (uncurry Map.Lazy.insert) (sessionValues ready) (declaredValues done)
+        }
+    , declaredMessage done )
+
+-- | Retire a data type: give it the next name, @T#1@, @T#2@, that no
+-- written type can spell, in every type the session knows. Bindings that
+-- have the old type keep it, and its constructors and instances go with it,
+-- so they still work together but never with the new type. The dictionaries
+-- of its instances move to their new names.
+retire :: String -> Session -> Session
+retire name session = session
+  { sessionClasses = retireData name stale classes
+  , sessionTypes = Map.map (\(Forall bound ty) -> Forall bound (renameType name stale ty)) (sessionTypes session)
+  , sessionValues = foldr move (sessionValues session) [instClass i | i <- envInstances classes, instHead i == name]
+  }
+ where
+  classes = sessionClasses session
+  stale = name <> "#" <> show (1 + length [() | info <- envData classes, retiredName (dataName info) == Just name])
+  move cls values = maybe values (\value -> Map.Lazy.insert (instanceName cls stale) value values)
+    (Map.Lazy.lookup (instanceName cls name) values)
+
 -- | The result of one line.
 data Step
   = -- | The next session, and text to show. No text means show nothing.
@@ -805,13 +840,7 @@ stepLine session input =
     Right (Signature name context written) -> case writtenCheck classes context written of
       Just problem -> pure (Failed problem)
       Nothing -> pure (Continue session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)} "")
-    Right (Declare written) -> case declare classes types values written of
-      Left err -> pure (Failed (renderError err))
-      Right done -> pure (Continue session
-        { sessionClasses = declaredClasses done
-        , sessionTypes = foldr (uncurry Map.insert) types (declaredTypes done)
-        , sessionValues = foldr (uncurry Map.Lazy.insert) values (declaredValues done)
-        } (declaredMessage done))
+    Right (Declare written) -> pure (either (Failed . renderError) (uncurry Continue) (declareIn session written))
     Right (ShowElabDeclaration written) -> case declare classes types values written of
       Left err -> pure (Failed (renderError err))
       Right done -> pure (Continue session (maybe (declaredMessage done) (\(name, code) -> "(" <> name <> ") = " <> renderCore code) (declaredCode done)))
@@ -1050,7 +1079,7 @@ loadModule session written = do
           Left message -> at message
           Right nested ->
             let (next, _) = mergeModule alias nested now
-            in go path found
+            in checked path n found
                  { moduleSession = next
                  , moduleGlobals = moduleGlobals found <> moduleGlobals nested
                  , moduleWarnings = moduleWarnings found <> moduleWarnings nested
@@ -1060,7 +1089,7 @@ loadModule session written = do
         Just (names, globals) -> do
           result <- stepLine now chunk
           case result of
-            Continue next output -> go path found
+            Continue next output -> checked path n found
               { moduleSession = next
               , moduleNames = moduleNames found <> names
               , moduleGlobals = moduleGlobals found <> globals
@@ -1068,6 +1097,11 @@ loadModule session written = do
               } rest
             Failed message -> at message
             Quit -> at "a module cannot quit"
+  -- A module that declares a data type twice would carry a retired type,
+  -- @T#1@, whose name can clash with the importer's own.
+  checked path n found rest = case [dataName info | info <- envData (sessionClasses (moduleSession found)), Just _ <- [retiredName (dataName info)]] of
+    retired : _ -> pure (Left (path <> ":" <> show n <> ": the module declares the data type " <> maybe retired id (retiredName retired) <> " twice"))
+    [] -> go path found rest
 
 -- | The names a definition makes: those that a binding makes, which an
 -- import may qualify, and those that a declaration makes, which it does
@@ -1089,7 +1123,7 @@ defines session line = case line of
 -- instances and fixities. Its bindings go under the prefix, if there is
 -- one. Gives the names added.
 mergeModule :: Maybe Name -> Module -> Session -> (Session, [Name])
-mergeModule alias found session =
+mergeModule alias found original =
   ( session
       { sessionTypes = foldl (\types (to, ty, _) -> maybe types (\known -> Map.insert to known types) ty) (sessionTypes session) added
       , sessionValues = foldl (\values (to, _, value) -> Map.Lazy.insert to value values) (sessionValues session) added
@@ -1099,6 +1133,9 @@ mergeModule alias found session =
   , [to | (to, _, _) <- added]
   )
  where
+  -- The module's data types are new types, so ours of the same name retire.
+  session = foldr retire original
+    [dataName info | info <- envData (sessionClasses inner), Just _ <- [lookupData (sessionClasses original) (dataName info)]]
   inner = moduleSession found
   prefixed name = maybe name (\prefix -> prefix <> "." <> name) alias
   pairs = [(prefixed name, name) | name <- nub (moduleNames found)] <> [(name, name) | name <- nub (moduleGlobals found)]
@@ -1178,8 +1215,16 @@ helpFor session word
   assocWord InfixN = "infix"
 
 -- | A data type, as declared.
+-- | For each retired type that a text names, what it was: an error that
+-- says only @T#1 and T@ would not say why they differ.
+retiredNote :: String -> String
+retiredNote text = concat ["\n  " <> name <> " is an earlier declaration of " <> base | name <- nub (words (map keep text)), Just base <- [retiredName name]]
+ where
+  keep c = if isAlphaNum c || c `elem` ("#_'" :: String) then c else ' '
+
 dataHelp :: DataInfo -> String
 dataHelp info = "data " <> unwords (dataName info : params) <> " = " <> intercalate " | " (map constructor (dataConstructors info))
+  <> retiredNote (dataName info)
  where
   names = Map.fromList (zip (dataParams info) params)
   params = take (length (dataParams info)) [[c] | c <- ['a' ..]]

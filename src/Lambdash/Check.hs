@@ -14,11 +14,10 @@ import Data.List (intercalate)
 import Data.Map.Lazy qualified as Map.Lazy
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Eval (Value, typeEnv)
 import Lambdash.Infer
 import Lambdash.Parser (Bound (..))
-import Lambdash.Repl (Command (..), Session (..), needsMore, parseCommandWith, renderEffectsType, renderError)
+import Lambdash.Repl (Command (..), Session (..), declareIn, needsMore, parseCommandWith, renderEffectsType, renderError)
 import Lambdash.Syntax (patternVars)
 
 -- | Something wrong in a file. Lines and columns count from 1. Without a
@@ -149,7 +148,6 @@ checkChunk session chunk =
     Right parsed -> either (Left . Right . renderError) Right (typed parsed)
  where
   types = sessionTypes session
-  values = sessionValues session
   classes = sessionClasses session
   builtinNames = Map.keysSet (Map.filterWithKey (\name scheme -> Map.lookup name typeEnv == Just scheme) types)
   typed parsed = case parsed of
@@ -170,13 +168,7 @@ checkChunk session chunk =
     BindRun name expression -> do
       (_, ty, _) <- elaborateRunWith classes types expression
       pure (bind name ty session)
-    Declare written -> do
-      done <- declare classes types values written
-      pure session
-        { sessionClasses = declaredClasses done
-        , sessionTypes = foldr (uncurry Map.insert) types (declaredTypes done)
-        , sessionValues = foldr (uncurry Map.Lazy.insert) values (declaredValues done)
-        }
+    Declare written -> fst <$> declareIn session written
     Signature name context written ->
       pure session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)}
     SetFixity fixity names ->

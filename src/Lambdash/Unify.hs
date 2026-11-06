@@ -47,6 +47,7 @@ module Lambdash.Unify
     singletonRow,
     freshVar,
     apply,
+    renameType,
     applyRow,
     compose,
     occurs,
@@ -113,6 +114,30 @@ data Effect = Exec String | Console | Environment | Filesystem | WorkingDirector
 data EffRow = EffRow (Set Effect) (Set Var) deriving (Eq, Ord, Show)
 
 data EffConstraint = EffEqual EffRow EffRow deriving (Eq, Ord, Show)
+
+
+-- | A named type renamed, in each 'TCon' and 'TData' of a type and of the
+-- predicates it carries.
+renameType :: String -> String -> Ty -> Ty
+renameType from to = go
+ where
+  go ty = case ty of
+    TVar v -> TVar v
+    TFun a b -> TFun (go a) (go b)
+    TCon name -> TCon (swap name)
+    TRecord r -> TRecord (row r)
+    TComp e t -> TComp e (go t)
+    TStream e i o r -> TStream e (go i) (go o) (go r)
+    TJob e t -> TJob e (go t)
+    TQualified cs t -> TQualified cs (go t)
+    TClass ps t -> TClass [IsIn c (go p) | IsIn c p <- ps] (go t)
+    TList t -> TList (go t)
+    TData name args -> TData (swap name) (map go args)
+    TStage i o -> TStage (go i) (go o)
+    TCollector i o -> TCollector (go i) (go o)
+  row (RExtend label t rest) = RExtend label (go t) (row rest)
+  row other = other
+  swap name = if name == from then to else name
 
 -- | A class predicate: the type is an instance of the class.
 data Pred = IsIn String Ty deriving (Eq, Show)

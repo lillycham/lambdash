@@ -10,6 +10,8 @@ module Lambdash.Classes
   , ClassEnv (..)
   , DataInfo (..)
   , addData
+  , retireData
+  , retiredName
   , lookupData
   , lookupConstructor
   , dataType
@@ -31,7 +33,8 @@ module Lambdash.Classes
   , defaultCandidates
   ) where
 
-import Data.List (find, nub)
+import Data.Char (isDigit)
+import Data.List (find)
 import Data.Set qualified as Set
 import Lambdash.Syntax (Expr (..))
 import Lambdash.Unify
@@ -232,6 +235,28 @@ addData info env = env
   { envData = filter ((/= dataName info) . dataName) (envData env) <> [info]
   , envInstances = filter ((/= dataName info) . instHead) (envInstances env)
   }
+
+-- | A data type declared again is a new type. The old one keeps its values,
+-- constructors and instances under a name that no written type can spell,
+-- such as @T#1@, so that the checker never takes one for the other. This
+-- renames it in the classes, instances and data types that mention it.
+retireData :: String -> String -> ClassEnv -> ClassEnv
+retireData from to env = env
+  { envClasses = [info {classMethods = [(m, renameType from to t) | (m, t) <- classMethods info]} | info <- envClasses env]
+  , envInstances = [if instHead i == from then i {instHead = to} else i | i <- envInstances env]
+  , envData =
+      [ info
+          { dataName = if dataName info == from then to else dataName info
+          , dataConstructors = [(c, map (renameType from to) fields) | (c, fields) <- dataConstructors info]
+          }
+      | info <- envData env ]
+  }
+
+-- | The data type that a retired name, @T#1@, was declared as.
+retiredName :: String -> Maybe String
+retiredName name = case break (== '#') name of
+  (base@(_ : _), '#' : number@(_ : _)) | all isDigit number -> Just base
+  _ -> Nothing
 
 lookupData :: ClassEnv -> String -> Maybe DataInfo
 lookupData env name = find ((== name) . dataName) (envData env)
