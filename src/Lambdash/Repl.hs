@@ -30,7 +30,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.List (intercalate, isPrefixOf, nub, partition)
 import Control.Concurrent.STM
-import Control.Exception (SomeException, catch, fromException, throwIO)
+import Control.Exception (ArithException, ErrorCall (..), PatternMatchFail (..), SomeException, catch, fromException, throwIO)
 import Control.Exception qualified as Exception
 import Data.Char (digitToInt, isDigit)
 import Lambdash.Stream (StreamError (..))
@@ -538,9 +538,7 @@ awaitEntry session entry = do
       in pure (Continue current {sessionJobs = sessionJobs current <> [stopped], sessionWarned = False}
         (describeEntry Stopped stopped))
     Just (Left (finish, Right value)) -> finish current value
-    Just (Left (_, Left err)) -> case fromException err of
-      Just (StreamError message) -> pure (Continue current message)
-      Nothing -> throwIO err
+    Just (Left (_, Left err)) -> maybe (throwIO err) (pure . Continue current) (lineFailure err)
     Just (Right summary) -> do
       markCollected job
       pure (Continue current (either id id summary))
@@ -593,8 +591,8 @@ notices session = go session {sessionJobs = []} [] (sessionJobs session)
                 Continue next text -> go next (lines' [label <> "done  " <> jobLine job, text] : messages) rest
                 Failed text -> go current ((label <> "failed  " <> jobLine job <> ": " <> text) : messages) rest
                 Quit -> go current messages rest
-            Left err -> case fromException err of
-              Just (StreamError message) -> go current ((label <> "failed  " <> jobLine job <> ": " <> message) : messages) rest
+            Left err -> case lineFailure err of
+              Just message -> go current ((label <> "failed  " <> jobLine job <> ": " <> message) : messages) rest
               Nothing -> throwIO err
         Nothing -> do
           summary <- atomically (readTMVar (jobOutcome job))
@@ -693,6 +691,26 @@ lastWord text = case words text of
   [] -> ""
   ws -> last ws
 
+-- | What a line that threw shows, or nothing for an exception that is not
+-- the line's to handle, such as Ctrl-C or a killed thread. A language error
+-- (division by zero) shows as itself. An @error@ call is a bug in the
+-- checker or the evaluator: the line fails, and the shell goes on.
+lineFailure :: SomeException -> Maybe String
+lineFailure err
+  | Just (StreamError message) <- fromException err = Just message
+  | Just arith <- fromException err = Just (show (arith :: ArithException))
+  | Just (ErrorCall message) <- fromException err = Just ("internal error: " <> message)
+  | Just (PatternMatchFail message) <- fromException err = Just ("internal error: " <> message)
+  | otherwise = Nothing
+
+-- | Force the text a step shows, so that an error inside it fails the line
+-- here and not later, when the loop prints it.
+settle :: Step -> IO Step
+settle result = case result of
+  Continue _ output -> result <$ Exception.evaluate (length output)
+  Failed output -> result <$ Exception.evaluate (length output)
+  Quit -> pure result
+
 -- | Run one line. A line that fails leaves the session as it was. Only a
 -- computation at the prompt, or on the right of @<-@, has any effect.
 --
@@ -703,7 +721,7 @@ lastWord text = case words text of
 step :: Session -> String -> IO Step
 step session input = do
   before <- getCurrentDirectory
-  result <- stepLine session input `catch` \(StreamError message) -> pure (Failed message)
+  result <- (stepLine session input >>= settle) `catch` \err -> maybe (throwIO err) (pure . Failed) (lineFailure err)
   after <- getCurrentDirectory
   case result of
     Continue next output | before /= after -> do

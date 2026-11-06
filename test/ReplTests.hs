@@ -231,6 +231,15 @@ tests =
   , ("step: a value", session ["1"] == ["1"])
   , ("step: blank shows nothing", session [""] == [""])
   , ("step: a builtin", session ["add 1 2"] == ["3"])
+  , ("step: division by zero fails the line, not the shell",
+      session ["1 / 0", "7 % 0", "2"] == ["divide by zero", "divide by zero", "2"])
+  , ("step: division by zero inside a shown value fails the line",
+      session ["xs = [1, 1 / 0]", "xs", "2"] == ["xs : [Int]", "divide by zero", "2"])
+  -- A checker bug that reaches the evaluator: the line fails, the shell goes
+  -- on. Data redeclaration is the case today; when it is rejected, this
+  -- still holds.
+  , ("step: an internal error fails the line, not the shell",
+      last (session ["data T = A Int", "x = A 1", "data T = A String", "case x of A s -> stringLength s end", "2"]) == "2")
   , ("step: a function", session ["x -> x"] == ["<function>"])
   , ("step: a record", session ["{a = 1}"] == ["{a = 1}"])
   , ("step: quit", session [":q", "1"] == ["<quit>"])
