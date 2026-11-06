@@ -61,8 +61,14 @@ A name goes to the definition it sees: the latest one before its line, so
 in `x = x + 1` the `x` on the right goes to the earlier `x`. A binding's own
 name, a `let rec` member and a constructor go to where they are named. A
 name from a module goes to the module's file, through the modules it imports
-if need be. A lambda's parameter, a pattern variable and a builtin go nowhere
-for now.
+if need be.
+
+A name that a line binds inside itself goes to its binder there, by the
+scopes of the line as written: a lambda's parameter, a `let`, a pattern
+variable, an `x <- e` in a block, and a `$x` in a command. An inner binder
+shadows an outer one, so in `x -> (x -> x)` the last `x` goes to the second.
+A `let` is not recursive, so in `let x = x + 1 in x` the first `x` on the
+right is the one from before. A builtin goes nowhere.
 
 ## Completion
 

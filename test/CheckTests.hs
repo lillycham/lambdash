@@ -132,7 +132,26 @@ tests =
   , ("definition: a use goes to the definition it sees", definition ["x = true", "x = if x then 1 else 2"] 2 8 == Just (1, 1, 2))
   , ("definition: a binding's own name is its definition", definition ["x = true", "x = if x then 1 else 2"] 2 1 == Just (2, 1, 2))
   , ("definition: a constructor and a let rec member", definition ["data Shape = Circle Int", "c = Circle 1"] 2 5 == Just (1, 14, 20) && definition [evenOdd] 1 46 == Just (1, 62, 65))
-  , ("definition: a parameter and a builtin go nowhere", definition ["f = x -> x"] 1 10 == Nothing && definition ["print 1"] 1 2 == Nothing)
+  , ("definition: a builtin goes nowhere", definition ["print 1"] 1 2 == Nothing)
+  , ("definition: a parameter goes to its lambda, and a binder is its own definition",
+      definition ["f = x -> x + 1"] 1 10 == Just (1, 5, 6) && definition ["f = x -> x"] 1 5 == Just (1, 5, 6))
+  , ("definition: each parameter of a lambda", definition ["f = x y -> y + x"] 1 12 == Just (1, 7, 8) && definition ["f = x y -> y + x"] 1 16 == Just (1, 5, 6))
+  , ("definition: an inner parameter shadows an outer one", definition ["f = x -> (x -> x)"] 1 16 == Just (1, 11, 12))
+  , ("definition: a let and a pattern variable",
+      definition ["y = let a = 1 in a + 2"] 1 18 == Just (1, 9, 10)
+        && definition ["data Box = Box Int", "f = b -> case b of Box v -> v + 1 end"] 2 29 == Just (2, 24, 25)
+        && definition ["data Box = Box Int", "f = b -> case b of Box v -> v + 1 end"] 2 15 == Just (2, 5, 6))
+  , ("definition: a <- in a block, across its lines", definition ["f = do", "  d <- pwd;", "  print d", "end"] 3 9 == Just (2, 3, 4))
+  , ("definition: a let is not recursive, so its value sees the parameter it shadows",
+      definition ["f = x -> let x = x + 1 in x"] 1 18 == Just (1, 5, 6) && definition ["f = x -> let x = x + 1 in x"] 1 27 == Just (1, 14, 15))
+  , ("definition: a local let rec names itself",
+      definition ["y = let rec go = n -> go n in go 1"] 1 31 == Just (1, 13, 15)
+        && definition ["y = let rec go = n -> go n in go 1"] 1 23 == Just (1, 13, 15)
+        && definition ["y = let rec go = n -> go n in go 1"] 1 26 == Just (1, 18, 19))
+  , ("definition: a parameter before a _ still has its place",
+      definition ["f = title width _ -> width"] 1 23 == Just (1, 11, 16) && definition ["f = title width _ -> title"] 1 23 == Just (1, 5, 10))
+  , ("definition: a $name in a command", definition ["f = name -> echo $name"] 1 19 == Just (1, 5, 9))
+  , ("definition: a top-level name inside a lambda is still top-level", definition ["g = 1", "f = x -> g + x"] 2 10 == Just (1, 1, 2))
   , ("definition: an imported name goes to its module",
       withModules [("m.lsh", listModule)] (\s -> fmap (\p -> (fmap (reverse . take 6 . reverse) (placeFile p), placeLine p, placeFrom p)) (definitionIn s ["m = import \"m.lsh\"", "m.double 2"] 2 3))
         == Just (Just "/m.lsh", 1, 1)

@@ -132,8 +132,13 @@ data Use = Use
   , useAfter :: Session
   , -- | The chunk, parsed as it was checked, if it parses.
     useCommand :: Maybe Command
+  , -- | The cursor, and the text of its line.
+    useLine :: Int
+  , useColumn :: Int
   , useSource :: String
-  , useFrom :: Int
+  , -- | The name under the cursor: its first column, the column after it,
+    -- and its text.
+    useFrom :: Int
   , useTo :: Int
   , useName :: String
   }
@@ -153,7 +158,7 @@ useAt walked text line column = do
     Just found@(_, _, name) | Map.member name (sessionTypes before) -> Just found
     _ -> wordAt source column
   let parsed = parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk
-  pure (Use begins chunk before after (either (const Nothing) Just parsed) source from to name)
+  pure (Use begins chunk before after (either (const Nothing) Just parsed) line column source from to name)
 
 -- | The identifier or operator under a column, with its first column and
 -- the column after it.
