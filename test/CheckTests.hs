@@ -4,6 +4,7 @@ import Control.Exception (evaluate)
 import Control.Monad (unless)
 import Data.List (isInfixOf, isPrefixOf)
 import Lambdash.Check (Problem (..), checkText, hoverAt)
+import Lambdash.Navigate
 import Lambdash.Repl (Session (..), initial)
 import System.Directory (createDirectory, doesFileExist, getTemporaryDirectory, removeDirectoryRecursive, removeFile)
 import System.Exit (exitFailure)
@@ -41,6 +42,30 @@ withModules files use = unsafePerformIO $ do
   _ <- evaluate (length (show result))
   removeDirectoryRecursive dir
   pure result
+
+-- | The outline as (name, sort, line, first column, column after), each
+-- symbol followed by what it holds.
+symbols :: [String] -> [(String, SymbolSort, Int, Int, Int)]
+symbols source = concatMap flat (unsafePerformIO (outline initial (unlines source)))
+ where
+  flat s = (symbolName s, symbolSort s, symbolLine s, symbolFrom s, symbolTo s) : concatMap flat (symbolChildren s)
+
+definition :: [String] -> Int -> Int -> Maybe (Int, Int, Int)
+definition source line column = fmap (\p -> (placeLine p, placeFrom p, placeTo p)) (definitionIn initial source line column)
+
+definitionIn :: Session -> [String] -> Int -> Int -> Maybe Place
+definitionIn start source line column = unsafePerformIO (definitionAt start (unlines source) line column)
+
+completions :: Session -> [String] -> Int -> Int -> (Int, [Suggestion])
+completions start source line column = unsafePerformIO (completionsAt start (unlines source) line column)
+
+offered :: Session -> [String] -> Int -> Int -> [String]
+offered start source line column = map suggestionText (snd (completions start source line column))
+
+-- | Two functions that call each other: each one's first place is in the
+-- other's body or its own name.
+evenOdd :: String
+evenOdd = "let rec even = n -> if n == 0 then true else odd (n - 1) and odd = n -> if n == 0 then false else even (n - 1)"
 
 -- | A module with a binding and an operator that is right-associative.
 listModule :: String
@@ -88,6 +113,36 @@ tests =
       case withModules [("m.lsh", "echo hi\n")] (\s -> problemsIn s ["import \"m.lsh\""]) of
         [(1, Nothing, message)] -> "this line would run" `isInfixOf` message
         _ -> False)
+  , ("outline: bindings, a data type and a class, with their places and sorts",
+      symbols ["f = x -> x + 1", "n = 2", "data Shape = Circle Int | Square Int", "class Size a where size : a -> Int"]
+        == [ ("f", FunctionSymbol, 1, 1, 2), ("n", ValueSymbol, 2, 1, 2)
+           , ("Shape", TypeSymbol, 3, 6, 11), ("Circle", ConstructorSymbol, 3, 14, 20), ("Square", ConstructorSymbol, 3, 27, 33)
+           , ("Size", ClassSymbol, 4, 7, 11), ("size", MethodSymbol, 4, 20, 24) ])
+  , ("outline: a let rec member is where it is named, not where it is used",
+      symbols [evenOdd] == [("even", FunctionSymbol, 1, 9, 13), ("odd", FunctionSymbol, 1, 62, 65)])
+  , ("outline: a binding has its type, and a failed line defines nothing",
+      fmap symbolDetail (unsafePerformIO (outline initial "f = x -> x + 1\ny = 1 + true\n")) == [Just "Num a => a -> a"])
+  , ("outline: an instance shows its head", [(name, sort') | (name, sort', _, _, _) <- symbols ["data T = T", "instance Show T where show = _ -> \"T\""]] == [("T", TypeSymbol), ("T", ConstructorSymbol), ("instance Show T", InstanceSymbol)])
+  , ("definition: a use goes to the definition it sees", definition ["x = true", "x = if x then 1 else 2"] 2 8 == Just (1, 1, 2))
+  , ("definition: a binding's own name is its definition", definition ["x = true", "x = if x then 1 else 2"] 2 1 == Just (2, 1, 2))
+  , ("definition: a constructor and a let rec member", definition ["data Shape = Circle Int", "c = Circle 1"] 2 5 == Just (1, 14, 20) && definition [evenOdd] 1 46 == Just (1, 62, 65))
+  , ("definition: a parameter and a builtin go nowhere", definition ["f = x -> x"] 1 10 == Nothing && definition ["print 1"] 1 2 == Nothing)
+  , ("definition: an imported name goes to its module",
+      withModules [("m.lsh", listModule)] (\s -> fmap (\p -> (fmap (reverse . take 6 . reverse) (placeFile p), placeLine p, placeFrom p)) (definitionIn s ["m = import \"m.lsh\"", "m.double 2"] 2 3))
+        == Just (Just "/m.lsh", 1, 1)
+      && withModules [("m.lsh", listModule)] (\s -> fmap placeLine (definitionIn s ["import \"m.lsh\"", "double 2"] 2 2)) == Just 1)
+  , ("definition: through a module that imports another",
+      withModules [("m.lsh", listModule), ("n.lsh", "import \"m.lsh\"\n")] (\s -> fmap (\p -> (fmap (reverse . take 6 . reverse) (placeFile p), placeLine p)) (definitionIn s ["import \"n.lsh\"", "double 2"] 2 2))
+        == Just (Just "/m.lsh", 1))
+  , ("completion: a name with its type, from where the word starts",
+      case completions initial ["padRight = w t -> t", "x = pa"] 2 7 of
+        (5, found) -> Suggestion "padRight" FunctionSuggestion (Just "a -> b -> b") `elem` found
+        _ -> False)
+  , ("completion: a module's names and a record's fields",
+      withModules [("m.lsh", listModule)] (\s -> offered s ["m = import \"m.lsh\"", "m.d"] 2 4) == ["m.double"]
+        && offered initial ["r = {name = 1}", "r.na"] 2 5 == ["r.name"])
+  , ("completion: the chunk's own words and the reserved words",
+      "value" `elem` offered initial ["f = value -> val"] 1 17 && "rec" `elem` offered initial ["let re"] 1 7)
   ]
 
 main :: IO ()

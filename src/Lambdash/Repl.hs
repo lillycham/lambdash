@@ -26,6 +26,7 @@ module Lambdash.Repl
   , Entry
   , Module
   , loadModuleWith
+  , modulePath
   , sessionBound
   , mergeModule
   ) where
@@ -1115,16 +1116,22 @@ data Module = Module
 loadModule :: Session -> FilePath -> IO (Either String Module)
 loadModule = loadModuleWith stepLine
 
+-- | Where an import's path points: from the importing file's directory, or
+-- from home after `~/`. The file may not exist.
+modulePath :: Session -> FilePath -> IO FilePath
+modulePath session written = do
+  base <- maybe getCurrentDirectory pure (sessionDirectory session)
+  home <- getHomeDirectory
+  pure $ case written of
+    '~' : '/' : rest -> home </> rest
+    _ -> base </> written
+
 -- | Load a module, with each definition taken by the given step. The REPL's
 -- step runs the definition; the editor's only checks it, so that nothing
 -- evaluates. A nested import uses the same step.
 loadModuleWith :: (Session -> String -> IO Step) -> Session -> FilePath -> IO (Either String Module)
 loadModuleWith stepWith session written = do
-  base <- maybe getCurrentDirectory pure (sessionDirectory session)
-  home <- getHomeDirectory
-  let path = case written of
-        '~' : '/' : rest -> home </> rest
-        _ -> base </> written
+  path <- modulePath session written
   exists <- doesFileExist path
   if not exists
     then pure (Left ("no module at " <> written))

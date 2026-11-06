@@ -39,6 +39,30 @@ the file changes, so an edit to a module shows at the next change.
 A name that nothing binds is an external command, as at the prompt. So `y`
 alone is not an error, even when `y = ...` failed above it.
 
+## Outline
+
+The outline lists what the file defines, in order: bindings with their
+types, `let rec` members, data types with their constructors, classes with
+their methods, instances, and imports under a prefix. A name bound twice is
+there twice. A line that fails defines nothing.
+
+## Go to definition
+
+A name goes to the definition it sees: the latest one before its line, so
+in `x = x + 1` the `x` on the right goes to the earlier `x`. A binding's own
+name, a `let rec` member and a constructor go to where they are named. A
+name from a module goes to the module's file, through the modules it imports
+if need be. A lambda's parameter, a pattern variable and a builtin go nowhere
+for now.
+
+## Completion
+
+Completion offers the names that the line sees, with their types: the
+session before the line, as hover uses. After a dot it offers a module's
+names (`p.pa` gives `p.padRight`) or a record's fields, as Tab does at the
+prompt. Without a dot it also offers the reserved words, and the words of the
+line or block itself, such as its parameters, which no session holds.
+
 ## Helix
 
 In `languages.toml`:
@@ -71,7 +95,7 @@ vim.lsp.enable("lambdash")
 
 The extension is in `editors/vscode`. It gives `.lsh` files highlighting,
 comments, brackets and `do`/`end` indentation, and starts `lambdash --lsp`
-for diagnostics and hover.
+for diagnostics, hover, the outline, go to definition and completion.
 
 The flake builds it, with its `node_modules`, as `vscode-extension`. With
 home-manager:
