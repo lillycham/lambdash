@@ -50,7 +50,7 @@ import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
 import Lambdash.Unify
-import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, lookupClass, lookupData, prelude)
+import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, instanceName, lookupClass, lookupData, prelude)
 import Lambdash.Help qualified as Help
 import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Find (Found (..), findByType)
@@ -1093,7 +1093,7 @@ mergeModule alias found session =
   ( session
       { sessionTypes = foldl (\types (to, ty, _) -> maybe types (\known -> Map.insert to known types) ty) (sessionTypes session) added
       , sessionValues = foldl (\values (to, _, value) -> Map.Lazy.insert to value values) (sessionValues session) added
-      , sessionClasses = mergeClasses (sessionClasses inner) (sessionClasses session)
+      , sessionClasses = mergeClasses (Set.fromList (moduleGlobals found)) (sessionClasses inner) (sessionClasses session)
       , sessionFixities = Map.union (Map.differenceWith same (sessionFixities inner) defaultFixities) (sessionFixities session)
       }
   , [to | (to, _, _) <- added]
@@ -1112,16 +1112,20 @@ mergeModule alias found session =
 -- Instances go last, because a class or data type declared again drops the
 -- instances it had.
 --
+-- An instance comes with its dictionary: the module's if it declared one,
+-- which may replace a prelude instance, and otherwise neither. The checker
+-- passes a dictionary the arguments its instance says it requires, so the
+-- two must not come from different places.
+--
 -- This cannot make a superclass cycle. The module's classes have
 -- superclasses only in the module or the prelude, and they replace ours of
 -- the same name, so no path leads from them back to ours.
-mergeClasses :: ClassEnv -> ClassEnv -> ClassEnv
-mergeClasses theirs ours = foldl (flip addInstance) withData newInstances
+mergeClasses :: Set.Set Name -> ClassEnv -> ClassEnv -> ClassEnv
+mergeClasses dictionaries theirs ours = foldl (flip addInstance) withData newInstances
  where
   withClasses = foldl (flip addClass) ours [info | info <- envClasses theirs, className info `notElem` map className (envClasses prelude)]
   withData = foldl (flip addData) withClasses (envData theirs)
-  newInstances = [inst | inst <- envInstances theirs, key inst `notElem` map key (envInstances prelude)]
-  key inst = (instClass inst, instHead inst)
+  newInstances = [inst | inst <- envInstances theirs, Set.member (instanceName (instClass inst) (instHead inst)) dictionaries]
 
 -- | Whether a name is an operator, such as @<+>@.
 isOperator :: Name -> Bool

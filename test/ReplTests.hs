@@ -586,6 +586,12 @@ tests =
   , ("import: a line that runs stops the load", map fromFile (withModules [("m.lsh", "x = 1\necho hi\n")] ["import \"m.lsh\"", ":t x"]) == ["m.lsh:2: a module holds only definitions, and this line would run", "Stream {exec x} Bytes Bytes Status"])
   , ("import: a run binding stops the load", concatMap fromFile (take 1 (withModules [("m.lsh", "x <- echo hi\n")] ["import \"m.lsh\""])) == "m.lsh:1: a module holds only definitions, and this line would run")
   , ("import: data, instances and operators go in as they are", withModules [("m.lsh", "data Box = Box Int\ninstance Display Box where display = b -> case b of Box n -> \"box \" <> display n end\ninfixr 5 <+>\n(<+>) = a b -> a <> \" \" <> b\n")] ["m = import \"m.lsh\"", "display (Box 2)", "\"a\" <+> \"b\" <+> \"c\""] == ["imported Box, (<+>)", "\"box 2\"", "\"a b c\""])
+  , ("import: an instance that replaces a prelude one comes with its dictionary",
+      drop 1 (withModules [("m.lsh", "instance Show [a] where show = xs -> \"list\"\n")] ["import \"m.lsh\"", "show [true]", "show 3"]) == ["\"list\"", "\"3\""])
+  , ("import: a module's replacement replaces one from the prompt",
+      last (withModules [("m.lsh", "instance Show a => Show [a] where show = xs -> \"mine\"\n")] ["instance Show [a] where show = xs -> \"prompt\"", "import \"m.lsh\"", "show [true]"]) == "\"mine\"")
+  , ("import: a module that does not touch an instance keeps the prompt's",
+      last (withModules [("m.lsh", "x = 1\n")] ["instance Show [a] where show = xs -> \"prompt\"", "import \"m.lsh\"", "show [true]"]) == "\"prompt\"")
   , ("import: a module's imports start at its own directory", withModules [("lib/pad.lsh", pad), ("m.lsh", "import \"./lib/pad.lsh\"\ncell = w -> padRight w \"x\"\n")] ["m = import \"m.lsh\"", "m.cell 2", "padRight"] == ["imported m.cell", "\"x \"", "command not found: padRight"])
   , ("import: a cycle stops", any ("an import cycle" `isInfixOf`) ((withModules [("m.lsh", "import \"m.lsh\"\n")] ["import \"m.lsh\""])))
   , ("import: a missing module", withModules [] ["import \"none.lsh\""] == ["no module at none.lsh"])
