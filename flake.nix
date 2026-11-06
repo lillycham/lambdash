@@ -46,16 +46,16 @@
           let
             withModules = pkgs.buildNpmPackage {
               pname = "lambdash-vscode-modules";
-              version = "0.2.0";
+              version = "0.3.0";
               src = ./editors/vscode;
-              npmDepsHash = "sha256-rLBpx+HRDZ8RP6GYDOemLh4EteQpyyIZ3m9SUEGuyi0=";
+              npmDepsHash = "sha256-qZZMMBQ2vSP89a0NGWhzRkS/rTKIiT22m1j+u/RmiJg=";
               dontNpmBuild = true;
               installPhase = "cp -r . $out";
             };
           in
           pkgs.vscode-utils.buildVscodeExtension {
             pname = "lambdash";
-            version = "0.2.0";
+            version = "0.3.0";
             src = withModules;
             sourceRoot = withModules.name;
             vscodeExtPublisher = "lillycham";

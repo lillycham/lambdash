@@ -2,7 +2,7 @@
   "name": "lambdash",
   "displayName": "λsh",
   "description": "λsh (lambdash) language support: highlighting, diagnostics, hover, outline, go to definition, completion, and running files",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "lillycham",
   "license": "MIT",
   "repository": {
@@ -61,6 +61,11 @@
         "category": "Lambdash"
       },
       {
+        "command": "lambdash.sendLines",
+        "title": "Send Lines to the Prompt",
+        "category": "Lambdash"
+      },
+      {
         "command": "lambdash.openPrompt",
         "title": "Open a Prompt",
         "category": "Lambdash"
@@ -106,6 +111,10 @@
         {
           "command": "lambdash.sendSelection",
           "when": "editorLangId == lambdash"
+        },
+        {
+          "command": "lambdash.sendLines",
+          "when": "false"
         }
       ]
     }

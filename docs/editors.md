@@ -72,6 +72,18 @@ names (`p.pa` gives `p.padRight`) or a record's fields, as Tab does at the
 prompt. Without a dot it also offers the reserved words, and the words of the
 line or block itself, such as its parameters, which no session holds.
 
+## Code lens
+
+Above each line or block that runs, as the file runs, the server shows the
+effects it may have, as its type gives them: `{console}`, `{exec git, fs}`,
+or `pure` for a value that the REPL prints. A definition, a declaration and
+a line that fails show nothing. A name whose binding failed shows
+`{exec y}`, because it is the command `y`, as at the prompt.
+
+In VS Code the lens also has `▶ Run`, which sends the line or block to the
+λsh prompt, as Shift+Enter does. Nothing runs twice, but the names the line
+needs must be in that prompt already.
+
 ## Helix
 
 In `languages.toml`:
@@ -104,8 +116,8 @@ vim.lsp.enable("lambdash")
 
 The extension is in `editors/vscode`. It gives `.lsh` files highlighting,
 comments, brackets and `do`/`end` indentation, and starts `lambdash --lsp`
-for diagnostics, hover, inlay hints, the outline, go to definition and
-completion.
+for diagnostics, hover, inlay hints, the outline, go to definition,
+completion and code lenses.
 
 The flake builds it, with its `node_modules`, as `vscode-extension`. With
 home-manager:

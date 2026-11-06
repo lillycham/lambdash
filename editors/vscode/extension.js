@@ -95,15 +95,27 @@ function sendSelection() {
   const text = selection.isEmpty
     ? editor.document.lineAt(selection.active.line).text
     : editor.document.getText(selection);
-  const terminal = promptTerminal(editor.document.uri);
-  terminal.show(true);
-  terminal.sendText(text.replace(/\r\n/g, "\n"), true);
+  sendToPrompt(editor.document.uri, text);
   if (selection.isEmpty) {
     const next = Math.min(selection.active.line + 1, editor.document.lineCount - 1);
     const position = new vscode.Position(next, 0);
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(new vscode.Range(position, position));
   }
+}
+
+// The ▶ of a code lens: its lines go to the prompt, as Send Selection sends
+// them. The language server gives the file and the lines, from 0.
+async function sendLines(uri, first, last) {
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(uri));
+  const end = document.lineAt(last).range.end;
+  sendToPrompt(document.uri, document.getText(new vscode.Range(first, 0, end.line, end.character)));
+}
+
+function sendToPrompt(uri, text) {
+  const terminal = promptTerminal(uri);
+  terminal.show(true);
+  terminal.sendText(text.replace(/\r\n/g, "\n"), true);
 }
 
 function openPrompt() {
@@ -116,6 +128,7 @@ function activate(context) {
     vscode.commands.registerCommand("lambdash.restart", restart),
     vscode.commands.registerCommand("lambdash.runFile", runFile),
     vscode.commands.registerCommand("lambdash.sendSelection", sendSelection),
+    vscode.commands.registerCommand("lambdash.sendLines", sendLines),
     vscode.commands.registerCommand("lambdash.openPrompt", openPrompt),
     vscode.window.onDidCloseTerminal((closed) => {
       if (closed === prompt) prompt = undefined;
