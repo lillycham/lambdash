@@ -25,9 +25,16 @@ Columns count characters. The server converts them to the UTF-16 units of
 the protocol, so a line with a tab or an emoji puts each mark in its place.
 
 The file starts from a new session: the startup file does not run first, so
-a name that only `init.lsh` binds is a command in another file. The server
-does not follow `import` lines yet: a name or fixity that only a module
-gives is unknown in the editor.
+a name that only `init.lsh` binds is a command in another file.
+
+The server follows `import` lines as the REPL does. A relative path starts at
+the file's directory, and a file that is not saved yet starts at the
+server's directory. The module's names, classes, data types, instances and
+fixities are then known, and hover shows a prefixed name such as
+`p.padRight`. The server checks the module's definitions but does not run
+them. A module that does not load is a problem on its `import` line, and the
+problem names the line in the module. The server reads each module again when
+the file changes, so an edit to a module shows at the next change.
 
 A name that nothing binds is an external command, as at the prompt. So `y`
 alone is not an error, even when `y = ...` failed above it.

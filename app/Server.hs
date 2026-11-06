@@ -14,7 +14,8 @@ import Language.LSP.Protocol.Types
 import Language.LSP.Server
 import Language.LSP.VFS (virtualFileText, virtualFileVersion)
 import Lambdash.Check (Problem (..), checkText, hoverAt)
-import Lambdash.Repl (initial)
+import Lambdash.Repl (Session (..), initial)
+import System.FilePath (takeDirectory)
 
 serve :: IO Int
 serve = runServer ServerDefinition
@@ -47,9 +48,9 @@ handlers = mconcat
       found <- getVirtualFile (toNormalizedUri uri)
       let text = maybe "" (Text.unpack . virtualFileText) found
           row = fromIntegral line + 1
-          -- The protocol counts from 0 in UTF-16 units, and Check from 1 in
-          -- characters.
-          at = hoverAt initial text row (fromUnits (lineOf text row) (fromIntegral column) + 1)
+      -- The protocol counts from 0 in UTF-16 units, and Check from 1 in
+      -- characters.
+      at <-liftIO (hoverAt (startFor (toNormalizedUri uri)) text row (fromUnits (lineOf text row) (fromIntegral column) + 1))
       respond (Right (maybe (InR Null) (InL . hover text) at))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
@@ -63,8 +64,14 @@ recheck uri = do
     Nothing -> pure ()
     Just file -> do
       let text = Text.unpack (virtualFileText file)
-          problems = checkText initial text
+      problems <- liftIO (checkText (startFor uri) text)
       publishDiagnostics maxProblems uri (Just (virtualFileVersion file)) (partitionBySource (map (diagnostic text) problems))
+
+-- | The session a file starts in. A relative import starts at the file's
+-- directory, as in a module; a file that is not on disk has none, so its
+-- imports start at the server's directory.
+startFor :: NormalizedUri -> Session
+startFor uri = initial {sessionDirectory = takeDirectory <$> uriToFilePath (fromNormalizedUri uri)}
 
 -- | The type as code, in a block that the editor highlights as λsh.
 hover :: String -> (Int, Int, Int, String) -> Hover
