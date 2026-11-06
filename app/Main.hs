@@ -1,19 +1,20 @@
 module Main (main) where
 
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, when)
 import Lambdash.Nix (withRootDirectory)
-import Lambdash.Process (saveShellTerminal, setupTerminal)
-import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runScript, sessionPrompt, startupFile, step)
-import System.Environment (getArgs, lookupEnv)
+import Lambdash.Process (runAsScript, saveShellTerminal, setupTerminal)
+import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runFile, runScript, sessionPrompt, startupFile, step)
+import Options.Applicative (ParserInfo, customExecParser, flag', fullDesc, header, help, helper, info, long, many, metavar, noIntersperse, optional, prefs, short, showHelpOnError, strArgument, switch, (<|>))
+import System.Environment (lookupEnv)
 import Lambdash.Complete (Candidate (..), completeField, completeName, isNameChar)
-import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (..), enableAutoTab, enableMultiline, readlineExMaybe, setHistory)
+import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (Completion), enableAutoTab, enableMultiline, readlineExMaybe, setHistory)
 import Foreign.C.String (CString, withCString)
 import System.Exit (ExitCode (..), exitWith)
 import Server (serve)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory, getHomeDirectory)
 import System.FilePath ((</>))
-import System.IO (BufferMode (..), hSetBuffering, hSetEncoding, stderr, stdin, stdout)
+import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, hSetEncoding, stderr, stdin, stdout)
 
 main :: IO ()
 main = do
@@ -24,15 +25,61 @@ main = do
   setForeignEncoding utf8
   setFileSystemEncoding utf8
   mapM_ (`hSetEncoding` utf8) [stdin, stdout, stderr]
-  -- An editor talks to the server on stdin and stdout, so no terminal setup.
-  lsp <- ("--lsp" `elem`) <$> getArgs
-  if lsp then serve >>= exitWith . code else shell
+  chosen <- customExecParser (prefs showHelpOnError) arguments
+  case chosen of
+    -- An editor talks to the server on stdin and stdout, so no terminal setup.
+    Lsp -> serve >>= exitWith . code
+    Script options path [] -> script options path >>= exitWith
+    Script _ _ (_ : _) -> do
+      hPutStrLn stderr "lambdash: a script cannot take arguments yet"
+      exitWith (ExitFailure 2)
+    Prompt options -> shell options
  where
   code 0 = ExitSuccess
   code n = ExitFailure n
 
-shell :: IO ()
-shell = do
+-- | What the command line asks for.
+data Mode
+  = -- | @--lsp@: the language server.
+    Lsp
+  | -- | @FILE [ARG...]@: run a script, then exit.
+    Script Options FilePath [String]
+  | -- | The prompt.
+    Prompt Options
+
+data Options = Options
+  { noInit :: Bool
+  , trace :: Bool
+  }
+
+arguments :: ParserInfo Mode
+arguments = info (helper <*> mode)
+  ( fullDesc
+  <> header "lambdash - a functional shell with composable environments"
+  -- Flags after FILE are the script's, not lambdash's.
+  <> noIntersperse )
+ where
+  mode = flag' Lsp (long "lsp" <> help "Run the language server on stdin and stdout")
+    <|> withOptions <$> options <*> optional ((,) <$> strArgument (metavar "FILE" <> help "Run FILE as a script, then exit") <*> many (strArgument (metavar "ARG...")))
+  withOptions chosen = maybe (Prompt chosen) (uncurry (Script chosen))
+  options = Options
+    <$> switch (long "no-init" <> help "Do not run the startup file")
+    <*> switch (short 'x' <> help "Print each line of a script to stderr before it runs")
+
+-- | Run a script. It does not read the startup file, as a bash script does
+-- not read .bashrc, and no flake activates as it starts or changes
+-- directory, as direnv does not act for a bash script. It keeps the signals
+-- it started with: Ctrl-C stops it.
+script :: Options -> FilePath -> IO ExitCode
+script options path = do
+  runAsScript
+  hSetBuffering stdout LineBuffering
+  withRootDirectory $ \roots ->
+    runFile putStrLn (hPutStrLn stderr) (trace options) path initial {sessionRoots = roots}
+
+shell :: Options -> IO ()
+shell options = do
+  when (trace options) (hPutStrLn stderr "lambdash: -x traces a script; it does nothing at the prompt")
   -- Computations print straight to stdout, between reads of the editor.
   hSetBuffering stdout LineBuffering
   setupTerminal
@@ -43,8 +90,7 @@ shell = do
     (arrived, messages) <- arrive cwd initial {sessionRoots = roots}
     mapM_ putStrLn messages
     -- The startup file runs before the first prompt. --no-init skips it.
-    args <- getArgs
-    start <- if "--no-init" `elem` args
+    start <- if noInit options
       then pure arrived
       else do
         path <- startupFile

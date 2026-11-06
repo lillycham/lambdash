@@ -3,6 +3,8 @@
 module Lambdash.Process
   ( Status (..)
   , setupTerminal
+  , runAsScript
+  , isScript
   , saveShellTerminal
   , shellModes
   , traceTerminal
@@ -42,6 +44,22 @@ data Status
   = ExitedWith Int
   | KilledBy Int
   deriving (Eq, Show)
+
+-- | Whether this process runs a script rather than a prompt. Signal
+-- handling is process-wide, so this is too: @main@ sets it once, before
+-- anything runs.
+scriptMode :: IORef Bool
+scriptMode = unsafePerformIO (newIORef False)
+{-# NOINLINE scriptMode #-}
+
+-- | Run as a script: the process keeps the signals it started with, and a
+-- foreground job's Ctrl-C or Ctrl-Z reaches the script too, as in a bash
+-- script.
+runAsScript :: IO ()
+runAsScript = writeIORef scriptMode True
+
+isScript :: IO Bool
+isScript = readIORef scriptMode
 
 -- | Make this process able to own the terminal. Call it once, at the start of an
 -- interactive session. It does nothing without a terminal.

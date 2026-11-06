@@ -1,0 +1,69 @@
+#!/usr/bin/env expect
+# Usage: expect test/scripts.exp path/to/lambdash
+# lambdash FILE, run from an interactive bash, as a person runs a script:
+# Ctrl-C stops the whole script, and Ctrl-Z stops it until fg.
+set timeout 20
+set stty_init "sane"
+source [file join [file dirname [info script]] pause.tcl]
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (bash died)" }
+  }
+}
+
+set lambdash [lindex $argv 0]
+set work [exec mktemp -d]
+set state [exec mktemp -d]
+set f [open $work/sleepy.lsh w]
+puts $f "print \"before\""
+puts $f "sleep 30"
+puts $f "print \"after\""
+close $f
+set f [open $work/nap.lsh w]
+puts $f "sleep 1"
+puts $f "print \"resumed\""
+close $f
+
+spawn env XDG_STATE_HOME=$state PS1=bash\$\  bash --norc --noprofile -i
+see {bash\$ $} "bash prompt"
+send "cd $work\r"
+see {bash\$ $} "bash prompt"
+
+# Ctrl-C reaches sleep, which has the terminal. The script then dies of
+# the same signal, so "after" never prints and bash sees 130. Bash also
+# drops the rest of a command line whose job died of SIGINT, so $? is read
+# on a line of its own.
+send "$lambdash sleepy.lsh\r"
+see {before\r\n} "the script starts"
+pause 500
+send "\x03"
+expect {
+  -re {after} { fail "Ctrl-C stops the whole script" }
+  -re {bash\$ $} { puts "\nPASS: Ctrl-C stops the whole script" }
+  timeout { fail "Ctrl-C stops the whole script (timeout)" }
+}
+send "echo status=\$?\r"
+see {status=130} "and its status is 130, as for SIGINT"
+see {bash\$ $} "bash prompt"
+
+# Ctrl-Z stops sleep, and the script stops with it. fg continues both. As
+# above, the status is read on a line of its own: bash drops the rest of a
+# command line whose job stopped.
+send "$lambdash nap.lsh\r"
+pause 300
+send "\x1a"
+see {Stopped} "Ctrl-Z stops the script"
+see {bash\$ $} "bash has the terminal"
+send "fg\r"
+see {resumed\r\n} "fg continues the script and its job"
+see {bash\$ $} "bash prompt"
+send "echo status=\$?\r"
+see {status=0} "and it ends well"
+
+send "exit\r"
+expect eof
+exec rm -rf $work $state
+puts "\nALL PASSED"

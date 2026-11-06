@@ -50,7 +50,7 @@ run_pty() {
   fi
 }
 run_pty spike "$spike" spike/test.exp
-for suite in externals pipelines environments jobs bg background blocks trust locale nix; do
+for suite in externals pipelines environments jobs bg background blocks scripts trust locale nix; do
   [ "$suite" = nix ] && [ $skip_nix -eq 1 ] && continue
   run_pty "$suite" "$lambdash" "test/$suite.exp"
 done

@@ -14,7 +14,8 @@ import Lambdash.Repl
 import Lambdash.Unify
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, getCurrentDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile, setCurrentDirectory)
-import System.Exit (exitFailure)
+import System.Exit (ExitCode (..), exitFailure)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.IO (IOMode (..), hClose, hFlush, hPutStr, openFile, openTempFile, stdin, stdout)
 import System.Environment (lookupEnv, setEnv)
 import System.IO.Unsafe (unsafePerformIO)
@@ -68,6 +69,23 @@ withModules files input = unsafePerformIO $ do
       Quit -> pure ["<quit>"]
       Continue next out -> (out :) <$> go next ls
       Failed out -> (out :) <$> go s ls
+
+-- | Run a script file with these lines, as @lambdash FILE@ does: its
+-- status, what went to stdout, and what went to stderr.
+script :: Bool -> [String] -> (ExitCode, [String], [String])
+script trace source = unsafePerformIO $ do
+  base <- getTemporaryDirectory
+  (path, h) <- openTempFile base "script.lsh"
+  hPutStr h (unlines source)
+  hClose h
+  out <- newIORef []
+  err <- newIORef []
+  status <- runFile (\s -> modifyIORef' out (s :)) (\s -> modifyIORef' err (s :)) trace path initial
+  removeFile path
+  (,,) status <$> (reverse <$> readIORef out) <*> (map (fromFile . dropDirectory path) . reverse <$> readIORef err)
+ where
+  dropDirectory path line = maybe line id (stripPrefixOf path line)
+  stripPrefixOf prefix line = if take (length prefix) line == prefix then Just ("script.lsh" <> drop (length prefix) line) else Nothing
 
 -- | A failure's message without the module's directory: from its last
 -- path part on.
@@ -609,6 +627,13 @@ tests =
       last (withModules [("m.lsh", "instance Show a => Show [a] where show = xs -> \"mine\"\n")] ["instance Show [a] where show = xs -> \"prompt\"", "import \"m.lsh\"", "show [true]"]) == "\"mine\"")
   , ("import: a module that does not touch an instance keeps the prompt's",
       last (withModules [("m.lsh", "x = 1\n")] ["instance Show [a] where show = xs -> \"prompt\"", "import \"m.lsh\"", "show [true]"]) == "\"prompt\"")
+  , ("script: each line runs, and a definition shows nothing",
+      script False ["x = 1 + 2", "x", "x * 2"] == (ExitSuccess, ["3", "6"], []))
+  , ("script: the first failing line stops it, with its line",
+      script False ["1", "y = 1 + true", "2"] == (ExitFailure 1, ["1"], ["script.lsh:2: no instance: Num Bool"]))
+  , ("script: -x shows each line before it runs",
+      script True ["x = 1", "x"] == (ExitSuccess, ["1"], ["+ x = 1", "+ x"]))
+  , ("script: :q ends it well", script False [":q", "1"] == (ExitSuccess, [], []))
   , ("import: a module's data type retires ours of the same name",
       drop 2 (withModules [("m.lsh", "data T = A String\nlen = t -> case t of A s -> stringLength s end\n")] ["data T = A Int", "x = A 1", "import \"m.lsh\"", "len (A \"abc\")", ":t x"])
         == ["imported len, A", "3", "T#1"])

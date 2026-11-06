@@ -21,6 +21,7 @@ module Lambdash.Repl
   , lineFailure
   , declareIn
   , runScript
+  , runFile
   , startupFile
   , Entry
   , Module
@@ -37,7 +38,9 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.List (intercalate, isPrefixOf, nub, partition)
 import Control.Concurrent.STM
-import Control.Exception (ArithException, ErrorCall (..), PatternMatchFail (..), SomeException, catch, fromException, throwIO)
+import Control.Exception (ArithException, ErrorCall (..), IOException, PatternMatchFail (..), SomeException, catch, fromException, throwIO)
+import System.Exit (ExitCode (..))
+import System.IO.Error (ioeGetErrorString, isDoesNotExistError, isPermissionError)
 import Control.Exception qualified as Exception
 import Data.Char (digitToInt, isDigit)
 import Lambdash.Stream (StreamError (..))
@@ -55,7 +58,7 @@ import Lambdash.Overlay
 import Lambdash.Trust (Source (..), autoName, flakeHash, flakeSource)
 import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
-import Lambdash.Process (Status (..), giveTerminal, programExists)
+import Lambdash.Process (Status (..), giveTerminal, isScript, programExists)
 import Lambdash.Unify
 import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, instanceName, lookupClass, lookupData, prelude, retireData, retiredName)
 import Lambdash.Help qualified as Help
@@ -788,8 +791,12 @@ step session input = do
   before <- getCurrentDirectory
   result <- (stepLine session input >>= settle) `catch` \err -> maybe (throwIO err) (pure . Failed) (lineFailure err)
   after <- getCurrentDirectory
+  -- A script does not activate flakes as it enters directories: what it
+  -- does must not depend on which directories the user approved. It can
+  -- still use one, with @with .# do ... end@.
+  script <- isScript
   case result of
-    Continue next output | before /= after -> do
+    Continue next output | before /= after, not script -> do
       (arrived, messages) <- arrive after next
       -- Only overlays that were local before the line are reported here: a
       -- new one reports itself, and a stale one is dropped, not restored.
@@ -1026,12 +1033,16 @@ runScript path session = do
     case result of
       Quit -> pure (now, [])
       Failed message -> fmap ((path <> ":" <> show n <> ": " <> message) :) <$> go now rest
-      Continue next output -> do
-        let shown
-              | quiet next chunk = filter ("warning:" `isPrefixOf`) (lines output)
-              | otherwise = [output | not (null output)]
-        fmap (shown <>) <$> go next rest
-  quiet now chunk = case parseCommandWith (sessionFixities now) AllBound chunk of
+      Continue next output -> fmap (shownInFile next chunk output <>) <$> go next rest
+
+-- | What a line of a file shows: a definition shows only its warnings, as
+-- a file is not a conversation, and any other line shows its output.
+shownInFile :: Session -> String -> String -> [String]
+shownInFile now chunk output
+  | definition = filter ("warning:" `isPrefixOf`) (lines output)
+  | otherwise = [output | not (null output)]
+ where
+  definition = case parseCommandWith (sessionFixities now) AllBound chunk of
     Right (Bind _ _) -> True
     Right (BindRec _) -> True
     Right (BindRun _ _) -> True
@@ -1039,6 +1050,33 @@ runScript path session = do
     Right (Signature {}) -> True
     Right (Import _ _) -> True
     _ -> False
+
+-- | Run a file as a script, as @lambdash FILE@ does. Each line runs in
+-- turn and its output goes to @out@ as it comes. The first line that fails
+-- stops the script: its place and message go to @err@, and the status is 1.
+-- With @trace@, each line goes to @err@ before it runs, after @+ @, as
+-- @bash -x@ shows it. A relative import starts at the file's directory.
+runFile :: (String -> IO ()) -> (String -> IO ()) -> Bool -> FilePath -> Session -> IO ExitCode
+runFile out err trace path session = do
+  readable <- Exception.try (readFile path >>= \text -> text <$ Exception.evaluate (length text))
+  case readable of
+    Left (problem :: IOException) -> err (path <> ": " <> unreadable problem) >> pure (ExitFailure 1)
+    Right text -> do
+      directory <- takeDirectory <$> makeAbsolute path
+      go session {sessionDirectory = Just directory} (scriptChunks text)
+ where
+  unreadable problem
+    | isDoesNotExistError problem = "no such file"
+    | isPermissionError problem = "permission denied"
+    | otherwise = ioeGetErrorString problem
+  go _ [] = pure ExitSuccess
+  go now ((n, chunk) : rest) = do
+    when trace (mapM_ (err . ("+ " <>)) (lines chunk))
+    result <- step now chunk
+    case result of
+      Quit -> pure ExitSuccess
+      Failed message -> err (path <> ":" <> show n <> ": " <> message) >> pure (ExitFailure 1)
+      Continue next output -> mapM_ out (shownInFile now chunk output) >> go next rest
 
 -- | A file's lines, numbered, with a @do@ block or @case@ that spans lines
 -- joined into one chunk, as the prompt joins them.

@@ -13,7 +13,7 @@ import Data.IORef
 import Data.Map.Strict qualified as Map
 import Lambdash.Overlay (Environ)
 import Lambdash.Runtime (JobHooks (..), Runtime (..), runtimeEnviron)
-import Lambdash.Process (Status (..), continueGroup, giveTerminal, programExists, readModes, shellModes, spawnStage, writeModes)
+import Lambdash.Process (Status (..), continueGroup, giveTerminal, isScript, programExists, readModes, shellModes, spawnStage, writeModes)
 import System.Exit (ExitCode (..))
 import System.IO
 import System.IO.Error (isResourceVanishedError)
@@ -194,6 +194,27 @@ waitStages isForeground park children group = go Map.empty []
                 Terminated sig _ -> KilledBy (fromIntegral sig)
           go (Map.insert pid result statuses) (filter (/= pid) stopped)
 
+-- | In a script, a foreground job that SIGINT or SIGQUIT killed takes the
+-- script with it: the script raises the same signal on itself, as bash does
+-- (@wait and cooperative exit@). The job had the terminal, so the signal
+-- reached only its group. At the prompt, the job's status is the result.
+interruptScript :: [Status] -> IO [Status]
+interruptScript statuses = do
+  script <- isScript
+  case [signal | script, KilledBy n <- statuses, let signal = fromIntegral n, signal `elem` [sigINT, sigQUIT]] of
+    signal : _ -> installHandler signal Default Nothing >> raiseSignal signal >> pure statuses
+    [] -> pure statuses
+
+-- | In a script, a foreground job that Ctrl-Z stopped stops the script too,
+-- so the shell that started the script sees it stopped. When that shell
+-- continues the script, the job gets the terminal back and continues.
+stopScript :: ProcessGroupID -> IO ()
+stopScript job = do
+  getProcessID >>= signalProcess sigTSTP
+  tty <- queryTerminal stdInput
+  when tty (giveTerminal "the script continues its job" job)
+  continueGroup "the script continues its job" job
+
 -- | Give a job the terminal, and take it back on every path. The second
 -- function is for a stopped job: it hands the terminal back to the shell, runs
 -- the wait, then returns the terminal to the job with the job's own modes,
@@ -284,7 +305,7 @@ runStagesAll runtime fromBytes toBytes sink stages@(firstStage : restStages) = d
     found <- programExists env name
     if found then firstMissing env rest else pure (Just name)
   isForeground = maybe (pure True) hookForeground (runtimeJob runtime)
-  execute env = withTerminal isForeground $ \handOver suspendTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
+  execute env = interruptScript =<< withTerminal isForeground (\handOver suspendTerminal -> withChildren $ \(children, groupRef) -> withResources $ \resources -> do
     edges <- sequence [edge resources fromBytes toBytes l r | (l, r) <- zip stages (drop 1 stages)]
     let lastStage = foldl (\_ next -> next) firstStage restStages
         start = if isExternal firstStage
@@ -312,11 +333,14 @@ runStagesAll runtime fromBytes toBytes sink stages@(firstStage : restStages) = d
     forM_ group (continueGroup "start the job")
     let workers = [worker runtime stage input output | (stage, input, output) <- nodes, not (isExternal stage)]
         -- Without a way to resume it later, a stopped job continues at once.
-        park job = case runtimeJob runtime of
-          Nothing -> continueGroup "no job table, continue at once" job
-          Just hooks -> do
-            suspendTerminal job (hookPark hooks)
-            continueGroup "resume the job" job
+        park job = do
+          script <- isScript
+          case runtimeJob runtime of
+            _ | script -> stopScript job
+            Nothing -> continueGroup "no job table, continue at once" job
+            Just hooks -> do
+              suspendTerminal job (hookPark hooks)
+              continueGroup "resume the job" job
         wait = maybe (pure Map.empty) (\job -> waitStages isForeground (park job) children job) group
     (statuses, _) <- concurrently wait (mapConcurrently_ id workers)
-    pure [Map.findWithDefault (ExitedWith 127) pid statuses | pid <- pids]
+    pure [Map.findWithDefault (ExitedWith 127) pid statuses | pid <- pids])
