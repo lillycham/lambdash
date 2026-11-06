@@ -17,6 +17,8 @@ module Lambdash.Classes
   , lookupClass
   , lookupInstance
   , superclassesOf
+  , superclassPath
+  , superclassCycle
   , addClass
   , addInstance
   , methodField
@@ -30,6 +32,7 @@ module Lambdash.Classes
   ) where
 
 import Data.List (find, nub)
+import Data.Set qualified as Set
 import Lambdash.Syntax (Expr (..))
 import Lambdash.Unify
 
@@ -133,9 +136,41 @@ lookupClass env cls = find ((== cls) . className) (envClasses env)
 lookupInstance :: ClassEnv -> String -> String -> Maybe Instance
 lookupInstance env cls key = find (\i -> instClass i == cls && instHead i == key) (envInstances env)
 
--- | Every superclass, transitively.
+-- | A class's own superclasses, as declared.
+directSupers :: ClassEnv -> String -> [String]
+directSupers env cls = concat [supers | ClassInfo {className = name, classSupers = supers} <- envClasses env, name == cls]
+
+-- | Every superclass, transitively, nearest first. Each class shows once,
+-- so a cycle cannot make this loop.
 superclassesOf :: ClassEnv -> String -> [String]
-superclassesOf env cls = nub (concat [supers <> concatMap (superclassesOf env) supers | ClassInfo {className = name, classSupers = supers} <- envClasses env, name == cls])
+superclassesOf env cls = go Set.empty (directSupers env cls)
+ where
+  go _ [] = []
+  go seen (next : rest)
+    | Set.member next seen = go seen rest
+    | otherwise = next : go (Set.insert next seen) (rest <> directSupers env next)
+
+-- | The superclasses from one class up to another, the last being the
+-- other: one step at least, so a class reaches itself only through a
+-- cycle. A shortest path, found breadth first. A subclass's dictionary
+-- holds its superclasses' dictionaries along this path.
+superclassPath :: ClassEnv -> String -> String -> Maybe [String]
+superclassPath env from to = go Set.empty [[s] | s <- directSupers env from]
+ where
+  go _ [] = Nothing
+  go seen (path : rest) = case path of
+    [] -> go seen rest
+    next : _
+      | next == to -> Just (reverse path)
+      | Set.member next seen -> go seen rest
+      | otherwise -> go (Set.insert next seen) (rest <> [s : path | s <- directSupers env next])
+
+-- | A class that is its own superclass, and the path back to it, as in
+-- @[C, D, C]@.
+superclassCycle :: ClassEnv -> Maybe [String]
+superclassCycle env = case [cls : path | ClassInfo {className = cls} <- envClasses env, Just path <- [superclassPath env cls cls]] of
+  found : _ -> Just found
+  [] -> Nothing
 
 -- | Declare a class. A class declared again replaces the old one, and its
 -- instances go with it: they have the old methods.

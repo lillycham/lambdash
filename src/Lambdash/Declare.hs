@@ -12,7 +12,7 @@ module Lambdash.Declare
 
 import Control.Monad (unless, when)
 import Control.Monad.Trans.State.Strict (evalState)
-import Data.List (nub)
+import Data.List (intercalate, nub)
 import Data.Map.Lazy qualified as Map.Lazy
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -62,6 +62,9 @@ declare classes env values declaration = case declaration of
         schemes = [(m, methodScheme cls classVariable ty) | (m, ty) <- methods]
         classes' = addClass info classes
         withMethods = foldr (uncurry Map.insert) env schemes
+    case superclassPath classes' cls cls of
+      Just path -> bad ("a superclass cycle: " <> intercalate " -> " (cls : path))
+      Nothing -> pure ()
     -- Each default must have its method's type. An instance checks it again
     -- at its own type, as if it had written it.
     mapM_ (\(m, e) -> case lookup m methods of

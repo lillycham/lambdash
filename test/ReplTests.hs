@@ -238,6 +238,14 @@ tests =
   -- A checker bug that reaches the evaluator: the line fails, the shell goes
   -- on. Data redeclaration is the case today; when it is rejected, this
   -- still holds.
+  , ("step: a class declared again cannot close a superclass cycle",
+      session ["class C a where f : a -> Int", "class C a => D a where g : a -> Int", "class D a => C a where f : a -> Int"]
+        == ["class C", "class D", "a superclass cycle: C -> D -> C"])
+  , ("step: nor can it be its own superclass",
+      session ["class E a where e : a -> Int", "class E a => E a where e : a -> Int"]
+        == ["class E", "a superclass cycle: E -> E"])
+  , ("step: a superclass two steps up gives its dictionary",
+      last (session ["class Eq a => O a where o : a -> Int", "class O a => O2 a where o2 : a -> Int", "k : O2 a => a -> Bool", "k = x -> eq x x", "instance O Int where o = x -> x", "instance O2 Int where o2 = x -> x", "k 3"]) == "true")
   , ("step: an internal error fails the line, not the shell",
       last (session ["data T = A Int", "x = A 1", "data T = A String", "case x of A s -> stringLength s end", "2"]) == "2")
   , ("step: a function", session ["x -> x"] == ["<function>"])

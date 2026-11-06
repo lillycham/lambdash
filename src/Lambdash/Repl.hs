@@ -1111,6 +1111,10 @@ mergeModule alias found session =
 -- module started from the prelude, so what is not the prelude's is its own.
 -- Instances go last, because a class or data type declared again drops the
 -- instances it had.
+--
+-- This cannot make a superclass cycle. The module's classes have
+-- superclasses only in the module or the prelude, and they replace ours of
+-- the same name, so no path leads from them back to ours.
 mergeClasses :: ClassEnv -> ClassEnv -> ClassEnv
 mergeClasses theirs ours = foldl (flip addInstance) withData newInstances
  where

@@ -824,9 +824,7 @@ reduceContext env preds = go [] [] preds
 superPath :: ClassEnv -> String -> String -> Expr -> Expr
 superPath env from to dictionary
   | from == to = dictionary
-  | otherwise = case [s | ClassInfo {className = name, classSupers = supers} <- envClasses env, name == from, s <- supers, s == to || to `elem` superclassesOf env s] of
-      next : _ -> superPath env next to (ESelect dictionary (superField next))
-      [] -> dictionary
+  | otherwise = maybe dictionary (foldl (\d next -> ESelect d (superField next)) dictionary) (superclassPath env from to)
 
 -- | Whether an expression is a function as written: the monomorphism
 -- restriction applies to the others.
