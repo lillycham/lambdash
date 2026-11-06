@@ -62,6 +62,9 @@ completions start source line column = unsafePerformIO (completionsAt start (unl
 offered :: Session -> [String] -> Int -> Int -> [String]
 offered start source line column = map suggestionText (snd (completions start source line column))
 
+lensesOf :: [String] -> [(Int, Int, String)]
+lensesOf source = [(lensFirst l, lensLast l, lensEffects l) | l <- unsafePerformIO (lenses initial (unlines source))]
+
 hints :: [String] -> [Hint]
 hints source = unsafePerformIO (inlayHints initial (unlines source))
 
@@ -156,6 +159,12 @@ tests =
           signed = foldr insert source [sig | Hint _ _ _ (Just sig) <- hints source]
           insert (line, text) ls = take (line - 1) ls <> lines text <> drop (line - 1) ls
       in length [() | Hint _ _ _ (Just _) <- hints source] == 5 && problems signed == [] && hints signed == [])
+  , ("lenses: each line that runs has its effects, and a definition has none",
+      lensesOf ["f = x -> x + 1", "print 3", "git status", "h <- pwd", "cd /tmp"]
+        == [(2, 2, "{console}"), (3, 3, "{exec git}"), (4, 4, "{exec pwd}"), (5, 5, "{cwd}")])
+  , ("lenses: a value is pure, and a block is one lens over its lines",
+      lensesOf ["1 + 2", "do", "  print 1;", "  echo hi", "end"] == [(1, 1, "pure"), (2, 5, "{exec echo, console}")])
+  , ("lenses: a line that fails has none", lensesOf ["y = 1 + true", "print (1 + true)"] == [])
   ]
 
 main :: IO ()

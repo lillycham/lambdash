@@ -4,11 +4,13 @@
 
 -- | @lambdash --lsp@: a language server on stdin and stdout. It reports
 -- problems, shows types on hover and after unsigned bindings, gives the
--- outline, goes to definitions and completes names. Each open file is checked as a startup file would run, but
+-- outline, goes to definitions, completes names, and puts each line's
+-- effects above it. Each open file is checked as a startup file would run, but
 -- nothing runs. See "Lambdash.Check" and "Lambdash.Navigate".
 module Server (serve) where
 
 import Control.Monad.IO.Class (liftIO)
+import Data.Aeson (toJSON)
 import Data.Text qualified as Text
 import Language.LSP.Diagnostics (partitionBySource)
 import Language.LSP.Protocol.Message
@@ -78,6 +80,10 @@ handlers = mconcat
       found <- liftIO (inlayHints (startFor (toNormalizedUri uri)) text)
       let shown = [h | h <- found, let l = fromIntegral (hintLine h - 1), first <= l, l <= final]
       respond (Right (InL (map (inlayHint text) shown)))
+  , requestHandler SMethod_TextDocumentCodeLens $ \(TRequestMessage _ _ _ (CodeLensParams _ _ (TextDocumentIdentifier uri))) respond -> do
+      text <- textOf (toNormalizedUri uri)
+      found <- liftIO (lenses (startFor (toNormalizedUri uri)) text)
+      respond (Right (InL (concatMap (codeLens uri) found)))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
   ]
@@ -138,6 +144,17 @@ inlayHint text h = InlayHint
   }
  where
   start line = Position (fromIntegral (line - 1)) 0
+
+-- | Above a line or block that runs: a ▶ that sends it to the prompt, and
+-- the effects it may have. The effects are a lens without a command, which
+-- an editor shows as text.
+codeLens :: Uri -> Lens -> [CodeLens]
+codeLens uri l =
+  [ CodeLens range (Just (Command "▶ Run" "lambdash.sendLines" (Just [toJSON uri, toJSON (lensFirst l - 1), toJSON (lensLast l - 1)]))) Nothing
+  , CodeLens range (Just (Command (Text.pack (lensEffects l)) "" Nothing)) Nothing
+  ]
+ where
+  range = Range (Position (fromIntegral (lensFirst l - 1)) 0) (Position (fromIntegral (lensFirst l - 1)) 0)
 
 -- | A definition in this file, or in a module's.
 location :: Uri -> Place -> Location

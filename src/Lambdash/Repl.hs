@@ -14,6 +14,7 @@ module Lambdash.Repl
   , parseCommandWith
   , renderType
   , renderEffectsType
+  , renderEffectRow
   , renderError
   , writtenCheck
   , Step (..)
@@ -429,6 +430,11 @@ renderAdapter name input output = do
         TCollector _ _ -> "(" <> text <> ")"
         _ -> text
   pure (name <> " " <> unwords (zipWith argument [input, output] parts))
+
+-- | An effect row as a type shows it, on its own: @{console, exec git}@,
+-- or empty for none.
+renderEffectRow :: EffRow -> String
+renderEffectRow row = drop 1 (evalState (renderEffects row) Map.empty)
 
 renderEffects :: EffRow -> State TypeNames String
 renderEffects row@(EffRow labels vars)

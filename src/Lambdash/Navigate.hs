@@ -15,6 +15,8 @@ module Lambdash.Navigate
   , completionsAt
   , Hint (..)
   , inlayHints
+  , Lens (..)
+  , lenses
   ) where
 
 import Control.Exception (IOException, try)
@@ -24,9 +26,9 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Lambdash.Check (Problem, Use (..), identifierChar, locals, operatorChar, useAt, walk)
 import Lambdash.Complete (Candidate (..), completeField, isNameChar, namesStarting)
-import Lambdash.Infer (inferWith)
+import Lambdash.Infer (elaborateRunWith, inferWith)
 import Lambdash.Parser (reservedNames)
-import Lambdash.Repl (Command (..), Session (..), initial, modulePath, parseCommandWith, renderEffectsType, sessionBound)
+import Lambdash.Repl (Command (..), Session (..), initial, modulePath, parseCommandWith, renderEffectRow, renderEffectsType, sessionBound)
 import Lambdash.Syntax (Declaration (..), Expr (..))
 import Lambdash.Unify (Ty (..), unclass, unqualify)
 import System.Directory (canonicalizePath, doesFileExist)
@@ -331,3 +333,36 @@ inlayHints start text = do
         else pure False
       pure (Just (Hint (symbolLine s) (symbolTo s) ty (if ok then Just (n, signature <> "\n") else Nothing)))
   checks before candidate = all (\(_, _, _, _, problem) -> isNothing problem) <$> walk before candidate
+
+-- | A line or block that runs: its first and last lines, and the effects
+-- it may have, as its type gives them, or none.
+data Lens = Lens
+  { lensFirst :: Int
+  , lensLast :: Int
+  , lensEffects :: String
+  }
+  deriving (Eq, Show)
+
+-- | A lens for each line or block that runs something, as the file runs:
+-- an expression, or a @<-@ binding. A line that fails, a definition and a
+-- declaration get none.
+lenses :: Session -> String -> IO [Lens]
+lenses start text = mapMaybe lensOf <$> walk start text
+ where
+  lensOf (n, chunk, before, _, Nothing) = do
+    command <- either (const Nothing) Just (parseCommandWith (sessionFixities before) (sessionBound before) chunk)
+    expression <- case command of
+      Run e -> Just e
+      BindRun _ e -> Just e
+      _ -> Nothing
+    -- The chunk checked, so one that does not elaborate as an action is a
+    -- value, which the REPL prints.
+    let row = case elaborateRunWith (sessionClasses before) (sessionTypes before) expression of
+          Right (action, _, _) -> case snd (unclass (snd (unqualify action))) of
+            TComp effects _ -> renderEffectRow effects
+            TStream effects _ _ _ -> renderEffectRow effects
+            TJob effects _ -> renderEffectRow effects
+            _ -> ""
+          Left _ -> ""
+    pure (Lens n (n + length (lines chunk) - 1) (if null row then "pure" else row))
+  lensOf _ = Nothing
