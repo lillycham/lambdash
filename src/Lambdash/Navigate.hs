@@ -24,12 +24,12 @@ import Data.Char (isUpper)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
-import Lambdash.Check (Problem, Use (..), identifierChar, locals, operatorChar, useAt, walk)
+import Lambdash.Check (Problem, Use (..), identifierChar, operatorChar, useAt, walk)
 import Lambdash.Complete (Candidate (..), completeField, isNameChar, namesStarting)
 import Lambdash.Infer (elaborateRunWith, inferWith)
 import Lambdash.Parser (reservedNames)
 import Lambdash.Repl (Command (..), Session (..), initial, modulePath, parseCommandWith, renderEffectRow, renderEffectsType, sessionBound)
-import Lambdash.Syntax (Declaration (..), Expr (..))
+import Lambdash.Syntax (Arg (..), Declaration (..), Expr (..), Name, Span (..), patternVars)
 import Lambdash.Unify (Ty (..), unclass, unqualify)
 import System.Directory (canonicalizePath, doesFileExist)
 import System.FilePath (takeDirectory)
@@ -161,7 +161,8 @@ data Place = Place
 -- definition that it sees, the latest before its chunk, so the @x@ on the
 -- right of @x = x + 1@ goes to the earlier @x@. A name a module brought in
 -- goes to the module's file, through other modules if need be. A name that a
--- chunk binds inside itself, such as a parameter, and a builtin, go nowhere.
+-- chunk binds inside itself, such as a parameter, goes to its binder in the
+-- chunk: see 'bindingAt'. A builtin goes nowhere.
 definitionAt :: Session -> String -> Int -> Int -> IO (Maybe Place)
 definitionAt start text line column = do
   walked <- walk start text
@@ -169,7 +170,12 @@ definitionAt start text line column = do
   case useAt walked text line column of
     Nothing -> pure Nothing
     Just use
-      | Just command <- useCommand use, useName use `elem` locals command -> pure Nothing
+      | Just command <- useCommand use
+      , bindings <- [b | e <- expressionsOf command, let b = bindingAt (useChunk use) (useName use) (offsetIn use) e, b /= Free]
+      , binding : _ <- bindings ->
+          pure $ case binding of
+            Local from _ -> Just (localPlace use from)
+            _ -> Nothing
       | otherwise -> do
           let name = useName use
               earlier = takeWhile ((< useChunkLine use) . entryLine) found
@@ -191,6 +197,34 @@ definitionAt start text line column = do
     Just (BindRec _) -> True
     Just (Declare _) -> True
     _ -> False
+
+-- | The expressions of a chunk, where its names are used.
+expressionsOf :: Command -> [Expr]
+expressionsOf = \case
+  Run e -> [e]
+  TypeOf e -> [e]
+  ShowCore e -> [e]
+  ShowElab _ e -> [e]
+  Bind _ e -> [e]
+  BindRec group -> map snd group
+  BindRun _ e -> [e]
+  _ -> []
+
+-- | Where the cursor of a use is, as an offset into its chunk.
+offsetIn :: Use -> Int
+offsetIn use =
+  let before = take (line - useChunkLine use) (lines (useChunk use))
+      line = useLine use
+  in sum (map ((+ 1) . length) before) + useColumn use - 1
+
+-- | A binder in a use's chunk, at an offset of the chunk, as a place.
+localPlace :: Use -> Int -> Place
+localPlace use at =
+  let chunkLines = lines (useChunk use)
+      before = takeWhile (<= at) (scanl (+) 0 (map ((+ 1) . length) chunkLines))
+      row = length before
+      column = at - last before + 1
+  in Place Nothing (useChunkLine use + row - 1) column (column + length (useName use)) (concat (take 1 (drop (row - 1) chunkLines)))
 
 -- | The symbols and what they hold, in order.
 flatten :: [Symbol] -> [Symbol]
@@ -366,3 +400,112 @@ lenses start text = mapMaybe lensOf <$> walk start text
           Left _ -> ""
     pure (Lens n (n + length (lines chunk) - 1) (if null row then "pure" else row))
   lensOf _ = Nothing
+
+-- | What a name in a chunk refers to, for the name under an offset of the
+-- chunk: a binder in the chunk itself (its first offset and the offset
+-- after it), a binder whose place is not known, or nothing in the chunk.
+data Binding = Local Int Int | Unplaced | Free
+  deriving (Eq, Show)
+
+-- | The binder of a name in a chunk, by the scopes of the chunk's parsed
+-- expressions. The parser gives each expression its span; a binder has no
+-- span of its own, but its text comes just before what it scopes over: a
+-- parameter before its lambda's body, @x@ in @let x = e@ or @x <- e@ before
+-- @e@, a pattern variable before its arm's body. So a binder is the last
+-- place of its name before that, and the binders of one lambda or pattern
+-- come in order, each before the next. A cursor on a binder is on its own
+-- definition.
+bindingAt :: String -> Name -> Int -> Expr -> Binding
+bindingAt chunk name cursor expression = fromMaybe Free (go Map.empty False expression)
+ where
+  -- With the binders in scope, and whether the expression has a span that
+  -- holds the cursor: Nothing when the cursor is not in this expression.
+  go :: Map.Map Name Binding -> Bool -> Expr -> Maybe Binding
+  go scope located = \case
+    ELoc (Span from to) inner
+      | cursor < from || cursor >= to -> Nothing
+      | otherwise -> go scope True inner
+    EVar used
+      | located && used == name -> Just (Map.findWithDefault Free used scope)
+      | otherwise -> Nothing
+    ECmd _ args
+      | located && name `elem` [n | AVar n <- args] -> Just (Map.findWithDefault Free name scope)
+      | otherwise -> Nothing
+    lambda@(ELam _ _) ->
+      let (names, body) = parameters lambda
+      in binding scope names body (\inner -> go inner False body)
+    ELet bound value body ->
+      first [go scope False value, binding scope [bound] value (\inner -> go inner False body)]
+    ELetRec group body ->
+      let places = concat [placesBefore [n] e | (n, e) <- group]
+          inner = foldr (uncurry Map.insert) scope places
+      in first (onBinder places : go inner False body : [go inner False e | (_, e) <- group])
+    EBind bound value body ->
+      first [go scope False value, binding scope [bound] value (\inner -> go inner False body)]
+    ECase scrutinee arms ->
+      first (go scope False scrutinee : [binding scope (patternVars p) body (\inner -> go inner False body) | (p, body) <- arms])
+    other -> first (map (go scope False) (subexpressions other))
+
+  -- Bind names whose text comes before an expression, then go on.
+  binding scope names before continue =
+    let places = placesBefore names before
+    in first [onBinder places, continue (foldr (uncurry Map.insert) scope places)]
+  onBinder places = listToMaybe [b | (n, b@(Local from to)) <- places, n == name, from <= cursor, cursor < to]
+  first = listToMaybe . catMaybes
+
+  -- The names' binders, the last first: each is the last place of its name
+  -- before the next one, or before the expression.
+  placesBefore names before = case startOf before of
+    Nothing -> [(n, Unplaced) | n <- names]
+    Just limit -> snd (foldr settle (Just limit, []) names)
+  -- A name that is not in the text, such as the one desugaring gives a
+  -- parameter written `_`, leaves the others where they are.
+  settle n (limit, found) = case limit >>= lastBefore n of
+    Just at -> (Just at, (n, Local at (at + length n)) : found)
+    Nothing -> (limit, (n, Unplaced) : found)
+  lastBefore n limit = case [at | at <- wordOffsets n chunk, at + length n <= limit] of
+    [] -> Nothing
+    found -> Just (last found)
+
+-- | A lambda's parameters and its body: @x y -> b@ is two lambdas.
+parameters :: Expr -> ([Name], Expr)
+parameters (ELam n body) = let (ns, inner) = parameters body in (n : ns, inner)
+parameters body = ([], body)
+
+-- | Where an expression's text starts: its first span, from the left.
+startOf :: Expr -> Maybe Int
+startOf (ELoc (Span from _) _) = Just from
+startOf e = listToMaybe (mapMaybe startOf (subexpressions e))
+
+-- | The expressions inside an expression, in the order of the text.
+subexpressions :: Expr -> [Expr]
+subexpressions = \case
+  ELam _ b -> [b]
+  EApp f x -> [f, x]
+  EPipe a b -> [a, b]
+  ELet _ a b -> [a, b]
+  ELetRec group b -> map snd group <> [b]
+  ERecord fields -> map snd fields
+  EList items -> items
+  ESelect e _ -> [e]
+  EBind _ a b -> [a, b]
+  ERun e -> [e]
+  ELoc _ e -> [e]
+  EWith a b -> [a, b]
+  EBg e -> [e]
+  EAnn e _ -> [e]
+  EIf c a b -> [c, a, b]
+  ECase s arms -> s : map snd arms
+  _ -> []
+
+-- | Each offset of a name in a text, as a whole word.
+wordOffsets :: String -> String -> [Int]
+wordOffsets n text =
+  [ at
+  | at <- [0 .. length text - length n]
+  , n `isPrefixOf` drop at text
+  , at == 0 || not (part (text !! (at - 1)))
+  , maybe True (not . part) (listToMaybe (drop (at + length n) text))
+  ]
+ where
+  part ch = identifierChar ch || ch == '.' || ch == '$'
