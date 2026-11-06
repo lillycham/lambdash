@@ -23,6 +23,10 @@ module Lambdash.Repl
   , runScript
   , startupFile
   , Entry
+  , Module
+  , loadModuleWith
+  , sessionBound
+  , mergeModule
   ) where
 
 import Control.Monad (filterM)
@@ -1071,7 +1075,13 @@ data Module = Module
 -- so an import never runs code. A relative path starts at the importing
 -- file's directory.
 loadModule :: Session -> FilePath -> IO (Either String Module)
-loadModule session written = do
+loadModule = loadModuleWith stepLine
+
+-- | Load a module, with each definition taken by the given step. The REPL's
+-- step runs the definition; the editor's only checks it, so that nothing
+-- evaluates. A nested import uses the same step.
+loadModuleWith :: (Session -> String -> IO Step) -> Session -> FilePath -> IO (Either String Module)
+loadModuleWith stepWith session written = do
   base <- maybe getCurrentDirectory pure (sessionDirectory session)
   home <- getHomeDirectory
   let path = case written of
@@ -1103,7 +1113,7 @@ loadModule session written = do
       -- A module's own imports are not exported, but their declarations
       -- are global, so they come along.
       Right (Import alias inner) -> do
-        loaded <- loadModule now inner
+        loaded <- loadModuleWith stepWith now inner
         case loaded of
           Left message -> at message
           Right nested ->
@@ -1116,7 +1126,7 @@ loadModule session written = do
       Right line -> case defines now line of
         Nothing -> at "a module holds only definitions, and this line would run"
         Just (names, globals) -> do
-          result <- stepLine now chunk
+          result <- stepWith now chunk
           case result of
             Continue next output -> checked path n found
               { moduleSession = next

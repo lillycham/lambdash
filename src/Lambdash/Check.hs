@@ -1,7 +1,9 @@
 -- | Check a file without running it, for an editor. Each line is parsed and
 -- typed as the REPL would, in a session that grows as the file goes:
 -- bindings, signatures, fixities and declarations. Nothing evaluates, nothing
--- spawns and no flake activates, so checking a file is always safe.
+-- spawns and no flake activates, so checking a file is always safe. An
+-- @import@ loads its module as the REPL does, but each of the module's
+-- definitions is checked, not run: the only IO is reading the module files.
 module Lambdash.Check
   ( Problem (..)
   , checkText
@@ -9,15 +11,16 @@ module Lambdash.Check
   , chunks
   ) where
 
+import Control.Exception (IOException, try)
 import Data.Char (isAlphaNum, isDigit, isLetter)
 import Data.List (intercalate)
 import Data.Map.Lazy qualified as Map.Lazy
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Lambdash.Eval (Value, typeEnv)
+import Lambdash.Eval (Value)
 import Lambdash.Infer
 import Lambdash.Parser (Bound (..))
-import Lambdash.Repl (Command (..), Session (..), declareIn, needsMore, parseCommandWith, renderEffectsType, renderError, writtenCheck)
+import Lambdash.Repl (Command (..), Session (..), Step (..), declareIn, loadModuleWith, mergeModule, needsMore, parseCommandWith, renderEffectsType, renderError, sessionBound, writtenCheck)
 import Lambdash.Syntax (patternVars)
 
 -- | Something wrong in a file. Lines and columns count from 1. Without a
@@ -45,13 +48,15 @@ chunks = go . zip [1 ..] . lines
 -- | The file as it goes: each chunk's first line, its text, the session
 -- before it and after it, and its problem. A chunk that fails changes
 -- nothing, and the chunks after it are still checked, as in a startup file.
-walk :: Session -> String -> [(Int, String, Session, Session, Maybe Problem)]
+walk :: Session -> String -> IO [(Int, String, Session, Session, Maybe Problem)]
 walk start = go start . chunks
  where
-  go _ [] = []
-  go session ((n, chunk) : rest) = case checkChunk session chunk of
-    Left problem -> (n, chunk, session, session, Just (locate n chunk problem)) : go session rest
-    Right next -> (n, chunk, session, next, Nothing) : go next rest
+  go _ [] = pure []
+  go session ((n, chunk) : rest) = do
+    checked <- checkChunk session chunk
+    case checked of
+      Left problem -> ((n, chunk, session, session, Just (locate n chunk problem)) :) <$> go session rest
+      Right next -> ((n, chunk, session, next, Nothing) :) <$> go next rest
   -- A parse error knows its place; a type error, for now, is its chunk.
   locate n chunk (Left (line, column, message)) =
     let text = concat (take 1 (drop (line - 1) (lines chunk)))
@@ -71,8 +76,10 @@ characterColumn text wanted = go 1 1 text
         [] -> chars + (wanted - visual)
 
 -- | Every problem in a file, in order.
-checkText :: Session -> String -> [Problem]
-checkText start text = [problem | (_, _, _, _, Just problem) <- walk start text]
+checkText :: Session -> String -> IO [Problem]
+checkText start text = do
+  walked <- walk start text
+  pure [problem | (_, _, _, _, Just problem) <- walked]
 
 -- | The name at a line and column, and its type there: the place of the
 -- name (its line, first column and the column after it) and the text to
@@ -85,30 +92,35 @@ checkText start text = [problem | (_, _, _, _, Just problem) <- walk start text]
 -- the chunk binds inside itself, such as a lambda's
 -- parameter, shows nothing: its type is not in the session, and the
 -- session's type for the same name would be another name's.
-hoverAt :: Session -> String -> Int -> Int -> Maybe (Int, Int, Int, String)
-hoverAt start text line column = do
-  (begins, chunk, before, after, _) <- case [c | c@(n, chunk, _, _, _) <- walk start text, n <= line, line < n + length (lines chunk)] of
-    found : _ -> Just found
-    [] -> Nothing
-  source <- case drop (line - 1) (lines text) of
-    l : _ -> Just l
-    [] -> Nothing
-  (from, to, name) <- wordAt source column
-  let parsed = parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk
-      -- The first word of the chunk, where a binding names what it binds.
-      atHead = line == begins && from == 1 + length (takeWhile (== ' ') source)
-      binds = case parsed of
-        Right (Bind bound _) -> bound == name && atHead
-        Right (BindRun bound _) -> bound == name && atHead
-        Right (BindRec group) -> name `elem` map fst group
-        Right (Declare _) -> True
-        _ -> False
-  case parsed of
-    Right command | name `elem` locals command -> Nothing
-    _ -> pure ()
-  Forall _ ty <- Map.lookup name (sessionTypes (if binds then after else before))
-  pure (line, from, to, shown name <> " : " <> renderEffectsType ty)
+hoverAt :: Session -> String -> Int -> Int -> IO (Maybe (Int, Int, Int, String))
+hoverAt start text line column = at <$> walk start text
  where
+  at walked = do
+    (begins, chunk, before, after, _) <- case [c | c@(n, chunk, _, _, _) <- walked, n <= line, line < n + length (lines chunk)] of
+      found : _ -> Just found
+      [] -> Nothing
+    source <- case drop (line - 1) (lines text) of
+      l : _ -> Just l
+      [] -> Nothing
+    -- A name that an import put under a prefix, such as @p.padRight@, is
+    -- one name. Otherwise the dot selects a field, and the name is a part.
+    (from, to, name) <- case qualifiedAt source column of
+      Just found@(_, _, name) | Map.member name (sessionTypes before) -> Just found
+      _ -> wordAt source column
+    let parsed = parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk
+        -- The first word of the chunk, where a binding names what it binds.
+        atHead = line == begins && from == 1 + length (takeWhile (== ' ') source)
+        binds = case parsed of
+          Right (Bind bound _) -> bound == name && atHead
+          Right (BindRun bound _) -> bound == name && atHead
+          Right (BindRec group) -> name `elem` map fst group
+          Right (Declare _) -> True
+          _ -> False
+    case parsed of
+      Right command | name `elem` locals command -> Nothing
+      _ -> pure ()
+    Forall _ ty <- Map.lookup name (sessionTypes (if binds then after else before))
+    pure (line, from, to, shown name <> " : " <> renderEffectsType ty)
   shown name
     | all operatorChar name = "(" <> name <> ")"
     | otherwise = name
@@ -118,15 +130,25 @@ hoverAt start text line column = do
 wordAt :: String -> Int -> Maybe (Int, Int, String)
 wordAt source column = case drop (column - 1) source of
   c : _
-    | identifierChar c -> spanning identifierChar
-    | operatorChar c -> spanning operatorChar
+    | identifierChar c -> spanAt identifierChar source column
+    | operatorChar c -> spanAt operatorChar source column
   _ -> Nothing
+
+-- | The identifier under a column with the dots in it, such as @p.padRight@.
+qualifiedAt :: String -> Int -> Maybe (Int, Int, String)
+qualifiedAt source column = case drop (column - 1) source of
+  c : _ | identifierChar c || c == '.' -> spanAt (\d -> identifierChar d || d == '.') source column
+  _ -> Nothing
+
+-- | The run of characters around a column that the test accepts: an
+-- operator, or a word that starts with a letter.
+spanAt :: (Char -> Bool) -> String -> Int -> Maybe (Int, Int, String)
+spanAt ok source column =
+  let from = column - length (takeWhile ok (reverse (take (column - 1) source)))
+      to = column + length (takeWhile ok (drop (column - 1) source))
+      word = take (to - from) (drop (from - 1) source)
+  in if all operatorChar word || maybe False isLetter (headOf word) then Just (from, to, word) else Nothing
  where
-  spanning ok =
-    let from = column - length (takeWhile ok (reverse (take (column - 1) source)))
-        to = column + length (takeWhile ok (drop (column - 1) source))
-        word = take (to - from) (drop (from - 1) source)
-    in if all operatorChar word || maybe False isLetter (headOf word) then Just (from, to, word) else Nothing
   headOf (c : _) = Just c
   headOf [] = Nothing
 
@@ -165,17 +187,37 @@ locals parsed = case parsed of
     EAnn e _ -> inner e
     EIf c a b -> inner c <> inner a <> inner b
     _ -> []
+
 -- | One chunk: the session after it, or what is wrong. A parse error has a
--- line and column in the chunk.
-checkChunk :: Session -> String -> Either (Either (Int, Int, String) String) Session
+-- line and column in the chunk. An import that fails is wrong on its line.
+checkChunk :: Session -> String -> IO (Either (Either (Int, Int, String) String) Session)
 checkChunk session chunk =
-  case parseCommandWith (sessionFixities session) (BoundWith (Map.keysSet types) builtinNames) chunk of
-    Left err -> Left (Left (parseError err))
-    Right parsed -> either (Left . Right . renderError) Right (typed parsed)
+  case parseCommandWith (sessionFixities session) (sessionBound session) chunk of
+    Left err -> pure (Left (Left (parseError err)))
+    Right (Import alias path) -> do
+      -- A module that cannot be read, such as one without permission, is
+      -- a problem too, and not the end of the server.
+      loaded <- try (loadModuleWith checkStep session path)
+      pure $ case loaded of
+        Left (err :: IOException) -> Left (Right (show err))
+        Right (Left message) -> Left (Right message)
+        Right (Right found) -> Right (fst (mergeModule alias found session))
+    Right parsed -> pure (either (Left . Right . renderError) Right (checkLine session parsed))
+
+-- | A module's definition, for 'loadModuleWith': checked as a line of the
+-- file is, so its value is a placeholder that nothing asks for.
+checkStep :: Session -> String -> IO Step
+checkStep session chunk = pure $
+  case parseCommandWith (sessionFixities session) (sessionBound session) chunk of
+    Left err -> Failed err
+    Right parsed -> either (Failed . renderError) (`Continue` "") (checkLine session parsed)
+
+-- | One parsed line, other than an import: the session after it.
+checkLine :: Session -> Command -> Either InferError Session
+checkLine session = typed
  where
   types = sessionTypes session
   classes = sessionClasses session
-  builtinNames = Map.keysSet (Map.filterWithKey (\name scheme -> Map.lookup name typeEnv == Just scheme) types)
   typed parsed = case parsed of
     Run expression -> session <$ elaborateWith classes Defaulting types expression
     TypeOf expression -> session <$ inferWith classes types expression
