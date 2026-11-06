@@ -53,7 +53,7 @@ handlers = mconcat
           row = fromIntegral line + 1
       -- The protocol counts from 0 in UTF-16 units, and Check from 1 in
       -- characters.
-      at <-liftIO (hoverAt (startFor (toNormalizedUri uri)) text row (fromUnits (lineOf text row) (fromIntegral column) + 1))
+      at <- liftIO (hoverAt (startFor (toNormalizedUri uri)) text row (fromUnits (lineOf text row) (fromIntegral column) + 1))
       respond (Right (maybe (InR Null) (InL . hover text) at))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
