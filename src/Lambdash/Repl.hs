@@ -47,7 +47,7 @@ import System.Posix.Process (getProcessGroupID)
 import System.Posix.Terminal (queryTerminal)
 import Lambdash.Nix (resolveDev)
 import Lambdash.Overlay
-import Lambdash.Trust (autoName, flakeHash, isAllowed)
+import Lambdash.Trust (Source (..), autoName, flakeHash, flakeSource)
 import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
 import Lambdash.Process (Status (..), giveTerminal, programExists)
@@ -648,40 +648,60 @@ describeVariable base name state =
 
 -- | Entering a directory with a @flake.nix@. An allowed flake activates its
 -- devshell for this tree, once: coming back restores it from its scope, and
--- the hook does not run again. A flake that changed since is dropped and has
--- to be allowed again. A flake that is not allowed is reported once.
+-- the hook does not run again. A flake whose @flake.nix@ or @flake.lock@
+-- changed is dropped and checked again. A flake that is gone, or that Nix
+-- cannot hash, is dropped too. A flake that is not allowed is reported once.
+--
+-- Activation evaluates the copy of the source in the store whose hash
+-- @allow@ approved, so a file that changed since is never read.
 arrive :: FilePath -> Session -> IO (Session, [String])
 arrive dir session = do
   found <- flakeHash dir
   case found of
-    Nothing -> pure (session, [])
+    Nothing
+      | Map.member dir (sessionFlakes session) ->
+          pure (cleared, [name <> ": deactivated, as flake.nix is gone or cannot be read"])
+      | otherwise -> pure (session, [])
     Just hash
       | Map.lookup dir (sessionFlakes session) == Just hash -> pure (session, [])
       | otherwise -> do
-          let name = autoName dir
-              stale = Map.member dir (sessionFlakes session)
-              cleared = session
-                { sessionShell = either (const (sessionShell session)) id (unuseOverlay name (sessionShell session))
-                , sessionFlakes = Map.delete dir (sessionFlakes session)
-                }
-              staleMessage = [name <> ": flake.nix or flake.lock changed" | stale]
-          allowed <- isAllowed dir hash
-          if allowed then activate name hash cleared staleMessage
-          else if Set.member (dir, hash) (sessionNotified session) then pure (cleared, staleMessage)
-          else pure
-            ( cleared {sessionNotified = Set.insert (dir, hash) (sessionNotified cleared)}
-            , staleMessage <> ["flake.nix here is not allowed: allow activates it here and on return"] )
+          let staleMessage = [name <> ": flake.nix or flake.lock changed" | Map.member dir (sessionFlakes session)]
+              notify reason
+                | Set.member (dir, hash) (sessionNotified session) = pure (cleared, staleMessage)
+                | otherwise = pure
+                    ( cleared {sessionNotified = Set.insert (dir, hash) (sessionNotified cleared)}
+                    , staleMessage <> [reason] )
+          wanted <- Trust.approved dir
+          case wanted of
+            Nothing -> notify "flake.nix here is not allowed: allow activates it here and on return"
+            Just approvedHash -> do
+              source <- flakeSource dir
+              case source of
+                Left problem -> pure (cleared, staleMessage <> [name <> ": " <> problem])
+                Right found'
+                  | sourceHash found' /= approvedHash ->
+                      notify "the flake here changed since allow, so it is not allowed: allow activates it again"
+                  | otherwise -> activate hash (sourcePath found') staleMessage
  where
-  activate name hash current messages = do
-    runtime <- newRuntimeWith (sessionRoots current) (sessionShell current)
-    result <- Exception.try (resolveDev runtime ".")
+  shell = sessionShell session
+  -- The overlay this directory already has, or a name no other directory has.
+  name = case [n | (n, d) <- Map.toList (scopes shell), d == dir, Map.member dir (sessionFlakes session)] of
+    n : _ -> n
+    [] -> autoName (scopes shell) dir
+  cleared = session
+    { sessionShell = either (const shell) id (unuseOverlay name shell)
+    , sessionFlakes = Map.delete dir (sessionFlakes session)
+    }
+  activate hash path messages = do
+    runtime <- newRuntimeWith (sessionRoots cleared) (sessionShell cleared)
+    result <- Exception.try (resolveDev runtime ("path:" <> path))
     case result of
-      Left (StreamError message) -> pure (current, messages <> [message])
+      Left (StreamError message) -> pure (cleared, messages <> [message])
       Right overlay -> do
         let named = overlay {overlayName = name}
-        pure ( current
-                 { sessionShell = useOverlayIn dir named (sessionShell current)
-                 , sessionFlakes = Map.insert dir hash (sessionFlakes current)
+        pure ( cleared
+                 { sessionShell = useOverlayIn dir named (sessionShell cleared)
+                 , sessionFlakes = Map.insert dir hash (sessionFlakes cleared)
                  }
              , messages <> [name <> " activated"] )
 
@@ -787,18 +807,21 @@ stepLine session input =
           "there are jobs: :q again to quit; stopped ones get SIGHUP, running ones keep running")
     Right Allow -> do
       cwd <- getCurrentDirectory
-      found <- flakeHash cwd
-      case found of
-        Nothing -> pure (Continue session "no flake.nix here")
-        Just hash -> do
-          Trust.allow cwd hash
+      hasFlake <- doesFileExist (cwd <> "/flake.nix")
+      source <- if hasFlake then flakeSource cwd else pure (Left "no flake.nix here")
+      case source of
+        Left problem -> pure (Failed problem)
+        Right found -> do
+          Trust.allow cwd (sourceHash found)
           (next, messages) <- arrive cwd session
           pure (Continue next (intercalate "\n" messages))
     Right Deny -> do
       cwd <- getCurrentDirectory
       Trust.deny cwd
       let shell = sessionShell session
-          name = autoName cwd
+          name = case [n | (n, d) <- Map.toList (scopes shell), d == cwd] of
+            n : _ -> n
+            [] -> autoName (scopes shell) cwd
           kept = either (const shell) id (unuseOverlay name shell)
           active = Map.member cwd (sessionFlakes session)
       pure (Continue session {sessionShell = if active then kept else shell, sessionFlakes = Map.delete cwd (sessionFlakes session)}

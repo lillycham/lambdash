@@ -7,7 +7,7 @@ import Data.ByteString.Char8 qualified as B8
 import Data.Map.Strict qualified as Map
 import Lambdash.Nix
 import Lambdash.Overlay
-import Lambdash.Trust (autoName, parseAllowed, renderAllowed)
+import Lambdash.Trust (Source (..), autoName, parseAllowed, parseSource, renderAllowed)
 import System.Exit (exitFailure)
 
 env :: [(String, String)] -> Environ
@@ -55,7 +55,14 @@ tests =
   , ("hook: new functions", newFunctions "declare -f a\ndeclare -f b\n" "declare -f a\ndeclare -f b\ndeclare -f mine\ndeclare -f also\n" == ["also", "mine"])
   , ("trust: the allowed file round-trips", parseAllowed (renderAllowed (Map.fromList [("/a b", "h1"), ("/c", "h2")])) == Map.fromList [("/a b", "h1"), ("/c", "h2")])
   , ("trust: a malformed line is skipped", parseAllowed "junk\nh1 /a\n" == Map.fromList [("/a", "h1")])
-  , ("trust: an automatic overlay is named for its directory", autoName "/home/l/akyuu" == "akyuu#" && autoName "/" == "/#")
+  , ("trust: an automatic overlay is named for its directory", autoName Map.empty "/home/l/akyuu" == "akyuu#" && autoName Map.empty "/" == "/#")
+  , ("trust: two directories with one name get distinct overlays",
+      autoName (Map.fromList [("akyuu#", "/home/l/akyuu")]) "/work/akyuu" == "work/akyuu#"
+        && autoName (Map.fromList [("akyuu#", "/home/l/akyuu")]) "/home/l/akyuu" == "akyuu#"
+        && autoName (Map.fromList [("akyuu#", "/a/akyuu"), ("x/akyuu#", "/b/x/akyuu")]) "/x/akyuu" == "/x/akyuu#")
+  , ("trust: the source is the locked hash and the store copy",
+      parseSource "{\"description\":\"\955sh\",\"locked\":{\"narHash\":\"sha256-abc=\",\"type\":\"path\",\"path\":\"/w\"},\"path\":\"/nix/store/x-source\"}"
+        == Right (Source "sha256-abc=" "/nix/store/x-source"))
   , ("hook: no new functions", null (newFunctions "declare -f a\n" "declare -f a\n"))
   ]
 

@@ -18,7 +18,7 @@ library
   hs-source-dirs:  src
   exposed-modules: Lambdash, Lambdash.Check, Lambdash.Classes, Lambdash.Complete, Lambdash.Find, Lambdash.Declare, Lambdash.Desugar, Lambdash.Eval, Lambdash.Help, Lambdash.Infer, Lambdash.Lines, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.TypeSyntax, Lambdash.Unify
   c-sources:       cbits/spawn.c
-  build-depends:   base, async, bytestring, containers, directory, filepath, megaparsec, mtl, process, stm, text, transformers, unix
+  build-depends:   base, aeson, async, bytestring, containers, directory, filepath, megaparsec, mtl, process, stm, text, transformers, unix
 
 executable lambdash
   import:         shared

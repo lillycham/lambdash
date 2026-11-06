@@ -82,6 +82,31 @@ send "cd /\r"
 send "allow\r"
 see {no flake.nix here} "allow needs a flake"
 
+# The approval covers every file of the flake, not only flake.nix and
+# flake.lock: a file that a hook could read changes it too.
+send "cd $work\r"
+send "allow\r"
+see "$name# activated" "allow once more"
+send "cd /\r"
+send ":q\r"
+expect eof
+exec sh -c "echo changed > $work/hook.sh"
+spawn env XDG_STATE_HOME=$state XDG_CONFIG_HOME=$state [lindex $argv 0]
+see {λ> (?:\x1b\[[0-9;]*m)*$} "a new shell"
+send "cd $work\r"
+see {changed since allow} "another changed file is noticed"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "and the flake is not active"
+
+# A flake that is gone takes its devshell with it.
+send "allow\r"
+see "$name# activated" "allow the changed flake"
+send "cd /\r"
+see "$name# deactivated" "leave it"
+exec rm $work/flake.nix
+send "cd $work\r"
+see "$name#: deactivated, as flake.nix is gone" "a removed flake is dropped"
+see {λ> (?:\x1b\[[0-9;]*m)*$} "and the prompt is plain"
+
 send ":q\r"
 expect eof
 exec rm -rf $work
