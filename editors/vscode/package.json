@@ -2,7 +2,7 @@
   "name": "lambdash",
   "displayName": "λsh",
   "description": "λsh language support: highlighting, and diagnostics and hover from lambdash --lsp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "lillycham",
   "license": "MIT",
   "repository": {
@@ -50,10 +50,65 @@
     },
     "commands": [
       {
+        "command": "lambdash.runFile",
+        "title": "Run File",
+        "category": "λsh",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lambdash.sendSelection",
+        "title": "Send Selection to the λsh Prompt",
+        "category": "λsh"
+      },
+      {
+        "command": "lambdash.openPrompt",
+        "title": "Open a λsh Prompt",
+        "category": "λsh"
+      },
+      {
         "command": "lambdash.restart",
-        "title": "λsh: Restart the language server"
+        "title": "Restart the Language Server",
+        "category": "λsh"
       }
-    ]
+    ],
+    "keybindings": [
+      {
+        "command": "lambdash.sendSelection",
+        "key": "shift+enter",
+        "when": "editorTextFocus && editorLangId == lambdash"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "lambdash.runFile",
+          "when": "resourceLangId == lambdash",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "lambdash.runFile",
+          "when": "editorLangId == lambdash",
+          "group": "lambdash@1"
+        },
+        {
+          "command": "lambdash.sendSelection",
+          "when": "editorLangId == lambdash",
+          "group": "lambdash@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "lambdash.runFile",
+          "when": "editorLangId == lambdash"
+        },
+        {
+          "command": "lambdash.sendSelection",
+          "when": "editorLangId == lambdash"
+        }
+      ]
+    }
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

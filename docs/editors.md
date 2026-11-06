@@ -93,8 +93,25 @@ code --extensionDevelopmentPath="$PWD/result/share/vscode/extensions/lillycham.l
 | --- | --- | --- |
 | `lambdash.path` | `lambdash` | the program, as a name on `PATH` or an absolute path |
 
-`λsh: Restart the language server` restarts it, as a change to
+`λsh: Restart the Language Server` restarts it, as a change to
 `lambdash.path` does.
+
+Three commands run code:
+
+| Command | Key | |
+| --- | --- | --- |
+| `λsh: Run File` | ▶ in the editor title | saves the file, then runs `lambdash FILE` in a new terminal |
+| `λsh: Send Selection to the λsh Prompt` | Shift+Enter | types the selection, or the line, at a λsh prompt |
+| `λsh: Open a λsh Prompt` | | shows that prompt |
+
+Run File starts in the workspace folder, or in the file's directory when
+the file is outside a workspace, and closes the terminal of the last run.
+The terminal shows the script's exit status. See [scripts](scripts.md).
+
+Send Selection uses one prompt, kept between sends, so a session builds up
+line by line. With no selection it sends the line under the cursor and moves
+to the next line, so Shift+Enter steps through a file. A `do` block sent
+whole continues at the prompt, as when typed.
 
 The highlighting is a TextMate grammar, so it reads words, not the parser's
 syntax. A `--` with a space on each side is a comment, so
