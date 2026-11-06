@@ -13,13 +13,15 @@ module Lambdash.Navigate
   , Suggestion (..)
   , SuggestionSort (..)
   , completionsAt
+  , Hint (..)
+  , inlayHints
   ) where
 
 import Control.Exception (IOException, try)
 import Data.Char (isUpper)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Lambdash.Check (Problem, Use (..), identifierChar, locals, operatorChar, useAt, walk)
 import Lambdash.Complete (Candidate (..), completeField, isNameChar, namesStarting)
 import Lambdash.Infer (inferWith)
@@ -291,3 +293,41 @@ completionsAt start text line column = do
   identifierWord w = case w of
     c : _ | c `elem` ['a' .. 'z'] || c == '_' -> Just w
     _ -> Nothing
+
+-- | A binding's type, shown after its name: the line and the column after
+-- the name, the type, and the signature that would say it, as a line to
+-- put above the binding's chunk, with the line it goes on.
+data Hint = Hint
+  { hintLine :: Int
+  , hintColumn :: Int
+  , hintType :: String
+  , hintSignature :: Maybe (Int, String)
+  }
+  deriving (Eq, Show)
+
+-- | A hint for each binding that has no signature. A signature comes with a
+-- hint only where it checks: written above the binding, the binding still
+-- checks against it. An operator's binding and a @<-@ binding get none,
+-- since no signature line names them.
+inlayHints :: Session -> String -> IO [Hint]
+inlayHints start text = do
+  walked <- walk start text
+  concat <$> mapM hintsOf walked
+ where
+  hintsOf walked@(n, chunk, before, _, _) =
+    let e = entry walked
+        unsigned = [s | s <- entrySymbols e, symbolSort s `elem` [ValueSymbol, FunctionSymbol], Map.notMember (symbolName s) (sessionSignatures before)]
+    in case entryCommand e of
+      Just (Bind _ _) -> catMaybes <$> mapM (hint True n chunk before) unsigned
+      Just (BindRec _) -> catMaybes <$> mapM (hint True n chunk before) unsigned
+      Just (BindRun _ _) -> catMaybes <$> mapM (hint False n chunk before) unsigned
+      _ -> pure []
+  hint signable n chunk before s = case symbolDetail s of
+    Nothing -> pure Nothing
+    Just ty -> do
+      let signature = symbolName s <> " : " <> ty
+      ok <- if signable && not (all operatorChar (symbolName s))
+        then checks before (signature <> "\n" <> chunk)
+        else pure False
+      pure (Just (Hint (symbolLine s) (symbolTo s) ty (if ok then Just (n, signature <> "\n") else Nothing)))
+  checks before candidate = all (\(_, _, _, _, problem) -> isNothing problem) <$> walk before candidate
