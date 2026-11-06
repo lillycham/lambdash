@@ -1,9 +1,11 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | @lambdash --lsp@: a language server on stdin and stdout. It reports
--- problems and shows types on hover. Each open file is checked as a startup
--- file would run, but nothing runs. See "Lambdash.Check".
+-- problems, shows types on hover, gives the outline, goes to definitions and
+-- completes names. Each open file is checked as a startup file would run, but
+-- nothing runs. See "Lambdash.Check" and "Lambdash.Navigate".
 module Server (serve) where
 
 import Control.Monad.IO.Class (liftIO)
@@ -14,6 +16,7 @@ import Language.LSP.Protocol.Types
 import Language.LSP.Server
 import Language.LSP.VFS (virtualFileText, virtualFileVersion)
 import Lambdash.Check (Problem (..), checkText, hoverAt)
+import Lambdash.Navigate
 import Lambdash.Repl (Session (..), initial)
 import System.FilePath (takeDirectory)
 
@@ -29,7 +32,10 @@ serve = runServer ServerDefinition
   -- Without this, the library tells the client to send no open or change
   -- notifications. The library keeps the text from incremental changes.
   , options = defaultOptions
-      { optTextDocumentSync = Just (TextDocumentSyncOptions (Just True) (Just TextDocumentSyncKind_Incremental) Nothing Nothing Nothing) }
+      { optTextDocumentSync = Just (TextDocumentSyncOptions (Just True) (Just TextDocumentSyncKind_Incremental) Nothing Nothing Nothing)
+      -- After a dot: a module's names, or a record's fields.
+      , optCompletionTriggerCharacters = Just ['.']
+      }
   }
 
 -- The library keeps each open file's text; a change only rechecks it.
@@ -48,16 +54,107 @@ handlers = mconcat
   -- None yet: an empty answer, not an error.
   , requestHandler SMethod_TextDocumentSemanticTokensFull $ \_ respond -> respond (Right (InR Null))
   , requestHandler SMethod_TextDocumentHover $ \(TRequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) (Position line column) _)) respond -> do
-      found <- getVirtualFile (toNormalizedUri uri)
-      let text = maybe "" (Text.unpack . virtualFileText) found
-          row = fromIntegral line + 1
-      -- The protocol counts from 0 in UTF-16 units, and Check from 1 in
-      -- characters.
-      at <- liftIO (hoverAt (startFor (toNormalizedUri uri)) text row (fromUnits (lineOf text row) (fromIntegral column) + 1))
+      text <- textOf (toNormalizedUri uri)
+      let (row, at') = fromPosition text (Position line column)
+      at <- liftIO (hoverAt (startFor (toNormalizedUri uri)) text row at')
       respond (Right (maybe (InR Null) (InL . hover text) at))
+  , requestHandler SMethod_TextDocumentDocumentSymbol $ \(TRequestMessage _ _ _ (DocumentSymbolParams _ _ (TextDocumentIdentifier uri))) respond -> do
+      text <- textOf (toNormalizedUri uri)
+      found <- liftIO (outline (startFor (toNormalizedUri uri)) text)
+      respond (Right (InR (InL (map (documentSymbol text) found))))
+  , requestHandler SMethod_TextDocumentDefinition $ \(TRequestMessage _ _ _ (DefinitionParams (TextDocumentIdentifier uri) position _ _)) respond -> do
+      text <- textOf (toNormalizedUri uri)
+      let (row, column) = fromPosition text position
+      found <- liftIO (definitionAt (startFor (toNormalizedUri uri)) text row column)
+      respond (Right (maybe (InR (InR Null)) (InL . Definition . InL . location uri) found))
+  , requestHandler SMethod_TextDocumentCompletion $ \(TRequestMessage _ _ _ (CompletionParams (TextDocumentIdentifier uri) position _ _ _)) respond -> do
+      text <- textOf (toNormalizedUri uri)
+      let (row, column) = fromPosition text position
+      (from, found) <- liftIO (completionsAt (startFor (toNormalizedUri uri)) text row column)
+      let start = toPosition (lineOf text row) row from
+      respond (Right (InL (map (completionItem (Range start position)) found)))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
   ]
+
+-- | The file as the editor has it now.
+textOf :: NormalizedUri -> LspM () String
+textOf uri = maybe "" (Text.unpack . virtualFileText) <$> getVirtualFile uri
+
+-- | The protocol counts from 0 in UTF-16 units, and Check from 1 in
+-- characters.
+fromPosition :: String -> Position -> (Int, Int)
+fromPosition text (Position line column) =
+  let row = fromIntegral line + 1
+  in (row, fromUnits (lineOf text row) (fromIntegral column) + 1)
+
+-- | A line and a column from 1, in characters, of a line's text, as a
+-- protocol position.
+toPosition :: String -> Int -> Int -> Position
+toPosition source line column = Position (fromIntegral (line - 1)) (fromIntegral (toUnits source (column - 1)))
+
+-- | A symbol covers the lines of its chunk, and its name is what the editor
+-- selects.
+documentSymbol :: String -> Symbol -> DocumentSymbol
+documentSymbol text s = DocumentSymbol
+  { _name = Text.pack (symbolName s)
+  , _detail = Text.pack <$> symbolDetail s
+  , _kind = case symbolSort s of
+      ValueSymbol -> SymbolKind_Variable
+      FunctionSymbol -> SymbolKind_Function
+      TypeSymbol -> SymbolKind_Enum
+      ConstructorSymbol -> SymbolKind_EnumMember
+      ClassSymbol -> SymbolKind_Interface
+      MethodSymbol -> SymbolKind_Method
+      InstanceSymbol -> SymbolKind_Object
+      ModuleSymbol -> SymbolKind_Module
+  , _tags = Nothing
+  , _deprecated = Nothing
+  , _range = Range (Position (fromIntegral (symbolFirst s - 1)) 0) (toPosition final (symbolLast s) (length final + 1))
+  , _selectionRange = Range (toPosition named (symbolLine s) (symbolFrom s)) (toPosition named (symbolLine s) (symbolTo s))
+  , _children = if null (symbolChildren s) then Nothing else Just (map (documentSymbol text) (symbolChildren s))
+  }
+ where
+  final = lineOf text (symbolLast s)
+  named = lineOf text (symbolLine s)
+
+-- | A definition in this file, or in a module's.
+location :: Uri -> Place -> Location
+location uri p = Location (maybe uri filePathToUri (placeFile p))
+  (Range (toPosition (placeSource p) (placeLine p) (placeFrom p)) (toPosition (placeSource p) (placeLine p) (placeTo p)))
+
+-- | A suggestion replaces the whole word before the cursor, with its
+-- module's prefix, so the editor filters on that too.
+completionItem :: Range -> Suggestion -> CompletionItem
+completionItem range suggestion = CompletionItem
+  { _label = shown
+  , _labelDetails = Nothing
+  , _kind = Just $ case suggestionSort suggestion of
+      ValueSuggestion -> CompletionItemKind_Variable
+      FunctionSuggestion -> CompletionItemKind_Function
+      ConstructorSuggestion -> CompletionItemKind_EnumMember
+      FieldSuggestion -> CompletionItemKind_Field
+      KeywordSuggestion -> CompletionItemKind_Keyword
+      WordSuggestion -> CompletionItemKind_Text
+  , _tags = Nothing
+  , _detail = Text.pack <$> suggestionDetail suggestion
+  , _documentation = Nothing
+  , _deprecated = Nothing
+  , _preselect = Nothing
+  , _sortText = Nothing
+  , _filterText = Just shown
+  , _insertText = Nothing
+  , _insertTextFormat = Nothing
+  , _insertTextMode = Nothing
+  , _textEdit = Just (InL (TextEdit range shown))
+  , _textEditText = Nothing
+  , _additionalTextEdits = Nothing
+  , _commitCharacters = Nothing
+  , _command = Nothing
+  , _data_ = Nothing
+  }
+ where
+  shown = Text.pack (suggestionText suggestion)
 
 -- | Check the file as the editor has it now, and replace its problems.
 recheck :: NormalizedUri -> LspM () ()

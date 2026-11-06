@@ -4,6 +4,7 @@
 module Lambdash.Complete
   ( Candidate (..)
   , completeName
+  , namesStarting
   , completeField
   , isNameChar
   ) where
@@ -40,18 +41,23 @@ isNameChar c = isAlphaNum c || c `elem` ("_'." :: String)
 completeName :: Session -> String -> String -> [Candidate]
 completeName session line word
   | null word = []
-  | otherwise = topics <> names
+  | otherwise = topics <> namesStarting session word
  where
-  names =
-    [ Candidate name (typeOf name)
-    | name <- Map.keys (sessionTypes session)
-    , word `isPrefixOf` name
-    , all isNameChar name
-    ]
   topics
     | any (`isPrefixOf` line) [":help ", ":h "] =
         [Candidate name "topic" | name <- sort Help.topicNames, word `isPrefixOf` name]
     | otherwise = []
+
+-- | The session's names that start with a word, with their types. An empty
+-- word gives them all, for an editor's menu.
+namesStarting :: Session -> String -> [Candidate]
+namesStarting session word =
+  [ Candidate name (typeOf name)
+  | name <- Map.keys (sessionTypes session)
+  , word `isPrefixOf` name
+  , all isNameChar name
+  ]
+ where
   -- As :t shows it: with its context, and its effects.
   typeOf name = either (const "") renderEffectsType
     (inferWith (sessionClasses session) (sessionTypes session) (EVar name))

@@ -39,6 +39,30 @@ the file changes, so an edit to a module shows at the next change.
 A name that nothing binds is an external command, as at the prompt. So `y`
 alone is not an error, even when `y = ...` failed above it.
 
+## Outline
+
+The outline lists what the file defines, in order: bindings with their
+types, `let rec` members, data types with their constructors, classes with
+their methods, instances, and imports under a prefix. A name bound twice is
+there twice. A line that fails defines nothing.
+
+## Go to definition
+
+A name goes to the definition it sees: the latest one before its line, so
+in `x = x + 1` the `x` on the right goes to the earlier `x`. A binding's own
+name, a `let rec` member and a constructor go to where they are named. A
+name from a module goes to the module's file, through the modules it imports
+if need be. A lambda's parameter, a pattern variable and a builtin go nowhere
+for now.
+
+## Completion
+
+Completion offers the names that the line sees, with their types: the
+session before the line, as hover uses. After a dot it offers a module's
+names (`p.pa` gives `p.padRight`) or a record's fields, as Tab does at the
+prompt. Without a dot it also offers the reserved words, and the words of the
+line or block itself, such as its parameters, which no session holds.
+
 ## Helix
 
 In `languages.toml`:
@@ -71,7 +95,7 @@ vim.lsp.enable("lambdash")
 
 The extension is in `editors/vscode`. It gives `.lsh` files highlighting,
 comments, brackets and `do`/`end` indentation, and starts `lambdash --lsp`
-for diagnostics and hover.
+for diagnostics, hover, the outline, go to definition and completion.
 
 The flake builds it, with its `node_modules`, as `vscode-extension`. With
 home-manager:
@@ -93,16 +117,16 @@ code --extensionDevelopmentPath="$PWD/result/share/vscode/extensions/lillycham.l
 | --- | --- | --- |
 | `lambdash.path` | `lambdash` | the program, as a name on `PATH` or an absolute path |
 
-`λsh: Restart the Language Server` restarts it, as a change to
+`Lambdash: Restart the Language Server` restarts it, as a change to
 `lambdash.path` does.
 
 Three commands run code:
 
 | Command | Key | |
 | --- | --- | --- |
-| `λsh: Run File` | ▶ in the editor title | saves the file, then runs `lambdash FILE` in a new terminal |
-| `λsh: Send Selection to the λsh Prompt` | Shift+Enter | types the selection, or the line, at a λsh prompt |
-| `λsh: Open a λsh Prompt` | | shows that prompt |
+| `Lambdash: Run File` | ▶ in the editor title | saves the file, then runs `lambdash FILE` in a new terminal |
+| `Lambdash: Send Selection to the Prompt` | Shift+Enter | types the selection, or the line, at a λsh prompt |
+| `Lambdash: Open a Prompt` | | shows that prompt |
 
 Run File starts in the workspace folder, or in the file's directory when
 the file is outside a workspace, and closes the terminal of the last run.

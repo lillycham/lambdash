@@ -9,6 +9,13 @@ module Lambdash.Check
   , checkText
   , hoverAt
   , chunks
+    -- * For "Lambdash.Navigate"
+  , Use (..)
+  , useAt
+  , walk
+  , locals
+  , identifierChar
+  , operatorChar
   ) where
 
 import Control.Exception (IOException, try)
@@ -96,34 +103,57 @@ hoverAt :: Session -> String -> Int -> Int -> IO (Maybe (Int, Int, Int, String))
 hoverAt start text line column = at <$> walk start text
  where
   at walked = do
-    (begins, chunk, before, after, _) <- case [c | c@(n, chunk, _, _, _) <- walked, n <= line, line < n + length (lines chunk)] of
-      found : _ -> Just found
-      [] -> Nothing
-    source <- case drop (line - 1) (lines text) of
-      l : _ -> Just l
-      [] -> Nothing
-    -- A name that an import put under a prefix, such as @p.padRight@, is
-    -- one name. Otherwise the dot selects a field, and the name is a part.
-    (from, to, name) <- case qualifiedAt source column of
-      Just found@(_, _, name) | Map.member name (sessionTypes before) -> Just found
-      _ -> wordAt source column
-    let parsed = parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk
+    use <- useAt walked text line column
+    let name = useName use
+        parsed = useCommand use
         -- The first word of the chunk, where a binding names what it binds.
-        atHead = line == begins && from == 1 + length (takeWhile (== ' ') source)
+        atHead = line == useChunkLine use && useFrom use == 1 + length (takeWhile (== ' ') (useSource use))
         binds = case parsed of
-          Right (Bind bound _) -> bound == name && atHead
-          Right (BindRun bound _) -> bound == name && atHead
-          Right (BindRec group) -> name `elem` map fst group
-          Right (Declare _) -> True
+          Just (Bind bound _) -> bound == name && atHead
+          Just (BindRun bound _) -> bound == name && atHead
+          Just (BindRec group) -> name `elem` map fst group
+          Just (Declare _) -> True
           _ -> False
     case parsed of
-      Right command | name `elem` locals command -> Nothing
+      Just command | name `elem` locals command -> Nothing
       _ -> pure ()
-    Forall _ ty <- Map.lookup name (sessionTypes (if binds then after else before))
-    pure (line, from, to, shown name <> " : " <> renderEffectsType ty)
+    Forall _ ty <- Map.lookup name (sessionTypes (if binds then useAfter use else useBefore use))
+    pure (line, useFrom use, useTo use, shown name <> " : " <> renderEffectsType ty)
   shown name
     | all operatorChar name = "(" <> name <> ")"
     | otherwise = name
+
+-- | A name in a file, where the cursor is: the chunk it is in, the sessions
+-- before and after that chunk, and the name's place on its line.
+data Use = Use
+  { useChunkLine :: Int
+  , useChunk :: String
+  , useBefore :: Session
+  , useAfter :: Session
+  , -- | The chunk, parsed as it was checked, if it parses.
+    useCommand :: Maybe Command
+  , useSource :: String
+  , useFrom :: Int
+  , useTo :: Int
+  , useName :: String
+  }
+
+-- | The name under a line and column of a walked file, from 1.
+useAt :: [(Int, String, Session, Session, Maybe Problem)] -> String -> Int -> Int -> Maybe Use
+useAt walked text line column = do
+  (begins, chunk, before, after, _) <- case [c | c@(n, chunk, _, _, _) <- walked, n <= line, line < n + length (lines chunk)] of
+    found : _ -> Just found
+    [] -> Nothing
+  source <- case drop (line - 1) (lines text) of
+    l : _ -> Just l
+    [] -> Nothing
+  -- A name that an import put under a prefix, such as @p.padRight@, is
+  -- one name. Otherwise the dot selects a field, and the name is a part.
+  (from, to, name) <- case qualifiedAt source column of
+    Just found@(_, _, name) | Map.member name (sessionTypes before) -> Just found
+    _ -> wordAt source column
+  let parsed = parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk
+  pure (Use begins chunk before after (either (const Nothing) Just parsed) source from to name)
 
 -- | The identifier or operator under a column, with its first column and
 -- the column after it.
