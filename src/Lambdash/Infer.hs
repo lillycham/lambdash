@@ -90,6 +90,9 @@ data InferError
     BadPattern String
   | -- | A case that no arm matches for values like this one.
     NotCovered Pattern
+  | -- | @&@ on a computation that changes the directory, which belongs to
+    -- the whole shell.
+    BackgroundCwd
   deriving (Eq, Show)
 
 -- | The state is the next unused unknown, and the classes and instances in
@@ -529,6 +532,8 @@ infer env (EWith overlay body) = do
 -- handle, for wait and fg.
 infer env (EBg e) = do
   (s, eff, result, e') <- inferRun env e
+  let EffRow labels _ = applyEffects s eff
+  when (Set.member WorkingDirectory labels) (failWith BackgroundCwd)
   pure (s, TComp eff (TJob eff result), EBg e')
 
 -- | Two branches have one type, except their rows: two computations, jobs

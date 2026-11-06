@@ -87,6 +87,11 @@ exit 4
   after `bg`.
 - `a | b &` backgrounds the whole pipeline. `&` ends a bareword, so
   `echo a&b` is `echo a &` followed by `b`: quote it.
+- A job in the background cannot change the directory, which belongs to the
+  whole shell. `&` refuses a line whose row has `cwd`. A `cd` that reaches a
+  job through an open row, or runs after `bg`, fails the job instead. A
+  running job still sees a `cd` at the prompt: its next relative path
+  resolves against the new directory.
 
 ## What a job is
 

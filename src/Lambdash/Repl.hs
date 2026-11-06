@@ -467,6 +467,7 @@ renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.e
 renderError (BadDeclaration message) = message
 renderError (BadPattern message) = message
 renderError (NotCovered p) = "the case does not cover " <> renderPattern p
+renderError BackgroundCwd = "a job in the background cannot change the directory: run cd in the foreground"
 renderError (SignatureNeeds p) = "the binding needs " <> evalState (renderPred p) Map.empty <> ", and its signature does not give it"
 renderError (Unentailed p) = "the instance needs " <> evalState (renderPred p) Map.empty <> ", and its context does not give it"
 renderError (Unify err) = case err of

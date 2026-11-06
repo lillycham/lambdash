@@ -262,6 +262,8 @@ tests =
   , ("data: a signature names the current type",
       last (session ["data T = A", "data T = B", "f : T -> Bool", "f = t -> case t of B -> true end", "f B"]) == "true")
   , ("step: a function", session ["x -> x"] == ["<function>"])
+  , ("bg: a job that changes directory is refused", session ["do cd \"/\" end &"] == ["a job in the background cannot change the directory: run cd in the foreground"])
+  , ("bg: a cd that reaches a job through its row fails the job", last (session ["g = act -> act &", "k <- g (cd \"/\")", "wait k"]) == "cd: a job in the background cannot change the directory")
   , ("step: a record", session ["{a = 1}"] == ["{a = 1}"])
   , ("step: quit", session [":q", "1"] == ["<quit>"])
   , ("step: a binding shows its type", session ["x = 1"] == ["x : Int"])

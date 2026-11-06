@@ -341,6 +341,16 @@ background runtime action = do
   forM_ (runtimeTable runtime) (\table -> modifyIORef' (tableNew table) (job :))
   pure (VJob job result)
 
+-- | @cd@. The directory belongs to the whole shell, so a job in the
+-- background may not change it. The checker refuses @&@ on a line whose
+-- row has @cwd@; this catches a @cd@ that reached the job through an
+-- open row, and a job sent to the background with @bg@.
+cdV :: Runtime -> String -> IO ()
+cdV runtime path = do
+  foreground <- maybe (pure True) hookForeground (runtimeJob runtime)
+  if foreground then changeDirectory path
+    else throwIO (StreamError "cd: a job in the background cannot change the directory")
+
 -- | What a job's notice says when it ends: what the line would have shown.
 summarise :: Either SomeException Value -> Either String String
 summarise (Right VUnit) = Right ""
@@ -427,7 +437,7 @@ builtins =
     ( "pipefail",
       Forall [t, u, effA] (TFun (TStream (effectVar effA) (TVar t) (TVar u) TStatus) (TStream (effectVar effA) (TVar t) (TVar u) TStatus)),
       VBuiltin "pipefail" pipefailV ),
-    ("cd", mono (TFun TString (TComp (effect WorkingDirectory) TUnit)), VBuiltin "cd" (\path -> VComp (const (VUnit <$ changeDirectory (str path))))),
+    ("cd", mono (TFun TString (TComp (effect WorkingDirectory) TUnit)), VBuiltin "cd" (\path -> VComp (\runtime -> VUnit <$ cdV runtime (str path)))),
     ("ls", mono (TFun TString (TStream (effect Filesystem) TBytes entryTy TUnit)), VBuiltin "ls" lsV),
     ("environments", mono (TComp (effect Environment) (TList TString)), VComp environmentsV),
     ("pkg", mono (TFun TString (TComp (effect (Exec "nix")) TOverlay)), VBuiltin "pkg" (\ref -> VComp (\runtime -> VOverlay <$> resolvePkg runtime (str ref)))),
