@@ -40,6 +40,9 @@ handlers = mconcat
   , notificationHandler SMethod_TextDocumentDidChange $ \(TNotificationMessage _ _ (DidChangeTextDocumentParams (VersionedTextDocumentIdentifier uri _) _)) ->
       recheck (toNormalizedUri uri)
   , notificationHandler SMethod_TextDocumentDidSave (const (pure ()))
+  -- VS Code sends its settings at start and on each change. The server has
+  -- none, but without a handler the library shows the client an error.
+  , notificationHandler SMethod_WorkspaceDidChangeConfiguration (const (pure ()))
   -- The lsp library always advertises semantic tokens, so a client asks.
   -- None yet: an empty answer, not an error.
   , requestHandler SMethod_TextDocumentSemanticTokensFull $ \_ respond -> respond (Right (InR Null))
