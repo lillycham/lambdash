@@ -14,6 +14,9 @@ cd "$(dirname "$0")/.."
 skip_nix=0
 [ "${1:-}" = "--no-nix" ] && skip_nix=1
 
+# The suites test the line editor, which a dumb terminal turns off.
+export TERM=xterm-256color
+
 # The prompt is λ, so the suites need a UTF-8 locale.
 case "${LC_ALL:-${LANG:-}}" in
   *UTF-8*|*utf8*) ;;

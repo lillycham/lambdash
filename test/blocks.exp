@@ -35,6 +35,14 @@ send "printenv LSH_B end\r"
 see {in\r\n} "the layer reaches the body"
 prompt
 
+# A bracket opened on one line closes on the next. The line editor adds no
+# closing bracket of its own, which would close it early.
+send "do print (1\r"
+see {\.\. (?:\x1b\[[0-9;]*m)*$} "an open bracket continues"
+send "  + 2) end\r"
+see {\r\n3\r\n} "the bracket closes on the next line"
+prompt
+
 # A stopped block resumes where it stopped.
 send "do ./test/reader.sh; print 9 end\r"
 pause 300

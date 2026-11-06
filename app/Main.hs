@@ -7,7 +7,7 @@ import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notic
 import Options.Applicative (ParserInfo, customExecParser, flag', fullDesc, header, help, helper, info, long, many, metavar, noIntersperse, optional, prefs, short, showHelpOnError, strArgument, switch, (<|>))
 import System.Environment (lookupEnv)
 import Lambdash.Complete (Candidate (..), completeField, completeName, isNameChar)
-import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (Completion), enableAutoTab, enableMultiline, readlineExMaybe, setHistory)
+import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (Completion), enableAutoTab, enableBraceInsertion, enableMultiline, readlineExMaybe, setHistory)
 import Foreign.C.String (CString, withCString)
 import System.Exit (ExitCode (..), exitWith)
 import Server (serve)
@@ -106,6 +106,10 @@ shell options = do
     -- editor. The patch then reads a linefeed as Enter, which is what a
     -- key typed while a command ran arrives as.
     void (enableMultiline False)
+    -- No closing bracket or quote typed for you: Enter takes the whole
+    -- line, so `print (f` with a continuation on the next line went in as
+    -- `print (f)`. Matching brackets are still highlighted.
+    void (enableBraceInsertion False)
     -- Tab with one completion takes it at once.
     void (enableAutoTab True)
     loop restoreTerminal start
