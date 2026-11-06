@@ -411,6 +411,8 @@ tests =
   , ("with: use inside it changes the session", promptAfter ["with (overlay \"o\" []) do use (overlay \"u\" []) end"] == "λ [u]> ")
   , ("needsMore: an open block", needsMore "do print 1;" && needsMore "with o do" && not (needsMore "do print 1 end"))
   , ("needsMore: strings and words", not (needsMore "echo \"do\"") && not (needsMore "echo done") && needsMore "x <- do")
+  , ("needsMore: a comment line opens nothing", not (needsMore "-- do") && not (needsMore "  -- case x of") && needsMore "do print 1;\n-- end")
+  , ("needsMore: -- later in a line is not a comment", needsMore "do git log --oneline;")
   , ("ref: a reference is a String", ty "unuse nixpkgs#jq" "Comp {env} ()")
   , ("ref: use resolves with pkg", ty "use nixpkgs#jq" "Comp {exec nix, env} ()")
   , ("ref: with resolves with pkg", ty "with nixpkgs#ffmpeg do ffmpeg end" "Comp {exec nix} Status")

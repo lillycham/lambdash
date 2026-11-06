@@ -118,10 +118,14 @@ initial :: Session
 initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty Nothing []
 
 -- | Does this input open more @do@ blocks or @case@s than it closes? The REPL then reads
--- another line. Only whole words count, outside string literals.
+-- another line. Only whole words count, outside string literals and
+-- comment lines. A line whose first word starts with @--@ is a comment. A
+-- @--@ later in a line can be a word of an external command, as in
+-- @git log -- path@, so it does not end the line here.
 needsMore :: String -> Bool
-needsMore input = depth (tokens (withoutStrings input)) > 0
+needsMore input = depth (tokens (withoutStrings (unlines (filter (not . comment) (lines input))))) > 0
  where
+  comment line = take 2 (dropWhile (`elem` (" \t" :: String)) line) == "--"
   withoutStrings [] = []
   withoutStrings ('"' : rest) = ' ' : withoutStrings (skipString rest)
   withoutStrings (c : rest) = c : withoutStrings rest
