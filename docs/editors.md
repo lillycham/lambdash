@@ -39,6 +39,15 @@ the file changes, so an edit to a module shows at the next change.
 A name that nothing binds is an external command, as at the prompt. So `y`
 alone is not an error, even when `y = ...` failed above it.
 
+## Inlay hints
+
+A binding without a signature shows its type after its name, faintly, as
+`f : Num a => a -> a = x -> x + 1`. A binding with a signature shows
+nothing. In VS Code, a double click on the hint writes the signature as a
+line above the binding. The server offers that only where the signature
+checks, so the file stays clean. A `<-` binding and an operator have a hint
+but no signature to write.
+
 ## Outline
 
 The outline lists what the file defines, in order: bindings with their
@@ -95,7 +104,8 @@ vim.lsp.enable("lambdash")
 
 The extension is in `editors/vscode`. It gives `.lsh` files highlighting,
 comments, brackets and `do`/`end` indentation, and starts `lambdash --lsp`
-for diagnostics, hover, the outline, go to definition and completion.
+for diagnostics, hover, inlay hints, the outline, go to definition and
+completion.
 
 The flake builds it, with its `node_modules`, as `vscode-extension`. With
 home-manager:

@@ -3,8 +3,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | @lambdash --lsp@: a language server on stdin and stdout. It reports
--- problems, shows types on hover, gives the outline, goes to definitions and
--- completes names. Each open file is checked as a startup file would run, but
+-- problems, shows types on hover and after unsigned bindings, gives the
+-- outline, goes to definitions and completes names. Each open file is checked as a startup file would run, but
 -- nothing runs. See "Lambdash.Check" and "Lambdash.Navigate".
 module Server (serve) where
 
@@ -73,6 +73,11 @@ handlers = mconcat
       (from, found) <- liftIO (completionsAt (startFor (toNormalizedUri uri)) text row column)
       let start = toPosition (lineOf text row) row from
       respond (Right (InL (map (completionItem (Range start position)) found)))
+  , requestHandler SMethod_TextDocumentInlayHint $ \(TRequestMessage _ _ _ (InlayHintParams _ (TextDocumentIdentifier uri) (Range (Position first _) (Position final _)))) respond -> do
+      text <- textOf (toNormalizedUri uri)
+      found <- liftIO (inlayHints (startFor (toNormalizedUri uri)) text)
+      let shown = [h | h <- found, let l = fromIntegral (hintLine h - 1), first <= l, l <= final]
+      respond (Right (InL (map (inlayHint text) shown)))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
   ]
@@ -117,6 +122,22 @@ documentSymbol text s = DocumentSymbol
  where
   final = lineOf text (symbolLast s)
   named = lineOf text (symbolLine s)
+
+-- | A type after a binding's name, as in its signature. A double click
+-- writes the signature above the binding, where it checks.
+inlayHint :: String -> Hint -> InlayHint
+inlayHint text h = InlayHint
+  { _position = toPosition (lineOf text (hintLine h)) (hintLine h) (hintColumn h)
+  , _label = InL (Text.pack (": " <> hintType h))
+  , _kind = Just InlayHintKind_Type
+  , _textEdits = (\(line, signature) -> [TextEdit (Range (start line) (start line)) (Text.pack signature)]) <$> hintSignature h
+  , _tooltip = InL "Double-click to write the signature" <$ hintSignature h
+  , _paddingLeft = Just True
+  , _paddingRight = Nothing
+  , _data_ = Nothing
+  }
+ where
+  start line = Position (fromIntegral (line - 1)) 0
 
 -- | A definition in this file, or in a module's.
 location :: Uri -> Place -> Location

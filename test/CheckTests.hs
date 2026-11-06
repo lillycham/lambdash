@@ -62,6 +62,9 @@ completions start source line column = unsafePerformIO (completionsAt start (unl
 offered :: Session -> [String] -> Int -> Int -> [String]
 offered start source line column = map suggestionText (snd (completions start source line column))
 
+hints :: [String] -> [Hint]
+hints source = unsafePerformIO (inlayHints initial (unlines source))
+
 -- | Two functions that call each other: each one's first place is in the
 -- other's body or its own name.
 evenOdd :: String
@@ -143,6 +146,16 @@ tests =
         && offered initial ["r = {name = 1}", "r.na"] 2 5 == ["r.name"])
   , ("completion: the chunk's own words and the reserved words",
       "value" `elem` offered initial ["f = value -> val"] 1 17 && "rec" `elem` offered initial ["let re"] 1 7)
+  , ("hints: a binding without a signature shows its type after its name, and the signature that says it",
+      hints ["f = x -> x + 1"] == [Hint 1 2 "Num a => a -> a" (Just (1, "f : Num a => a -> a\n"))])
+  , ("hints: a binding with a signature shows nothing", hints ["f : Int -> Int", "f = x -> x + 1"] == [])
+  , ("hints: a <- binding and an operator have a type but no signature",
+      map hintSignature (hints ["y <- pwd", "(<+>) = a b -> a + b"]) == [Nothing, Nothing] && length (hints ["y <- pwd", "(<+>) = a b -> a + b"]) == 2)
+  , ("hints: each written signature checks, with effects, records and streams",
+      let source = ["g = s -> do print s; print s end", "r = {name = \"a\", size = 2}", "h = xs -> xs | map (x -> x)", evenOdd]
+          signed = foldr insert source [sig | Hint _ _ _ (Just sig) <- hints source]
+          insert (line, text) ls = take (line - 1) ls <> lines text <> drop (line - 1) ls
+      in length [() | Hint _ _ _ (Just _) <- hints source] == 5 && problems signed == [] && hints signed == [])
   ]
 
 main :: IO ()
