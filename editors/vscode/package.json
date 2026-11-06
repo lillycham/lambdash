@@ -1,0 +1,61 @@
+{
+  "name": "lambdash",
+  "displayName": "λsh",
+  "description": "λsh language support: highlighting, and diagnostics and hover from lambdash --lsp",
+  "version": "0.1.0",
+  "publisher": "lillycham",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lillycham/lambdash"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lambdash",
+        "aliases": [
+          "λsh",
+          "lambdash"
+        ],
+        "extensions": [
+          ".lsh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lambdash",
+        "scopeName": "source.lambdash",
+        "path": "./syntaxes/lambdash.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "λsh",
+      "properties": {
+        "lambdash.path": {
+          "type": "string",
+          "default": "lambdash",
+          "description": "The lambdash program that runs the language server, as a name on PATH or an absolute path."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "lambdash.restart",
+        "title": "λsh: Restart the language server"
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

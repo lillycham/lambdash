@@ -1,0 +1,101 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "λsh",
+  "scopeName": "source.lambdash",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#ref" },
+    { "include": "#flag" },
+    { "include": "#command" },
+    { "include": "#declaration" },
+    { "include": "#binding" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#number" },
+    { "include": "#constructor" },
+    { "include": "#slot" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "comment": "A -- at the start of a line or after a space, with a space or the end after it. A -- inside a word, as in --oneline, is an argument.",
+      "name": "comment.line.double-dash.lambdash",
+      "match": "(?:^|(?<=\\s))--(?=\\s|$).*$"
+    },
+    "string": {
+      "name": "string.quoted.double.lambdash",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.lambdash", "match": "\\\\(?:[\\\\\"abfnrtv0]|\\d+|x[0-9A-Fa-f]+|o[0-7]+|&)" }
+      ]
+    },
+    "ref": {
+      "comment": "A flake reference: nixpkgs#jq, .#bench, github:owner/repo#x.",
+      "name": "string.unquoted.ref.lambdash",
+      "match": "(?<![\\w'])[A-Za-z0-9._/:~+@?=&%-]*#[A-Za-z0-9._/:~+@?=&#%-]*"
+    },
+    "command": {
+      "comment": "A REPL command at the start of a line.",
+      "match": "^\\s*(:(?:t|q|core|elab|env|find|help|h))\\b",
+      "captures": { "1": { "name": "keyword.other.command.lambdash" } }
+    },
+    "declaration": {
+      "name": "keyword.other.declaration.lambdash",
+      "match": "\\b(data|class|instance|where|import|infixl|infixr|infix)\\b"
+    },
+    "flag": {
+      "comment": "A flag of an external command: -i, --oneline. A minus before a space or a digit is an operator.",
+      "name": "variable.parameter.flag.lambdash",
+      "match": "(?<=\\s)--?[A-Za-z][\\w-]*"
+    },
+    "binding": {
+      "comment": "x = ..., x <- ..., (op) = ... and x : type at the start of a line.",
+      "patterns": [
+        {
+          "match": "^\\s*([a-z_][\\w']*|\\([!%&*+\\-/<=>?@^|~:]+\\))\\s*(?=(?:=(?!=)|<-|:(?!:)))",
+          "captures": { "1": { "name": "entity.name.function.lambdash" } }
+        },
+        {
+          "match": "\\b(let)\\s+(?:(rec)\\s+)?([a-z_][\\w']*)",
+          "captures": {
+            "1": { "name": "keyword.control.lambdash" },
+            "2": { "name": "keyword.control.lambdash" },
+            "3": { "name": "entity.name.function.lambdash" }
+          }
+        }
+      ]
+    },
+    "keyword": {
+      "name": "keyword.control.lambdash",
+      "match": "\\b(let|rec|and|in|do|end|with|if|then|else|case|of)\\b"
+    },
+    "constant": {
+      "name": "constant.language.lambdash",
+      "match": "\\b(true|false)\\b|\\(\\)"
+    },
+    "number": {
+      "name": "constant.numeric.integer.lambdash",
+      "comment": "Integers only: 0.1 is a word of a command.",
+      "match": "(?<![\\w'.])\\d+(?![\\w.])"
+    },
+    "constructor": {
+      "comment": "Constructors in expressions and patterns, and types in signatures.",
+      "name": "entity.name.type.lambdash",
+      "match": "\\b[A-Z][\\w']*\\b"
+    },
+    "slot": {
+      "comment": "$x: a variable's value as an argument of a command.",
+      "name": "variable.other.slot.lambdash",
+      "match": "\\$[A-Za-z_][\\w']*"
+    },
+    "operator": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.lambdash", "match": "->|<-|=>" },
+        { "name": "keyword.operator.pipe.lambdash", "match": "(?<![!%&*+\\-/<=>?@^|~:])[|&](?![!%&*+\\-/<=>?@^|~:])" },
+        { "name": "keyword.operator.lambdash", "match": "[!%&*+\\-/<=>?@^|~:]+" }
+      ]
+    }
+  }
+}

@@ -62,4 +62,34 @@ vim.lsp.enable("lambdash")
 
 ## VS Code
 
-VS Code needs an extension for a new language. There is none yet.
+The extension is in `editors/vscode`. It gives `.lsh` files highlighting,
+comments, brackets and `do`/`end` indentation, and starts `lambdash --lsp`
+for diagnostics and hover.
+
+The flake builds it, with its `node_modules`, as `vscode-extension`. With
+home-manager:
+
+```nix
+programs.vscode.profiles.default.extensions = [
+  inputs.lambdash.packages.${pkgs.stdenv.hostPlatform.system}.vscode-extension
+];
+```
+
+To try it without installing it, from the repository root:
+
+```bash
+nix build .#vscode-extension
+code --extensionDevelopmentPath="$PWD/result/share/vscode/extensions/lillycham.lambdash"
+```
+
+| Setting | Default | |
+| --- | --- | --- |
+| `lambdash.path` | `lambdash` | the program, as a name on `PATH` or an absolute path |
+
+`λsh: Restart the language server` restarts it, as a change to
+`lambdash.path` does.
+
+The highlighting is a TextMate grammar, so it reads words, not the parser's
+syntax. A `--` with a space on each side is a comment, so
+`git commit -- file` shows `-- file` as one. The server does not send
+semantic tokens yet.

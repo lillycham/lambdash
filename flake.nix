@@ -37,6 +37,31 @@
             }))
           ];
         default = lambdash;
+
+        # The VS Code extension in editors/vscode, with its node_modules.
+        # For home-manager: programs.vscode.profiles.default.extensions.
+        # It starts `lambdash --lsp` from PATH unless lambdash.path says
+        # otherwise.
+        vscode-extension =
+          let
+            withModules = pkgs.buildNpmPackage {
+              pname = "lambdash-vscode-modules";
+              version = "0.1.0";
+              src = ./editors/vscode;
+              npmDepsHash = "sha256-kb0kpYijKEHFtPvnwJuyzUCJ2tT0+OCFCtB9RL+bGZU=";
+              dontNpmBuild = true;
+              installPhase = "cp -r . $out";
+            };
+          in
+          pkgs.vscode-utils.buildVscodeExtension {
+            pname = "lambdash";
+            version = "0.1.0";
+            src = withModules;
+            sourceRoot = withModules.name;
+            vscodeExtPublisher = "lillycham";
+            vscodeExtName = "lambdash";
+            vscodeExtUniqueId = "lillycham.lambdash";
+          };
       });
 
       devShells = forAllSystems (pkgs: {

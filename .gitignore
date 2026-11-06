@@ -1,3 +1,4 @@
 dist-newstyle/
 .direnv/
 result
+editors/vscode/node_modules/
