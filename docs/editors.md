@@ -14,12 +14,20 @@ flake activates and no file changes.
 ## Hover
 
 Hover on a name to see its type at that point in the file, as `:t` shows
-it: a later binding of the same name changes it. A name that its own line
-binds, such as a lambda's parameter or a pattern variable, shows nothing
-for now. Hover has no types for parts of an expression yet.
+it: a later binding of the same name changes it. A name that a line uses
+has the type it had before that line, so in `x = if x then 1 else 2` the
+`x` on the right is the earlier one. The `x` on the left, where the line
+binds it, has the new type. A name that its own line binds, such as a
+lambda's parameter or a pattern variable, shows nothing for now. Hover has
+no types for parts of an expression yet.
+
+Columns count characters. The server converts them to the UTF-16 units of
+the protocol, so a line with a tab or an emoji puts each mark in its place.
 
 The file starts from a new session: the startup file does not run first, so
-a name that only `init.lsh` binds is a command in another file.
+a name that only `init.lsh` binds is a command in another file. The server
+does not follow `import` lines yet: a name or fixity that only a module
+gives is unknown in the editor.
 
 A name that nothing binds is an external command, as at the prompt. So `y`
 alone is not an error, even when `y = ...` failed above it.

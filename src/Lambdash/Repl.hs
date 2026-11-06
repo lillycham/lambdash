@@ -15,6 +15,7 @@ module Lambdash.Repl
   , renderType
   , renderEffectsType
   , renderError
+  , writtenCheck
   , Step (..)
   , step
   , lineFailure

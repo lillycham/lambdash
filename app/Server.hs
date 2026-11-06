@@ -46,9 +46,11 @@ handlers = mconcat
   , requestHandler SMethod_TextDocumentHover $ \(TRequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) (Position line column) _)) respond -> do
       found <- getVirtualFile (toNormalizedUri uri)
       let text = maybe "" (Text.unpack . virtualFileText) found
-          -- The protocol counts from 0, and Check from 1.
-          at = hoverAt initial text (fromIntegral line + 1) (fromIntegral column + 1)
-      respond (Right (maybe (InR Null) (InL . hover) at))
+          row = fromIntegral line + 1
+          -- The protocol counts from 0 in UTF-16 units, and Check from 1 in
+          -- characters.
+          at = hoverAt initial text row (fromUnits (lineOf text row) (fromIntegral column) + 1)
+      respond (Right (maybe (InR Null) (InL . hover text) at))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
   ]
@@ -60,22 +62,25 @@ recheck uri = do
   case found of
     Nothing -> pure ()
     Just file -> do
-      let problems = checkText initial (Text.unpack (virtualFileText file))
-      publishDiagnostics maxProblems uri (Just (virtualFileVersion file)) (partitionBySource (map diagnostic problems))
+      let text = Text.unpack (virtualFileText file)
+          problems = checkText initial text
+      publishDiagnostics maxProblems uri (Just (virtualFileVersion file)) (partitionBySource (map (diagnostic text) problems))
 
 -- | The type as code, in a block that the editor highlights as λsh.
-hover :: (Int, Int, Int, String) -> Hover
-hover (line, from, to, shown) =
+hover :: String -> (Int, Int, Int, String) -> Hover
+hover text (line, from, to, shown) =
   Hover (InL (MarkupContent MarkupKind_Markdown (Text.pack ("```lambdash\n" <> shown <> "\n```"))))
-    (Just (Range (Position (fromIntegral (line - 1)) (fromIntegral (from - 1))) (Position (fromIntegral (line - 1)) (fromIntegral (to - 1)))))
+    (Just (Range (Position (fromIntegral (line - 1)) (units from)) (Position (fromIntegral (line - 1)) (units to))))
+ where
+  units column = fromIntegral (toUnits (lineOf text line) (column - 1))
 
 maxProblems :: Int
 maxProblems = 100
 
 -- | Lines and columns count from 0 in the protocol, and from 1 in a
 -- 'Problem'. A problem without a column covers its lines.
-diagnostic :: Problem -> Diagnostic
-diagnostic problem =
+diagnostic :: String -> Problem -> Diagnostic
+diagnostic text problem =
   -- Range, severity, code, code description, source, message, tags,
   -- related information, data.
   Diagnostic (Range start end) (Just DiagnosticSeverity_Error) Nothing Nothing (Just "lambdash")
@@ -83,5 +88,30 @@ diagnostic problem =
  where
   line n = fromIntegral (n - 1)
   (start, end) = case problemColumn problem of
-    Just column -> (Position (line (problemLine problem)) (fromIntegral (column - 1)), Position (line (problemLine problem)) (fromIntegral column))
+    Just column ->
+      let units n = fromIntegral (toUnits (lineOf text (problemLine problem)) n)
+      in (Position (line (problemLine problem)) (units (column - 1)), Position (line (problemLine problem)) (units column))
     Nothing -> (Position (line (problemLine problem)) 0, Position (line (problemEndLine problem) + 1) 0)
+
+-- | A line of the text, counting from 1, or nothing past the end.
+lineOf :: String -> Int -> String
+lineOf text n = concat (take 1 (drop (n - 1) (lines text)))
+
+-- | The protocol counts a column in UTF-16 code units, and Check in
+-- characters. A character beyond the Basic Multilingual Plane is two units.
+-- These take and give a count from 0. A column past the end of the line
+-- counts each missing character as one unit.
+toUnits :: String -> Int -> Int
+toUnits text chars = sum (map width (take chars text)) + max 0 (chars - length text)
+
+fromUnits :: String -> Int -> Int
+fromUnits text = go 0 text
+ where
+  go chars _ 0 = chars
+  go chars (c : rest) units
+    | units < width c = chars
+    | otherwise = go (chars + 1) rest (units - width c)
+  go chars [] units = chars + units
+
+width :: Char -> Int
+width c = if fromEnum c > 0xFFFF then 2 else 1

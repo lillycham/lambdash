@@ -17,7 +17,7 @@ import Data.Set qualified as Set
 import Lambdash.Eval (Value, typeEnv)
 import Lambdash.Infer
 import Lambdash.Parser (Bound (..))
-import Lambdash.Repl (Command (..), Session (..), declareIn, needsMore, parseCommandWith, renderEffectsType, renderError)
+import Lambdash.Repl (Command (..), Session (..), declareIn, needsMore, parseCommandWith, renderEffectsType, renderError, writtenCheck)
 import Lambdash.Syntax (patternVars)
 
 -- | Something wrong in a file. Lines and columns count from 1. Without a
@@ -53,8 +53,22 @@ walk start = go start . chunks
     Left problem -> (n, chunk, session, session, Just (locate n chunk problem)) : go session rest
     Right next -> (n, chunk, session, next, Nothing) : go next rest
   -- A parse error knows its place; a type error, for now, is its chunk.
-  locate n _ (Left (line, column, message)) = Problem (n + line - 1) (Just column) (n + line - 1) message
+  locate n chunk (Left (line, column, message)) =
+    let text = concat (take 1 (drop (line - 1) (lines chunk)))
+    in Problem (n + line - 1) (Just (characterColumn text column)) (n + line - 1) message
   locate n chunk (Right message) = Problem n Nothing (n + length (lines chunk) - 1) message
+
+-- | Megaparsec gives a column with each tab as far as the next multiple of
+-- eight. A 'Problem' counts characters, as 'hoverAt' does.
+characterColumn :: String -> Int -> Int
+characterColumn text wanted = go 1 1 text
+ where
+  go visual chars rest
+    | visual >= wanted = chars
+    | otherwise = case rest of
+        '\t' : more -> go (visual + 8 - (visual - 1) `mod` 8) (chars + 1) more
+        _ : more -> go (visual + 1) (chars + 1) more
+        [] -> chars + (wanted - visual)
 
 -- | Every problem in a file, in order.
 checkText :: Session -> String -> [Problem]
@@ -64,23 +78,35 @@ checkText start text = [problem | (_, _, _, _, Just problem) <- walk start text]
 -- name (its line, first column and the column after it) and the text to
 -- show. Lines and columns count from 1.
 --
--- The type is the one the name has after its chunk, so a binding's own name
--- has its new type. A name that the chunk binds itself, such as a lambda's
+-- A name that a line uses has the type it had before the line, so the @x@ on
+-- the right of @x = if x then 1 else 2@ is the earlier @x@. A name that the
+-- line binds, where it binds it, has its new type: the @x@ on the left, a
+-- member of a @let rec@ group, or what a declaration declares. A name that
+-- the chunk binds inside itself, such as a lambda's
 -- parameter, shows nothing: its type is not in the session, and the
 -- session's type for the same name would be another name's.
 hoverAt :: Session -> String -> Int -> Int -> Maybe (Int, Int, Int, String)
 hoverAt start text line column = do
-  (_, chunk, before, after, _) <- case [c | c@(n, chunk, _, _, _) <- walk start text, n <= line, line < n + length (lines chunk)] of
+  (begins, chunk, before, after, _) <- case [c | c@(n, chunk, _, _, _) <- walk start text, n <= line, line < n + length (lines chunk)] of
     found : _ -> Just found
     [] -> Nothing
   source <- case drop (line - 1) (lines text) of
     l : _ -> Just l
     [] -> Nothing
   (from, to, name) <- wordAt source column
-  case parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk of
-    Right parsed | name `elem` locals parsed -> Nothing
+  let parsed = parseCommandWith (sessionFixities before) (BoundWith (Map.keysSet (sessionTypes before)) Set.empty) chunk
+      -- The first word of the chunk, where a binding names what it binds.
+      atHead = line == begins && from == 1 + length (takeWhile (== ' ') source)
+      binds = case parsed of
+        Right (Bind bound _) -> bound == name && atHead
+        Right (BindRun bound _) -> bound == name && atHead
+        Right (BindRec group) -> name `elem` map fst group
+        Right (Declare _) -> True
+        _ -> False
+  case parsed of
+    Right command | name `elem` locals command -> Nothing
     _ -> pure ()
-  Forall _ ty <- Map.lookup name (sessionTypes after)
+  Forall _ ty <- Map.lookup name (sessionTypes (if binds then after else before))
   pure (line, from, to, shown name <> " : " <> renderEffectsType ty)
  where
   shown name
@@ -169,8 +195,11 @@ checkChunk session chunk =
       (_, ty, _) <- elaborateRunWith classes types expression
       pure (bind name ty session)
     Declare written -> fst <$> declareIn session written
-    Signature name context written ->
-      pure session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)}
+    -- As at the prompt: a signature that names no class, or constrains
+    -- another unknown, is wrong where it is written.
+    Signature name context written -> case writtenCheck classes context written of
+      Just problem -> Left (BadDeclaration problem)
+      Nothing -> pure session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)}
     SetFixity fixity names ->
       pure session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names}
     _ -> pure session
