@@ -42,6 +42,7 @@ go :: Surface -> State Int Expr
 go (Surface location node) = ELoc location <$> case node of
   SVar name -> pure (EVar name)
   SLit lit -> pure (ELit lit)
+  SHole -> pure EHole
   SLam names body -> do
     -- A parameter _ binds nothing, so it gets a name that nothing can use.
     names' <- traverse (\name -> if name == "_" then fresh else pure name) names
@@ -138,6 +139,7 @@ renderCore = render 0
   -- 0: anything. 1: a pipeline stage. 2: a function. 3: an argument.
   render :: Int -> Expr -> String
   render level expression = case expression of
+    EHole -> "_"
     ELoc _ e -> render level e
     -- A dictionary's name has spaces in it, and an operator is a name only
     -- in parentheses, so both are bracketed.

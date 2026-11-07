@@ -122,6 +122,12 @@ tests =
   , ("lit: bool", typed (ELit (LBool True)) TBool)
   , ("var: from the environment", typed (v "not") (TBool ~> TBool))
   , ("var: unbound", inferType (v "x") == Left (Unbound "x"))
+  , ("hole: its type is what it meets, and the line fails", case inferIn prelude (EApp (v "not") EHole) of
+      Left (Holes [Hole _ TBool _]) -> True
+      _ -> False)
+  , ("hole: the scope at the hole holds a lambda's parameter", case inferIn prelude (ELam "y" (EApp (v "not") EHole)) of
+      Left (Holes [hole]) -> Map.member "y" (holeScope hole)
+      _ -> False)
   , ("lam: identity", typed (lam ["x"] (v "x")) (t0 ~> t0))
   , ("lam: const", typed (lam ["x", "y"] (v "x")) (t0 ~> t1 ~> t0))
   , ("lam: shadowing uses the inner x", typed (lam ["x", "x"] (v "x")) (t0 ~> t1 ~> t1))

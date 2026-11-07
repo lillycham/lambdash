@@ -40,6 +40,7 @@ module Lambdash.Infer
   , elaborateInstance
   , elaborateSigned
   , elaborateTraced
+  , Hole (..)
   , elaborateRunTraced
   , elaborateSignedTraced
   , errorSpan
@@ -55,6 +56,7 @@ import Control.Monad (foldM, when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.List (nub, sort)
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Lambdash.Classes
 import Lambdash.TypeSyntax (writtenType)
@@ -102,11 +104,23 @@ data InferError
     BackgroundCwd
   | -- | An error, and the innermost expression it is about.
     Located Span InferError
+  | -- | Holes, and what would fit each one. The line does not run.
+    Holes [Hole]
+  deriving (Eq, Show)
+
+-- | A hole: its place, the type that would fit there, with its class
+-- context, and the names in scope there, for a search of what fits.
+data Hole = Hole
+  { holeSpan :: Span
+  , holeType :: Ty
+  , holeScope :: Env
+  }
   deriving (Eq, Show)
 
 -- | Where an error is, if the checker knows.
 errorSpan :: InferError -> Maybe Span
 errorSpan (Located place _) = Just place
+errorSpan (Holes (hole : _)) = Just (holeSpan hole)
 errorSpan _ = Nothing
 
 -- | An error without its place.
@@ -132,10 +146,31 @@ data InferState = InferState
   , checkingSpan :: Maybe Span
   , spanTypes :: [(Span, Ty)]
   , evidenceSpans :: Map Name Span
+  , -- | Each hole met so far: its place, its type, and the scope there.
+    holeSites :: [(Span, Ty, Env)]
   }
 
 startingAt :: Int -> InferState
-startingAt n = InferState n Nothing [] Map.empty
+startingAt n = InferState n Nothing [] Map.empty []
+
+-- | Fail with the holes met so far, if there are any, each type finished
+-- with this substitution. This comes straight after inference, before
+-- defaulting could choose a type for a hole.
+holesAfter :: Subst -> Infer ()
+holesAfter s = do
+  sites <- gets holeSites
+  when (not (null sites)) $
+    failWith (Holes [Hole place (withContext s ty) (applyEnv s env) | (place, ty, env) <- reverse sites])
+
+-- | A type with a substitution applied, and the class context of its
+-- unknowns from the substitution's predicates: the @1@ of @x -> x + 1@ is
+-- @Num a => a@.
+withContext :: Subst -> Ty -> Ty
+withContext solved ty =
+  let bare = apply solved ty
+      vars = ftv bare
+      context = nub [p' | (_, p) <- classPreds solved, let p' = applyPred solved p, let pv = predVars p', not (Set.null pv), pv `Set.isSubsetOf` vars]
+  in if null context then bare else TClass context bare
 
 failWith :: InferError -> Infer a
 failWith = lift . lift . Left
@@ -169,12 +204,7 @@ runTraced classes start go = runReaderT (evalStateT traced (startingAt start)) c
   traced = do
     (result, solved) <- go
     seen <- gets spanTypes
-    pure (result, [(place, finished solved ty) | (place, ty) <- reverse seen])
-  finished solved ty =
-    let bare = apply solved ty
-        vars = ftv bare
-        context = nub [p' | (_, p) <- classPreds solved, let p' = applyPred solved p, let pv = predVars p', not (Set.null pv), pv `Set.isSubsetOf` vars]
-    in if null context then bare else TClass context bare
+    pure (result, [(place, withContext solved ty) | (place, ty) <- reverse seen])
 
 classEnv :: Infer ClassEnv
 classEnv = lift ask
@@ -317,6 +347,15 @@ infer env (EVar name) =
       pure ( emptySubst {effectConstraints = constraints, classPreds = zip evidence preds}
            , bare
            , foldl EApp (EVar name) (map EVar evidence) )
+
+-- A hole is any type: what it meets decides. It notes its place and scope.
+-- One without a place, which only a tree built by hand has, is still a
+-- hole: its line must not run.
+infer env EHole = do
+  t <- fresh
+  place <- gets (fromMaybe (Span 0 0) . checkingSpan)
+  modify (\st -> st {holeSites = (place, t, env) : holeSites st})
+  pure (emptySubst, t, EHole)
 
 -- A numeric literal is any Num type: 1 is fromInt d 1.
 infer _ e@(ELit (LInt _)) = do
@@ -1050,6 +1089,7 @@ elaborateWith classes mode env expr = fst <$> elaborateTraced classes mode env e
 elaborateTraced :: ClassEnv -> Mode -> Env -> Expr -> Either InferError ((Ty, Expr), [(Span, Ty)])
 elaborateTraced classes mode env expr = runTraced classes (nextUnknown env) $ do
   (s, t, code) <- infer env expr
+  holesAfter s
   (solved, ty) <- finish env s t
   elaborated <- resolveClasses mode (isLambda expr) solved ty code
   pure (elaborated, solved)
@@ -1088,6 +1128,7 @@ elaborateRunTraced classes env expr = runTraced classes (nextUnknown env) go
  where
   go = do
     (s1, t, code) <- infer env expr
+    holesAfter s1
     (s2, resultTy) <- case apply s1 t of
       TStream _ input _ result -> do
         s <- unifying (unify input TBytes)
@@ -1145,6 +1186,7 @@ elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT g
     -- Each method fits its type: a closed row there is a ceiling.
     (learned, fields') <- foldM (\(known, done) (m, e) -> do
       (s, t, e') <- infer (applyEnv known env) e
+      holesAfter s
       let sofar = s `compose` known
       fit <- fitting (apply sofar t) (apply sofar (maybe t id (lookup m expected)))
       pure (fit `compose` sofar, done <> [(m, e')])) (emptySubst, []) ordered
@@ -1203,6 +1245,7 @@ elaborateSignedTraced classes env (context, written) expr = runTraced classes st
     let (sigPreds, sigBare) = unclass t
     (s1, te, code) <- infer env expr
     s2 <- fitting (apply s1 te) (apply s1 sigBare)
+    holesAfter (s2 `compose` s1)
     (solved, ty) <- finish env (s2 `compose` s1) sigBare
     -- A written row tail is rigid too: in {name : String | r} -> String the
     -- binding must take any record with a name, so it may not close r or

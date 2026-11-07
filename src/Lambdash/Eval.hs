@@ -217,6 +217,7 @@ eval env expression =
         Just value -> value
         Nothing -> error "eval: unbound name"
     ELit literal -> evalLit literal
+    EHole -> error "eval: the checker passed a hole"
     EApp function argument -> applyValue (eval env function) (eval env argument)
     EPipe left right -> pipeValue (eval env left) (eval env right)
     ELam name body -> VClosure name body env

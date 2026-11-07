@@ -67,27 +67,29 @@ walk start = go start . chunks
   go session ((n, chunk) : rest) = do
     checked <- checkChunk session chunk
     case checked of
-      Left problem -> (Checked n chunk session session (Just (locate n chunk problem)) [] :) <$> go session rest
-      Right (next, types) -> (Checked n chunk session next Nothing types :) <$> go next rest
+      Left problems -> (Checked n chunk session session (locate n chunk problems) [] :) <$> go session rest
+      Right (next, types) -> (Checked n chunk session next [] types :) <$> go next rest
   -- A parse error knows its place, and so does a type error the checker
   -- could place. Any other is the whole chunk.
   locate n chunk (Left (line, column, message)) =
     let text = concat (take 1 (drop (line - 1) (lines chunk)))
-    in Problem (n + line - 1) (Just (characterColumn text column)) (n + line - 1) message Nothing
-  locate n chunk (Right (Just place, message)) =
+    in [Problem (n + line - 1) (Just (characterColumn text column)) (n + line - 1) message Nothing]
+  locate n chunk (Right found) = map (placed n chunk) found
+  placed n chunk (Just place, message) =
     let (fromLine, fromColumn, toLine, toColumn) = spanPlace chunk place
     in Problem (n + fromLine - 1) (Just fromColumn) (n + toLine - 1) message (Just toColumn)
-  locate n chunk (Right (Nothing, message)) = Problem n Nothing (n + length (lines chunk) - 1) message Nothing
+  placed n chunk (Nothing, message) = Problem n Nothing (n + length (lines chunk) - 1) message Nothing
 
 -- | A chunk of a file, checked: its first line, its text, the sessions
--- before and after it, its problem, and the type of each span the checker
+-- before and after it, its problems, and the type of each span the checker
 -- went through, inner spans first.
 data Checked = Checked
   { checkedLine :: Int
   , checkedText :: String
   , checkedBefore :: Session
   , checkedAfter :: Session
-  , checkedProblem :: Maybe Problem
+  , -- | What is wrong with the chunk: none if it checked. Each hole is one.
+    checkedProblems :: [Problem]
   , checkedTypes :: [(Span, Ty)]
   }
 
@@ -122,7 +124,7 @@ characterColumn text wanted = go 1 1 text
 checkText :: Session -> String -> IO [Problem]
 checkText start text = do
   walked <- walk start text
-  pure [problem | Checked {checkedProblem = Just problem} <- walked]
+  pure (concatMap checkedProblems walked)
 
 -- | The name at a line and column, and its type there: the place of the
 -- name (its line, first column and the column after it) and the text to
@@ -263,7 +265,7 @@ locals parsed = case parsed of
 
 -- | One chunk: the session after it, or what is wrong. A parse error has a
 -- line and column in the chunk. An import that fails is wrong on its line.
-checkChunk :: Session -> String -> IO (Either (Either (Int, Int, String) (Maybe Span, String)) (Session, [(Span, Ty)]))
+checkChunk :: Session -> String -> IO (Either (Either (Int, Int, String) [(Maybe Span, String)]) (Session, [(Span, Ty)]))
 checkChunk session chunk =
   case parseCommandWith (sessionFixities session) (sessionBound session) chunk of
     Left err -> pure (Left (Left (parseError err)))
@@ -272,10 +274,15 @@ checkChunk session chunk =
       -- a problem too, and not the end of the server.
       loaded <- try (loadModuleWith checkStep session path)
       pure $ case loaded of
-        Left (err :: IOException) -> Left (Right (Nothing, show err))
-        Right (Left message) -> Left (Right (Nothing, message))
+        Left (err :: IOException) -> Left (Right [(Nothing, show err)])
+        Right (Left message) -> Left (Right [(Nothing, message)])
         Right (Right found) -> Right (fst (mergeModule alias found session), [])
-    Right parsed -> pure (either (\err -> Left (Right (errorSpan err, renderError err))) Right (checkLine session parsed))
+    Right parsed -> pure (either (Left . Right . problemsOf) Right (checkLine session parsed))
+ where
+  -- Each hole is a problem of its own, at its place, with its type.
+  problemsOf err = case unlocated err of
+    Holes holes -> [(Just (holeSpan hole), "hole: " <> renderEffectsType (holeType hole)) | hole <- holes]
+    _ -> [(errorSpan err, renderError err)]
 
 -- | A module's definition, for 'loadModuleWith': checked as a line of the
 -- file is, so its value is a placeholder that nothing asks for.
