@@ -5,6 +5,9 @@ module Lambdash.Process
   , setupTerminal
   , runAsScript
   , isScript
+  , currentDirectory
+  , directoryGone
+  , goneNotice
   , saveShellTerminal
   , shellModes
   , traceTerminal
@@ -26,14 +29,16 @@ import Data.Map.Strict qualified as Map
 import Foreign hiding (void)
 import Foreign.C
 import Lambdash.Overlay (Environ)
-import System.Directory (doesFileExist, findExecutablesInDirectories, getHomeDirectory)
+import System.Directory (doesFileExist, findExecutablesInDirectories, getCurrentDirectory, getHomeDirectory)
+import System.IO.Error (isDoesNotExistError)
+import System.Environment (lookupEnv)
+import Control.Exception (throwIO)
 import System.Posix.IO (stdInput)
 import System.Posix.Files (fileAccess)
 import System.Posix.Process
 import System.Posix.Signals
 import System.Posix.Terminal
 import System.Posix.Types
-import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
 
 foreign import ccall safe "lsh_spawn_env"
@@ -48,6 +53,52 @@ data Status
 -- | Whether this process runs a script rather than a prompt. Signal
 -- handling is process-wide, so this is too: @main@ sets it once, before
 -- anything runs.
+-- | The last working directory that existed when λsh asked for it.
+knownDirectory :: IORef (Maybe FilePath)
+knownDirectory = unsafePerformIO (newIORef Nothing)
+{-# NOINLINE knownDirectory #-}
+
+-- | The working directory. When something has removed it from under the
+-- shell, as when a worktree goes, it is the last one that existed: the
+-- shell's logical directory, as PWD is in other shells. So the prompt
+-- still shows where it was, and cd .. still leaves.
+currentDirectory :: IO FilePath
+currentDirectory = do
+  found <- try getCurrentDirectory
+  case found of
+    Right directory -> writeIORef knownDirectory (Just directory) >> pure directory
+    Left err
+      | isDoesNotExistError err -> do
+          known <- readIORef knownDirectory
+          case known of
+            Just directory -> pure directory
+            Nothing -> maybe "/" id <$> lookupEnv "PWD"
+      | otherwise -> throwIO (err :: IOException)
+
+-- | Whether the working directory no longer exists.
+directoryGone :: IO Bool
+directoryGone = either (const True) (const False) <$> (try getCurrentDirectory :: IO (Either IOException FilePath))
+
+-- | The directory whose removal the prompt last reported.
+reportedGone :: IORef (Maybe FilePath)
+reportedGone = unsafePerformIO (newIORef Nothing)
+{-# NOINLINE reportedGone #-}
+
+-- | Once for each directory: a note that it no longer exists.
+goneNotice :: IO (Maybe String)
+goneNotice = do
+  gone <- directoryGone
+  if not gone
+    then pure Nothing
+    else do
+      directory <- currentDirectory
+      reported <- readIORef reportedGone
+      if reported == Just directory
+        then pure Nothing
+        else do
+          writeIORef reportedGone (Just directory)
+          pure (Just ("this directory no longer exists: " <> directory <> "\ncd to leave it, as cd .."))
+
 scriptMode :: IORef Bool
 scriptMode = unsafePerformIO (newIORef False)
 {-# NOINLINE scriptMode #-}
