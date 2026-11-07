@@ -40,7 +40,9 @@ import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.Bifunctor (first)
 import Data.Char (chr, isAlphaNum, ord)
 import Data.Map.Strict qualified as Map
-import Lambdash.Fill (Fit (..), fitsFor, rankIn)
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Text
+import Lambdash.Fill (Chain (..), Fit (..), chainsFor, fitsFor, rankIn)
 import Data.Set qualified as Set
 import Data.List (dropWhileEnd, intercalate, isPrefixOf, nub, partition)
 import Control.Concurrent.STM
@@ -49,7 +51,7 @@ import System.Exit (ExitCode (..))
 import System.IO.Error (ioeGetErrorString, isDoesNotExistError, isPermissionError)
 import Control.Exception qualified as Exception
 import Data.Char (digitToInt, isDigit)
-import Lambdash.Stream (StreamError (..))
+import Lambdash.Stream (Stage (..), StreamError (..))
 import Lambdash.Eval
 import Lambdash.Infer
 import Lambdash.Desugar (desugar, renderCore)
@@ -72,7 +74,7 @@ import Lambdash.Declare (Declared (..), declare)
 import Lambdash.Find (Found (..), findByType)
 import Lambdash.Syntax (Declaration (..), SPred (..), SType (..), renderPattern)
 import Data.Map.Lazy qualified as Map.Lazy
-import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
+import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, takeRest, try)
 import Text.Megaparsec.Char (char)
 import System.Directory (XdgDirectory (..), canonicalizePath, doesFileExist, getHomeDirectory, getXdgDirectory, makeAbsolute)
 import System.FilePath (takeDirectory, (</>))
@@ -108,6 +110,11 @@ data Session = Session
     sessionDirectory :: Maybe FilePath
   , -- | The modules being loaded, innermost first, so that a cycle stops.
     sessionImporting :: [FilePath]
+  , -- | The lines the last @:fill@ showed, in its order, for @:pick@.
+    sessionFilled :: [String]
+  , -- | A line for the prompt's history, which @:pick@ chose. The prompt
+    -- takes it, and the next session has none.
+    sessionOffer :: Maybe String
   }
 
 -- | A job in the table: a line that Ctrl-Z stopped, or a job that @&@
@@ -129,7 +136,7 @@ data Entry = Entry
 
 -- | The session before any input.
 initial :: Session
-initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty Nothing []
+initial = Session typeEnv scope emptyState Nothing [] False Map.empty Set.empty defaultFixities prelude Map.empty Nothing [] [] Nothing
 
 -- | Does this input open more @do@ blocks or @case@s than it closes? The REPL then reads
 -- another line. Only whole words count, outside string literals and
@@ -209,6 +216,11 @@ data Command
   | -- | @:elab instance ...@: an instance's dictionary, as code. Nothing is
     -- declared.
     ShowElabDeclaration Declaration
+  | -- | @:fill LINE@: chains of stages for the hole in a pipeline, each
+    -- with a preview where its effects allow.
+    FillLine String
+  | -- | @:pick N@: put the line that @:fill@ numbered N in the history.
+    Pick Int
   | -- | @import "./lib.lsh"@ brings a module's names in as they are, and
     -- @tab = import "./lib.lsh"@ brings them in as @tab.name@.
     Import (Maybe Name) FilePath
@@ -228,6 +240,8 @@ command =
   <|> (lexeme (keyword ":elab") *> (ShowElab <$> optional (try (name <* symbol "=" <* notFollowedBy (char '='))) <*> core))
   <|> (ShowEnv <$> (lexeme (keyword ":env") *> optionalName))
   <|> (uncurry Find <$> (lexeme (keyword ":find") *> qualifiedType))
+  <|> (FillLine <$> (lexeme (keyword ":fill") *> takeRest))
+  <|> (Pick <$> (lexeme (keyword ":pick") *> lexeme integer))
   <|> (Help <$> (lexeme (keyword ":help" <|> keyword ":h") *> optionalName))
   <|> fixityLine
   -- Only a quoted path, and nothing after it, makes an import: import
@@ -928,6 +942,10 @@ stepLine session input =
       pure (Continue session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names} "")
     Right (Help Nothing) -> pure (Continue session Help.overview)
     Right (Help (Just word)) -> pure (Continue session (helpFor session word))
+    Right (FillLine text) -> fillLine session text
+    Right (Pick n) -> pure $ case drop (n - 1) (sessionFilled session) of
+      chosen : _ | n >= 1 -> Continue session {sessionOffer = Just chosen} ("in the history, ↑ to edit: " <> chosen)
+      _ -> Failed ("no line " <> show n <> ": :fill numbers its lines")
     Right (Find context written) -> case writtenCheck classes context written of
       Just problem -> pure (Failed problem)
       Nothing -> pure (Continue session (foundMessage session (findByType classes types (context, written))))
@@ -1467,3 +1485,103 @@ checkLineText session text = case parseCommandWith (sessionFixities session) (se
   Left err -> Left (BadDeclaration err)
   Right (Import _ _) -> Right (session, [])
   Right parsed -> checkLine session parsed
+
+-- | @:fill@: chains of stages for the hole in a pipeline, each with the
+-- first lines the line would show with it. The source runs once, and only if all it does is
+-- read files. Its first items go into a buffer, and each chain runs on the
+-- buffer, also only if all it does is read files. The line itself never
+-- runs.
+fillLine :: Session -> String -> IO Step
+fillLine session text = case checkLineText session text of
+  Left err
+    | Holes [hole] <- unlocated err
+    , TFun item _ <- snd (unclass (snd (unqualify (holeType hole)))) -> do
+        let found = take 80 (chainsFor (checkLineText session) rank text hole)
+            Span from to = holeSpan hole
+            filled c = take from text <> chainText c <> drop to text
+            source = dropWhileEnd (`elem` (" |" :: String)) (take from text)
+        if null found
+          then pure (Failed "nothing fills the hole")
+          else do
+            buffer <-
+              if all (== ' ') source
+                then pure (Left "there is no source before the hole")
+                else runAllowed session (source <> " | take " <> show bufferSize <> " | collect")
+            shown <- mapM (preview item (drop to text) buffer) found
+            -- Two chains that give the same lines on the real items are
+            -- one answer: the shorter, which comes first, stays. A chain
+            -- that gives nothing here shows less, so it goes last.
+            let distinct = distinctBy snd (zip found shown)
+                kept = take 10 ([c | c <- distinct, not (null (snd c))] <> [c | c <- distinct, null (snd c)])
+                chains = map fst kept
+                previews = map snd kept
+                distinctBy key = go Set.empty
+                 where
+                  go _ [] = []
+                  go seen (x : xs)
+                    | null (key x) = x : go seen xs
+                    | Set.member (key x) seen = go seen xs
+                    | otherwise = x : go (Set.insert (key x) seen) xs
+                width = maximum (map (length . chainText) chains)
+                row (i, c, p) = replicate (2 - length (show i)) ' ' <> show (i :: Int) <> "  " <> chainText c <> replicate (width - length (chainText c)) ' ' <> "  " <> p
+                notes =
+                  [ "the 5 in take 5 or drop 5 stands in for a number" | any chainStandIn chains ]
+                    <> [ "not run: " <> why | Left why <- [buffer] ]
+                    <> [ ":pick N puts a line in the history (↑)" ]
+            pure (Continue session {sessionFilled = map filled chains} (intercalate "\n" (zipWith3 (curry3 row) [1 ..] chains previews <> notes)))
+    | Holes _ <- unlocated err -> pure (Failed usage)
+  Left err -> pure (Failed (reportIn session text err))
+  Right _ -> pure (Failed usage)
+ where
+  usage = ":fill takes a line with one hole between pipes, as in ls \".\" | _ | encodeLine"
+  rank = rankIn (sessionTypes session) (sessionTypes initial)
+  curry3 g a b c = g (a, b, c)
+  -- The line with the chain, on the buffered items: the first lines it
+  -- would show, or why it did not run. What follows the hole runs too, so a
+  -- preview is what the line would print. Bytes, as encodeLine gives, show
+  -- as their lines.
+  preview _ _ (Left _) _ = pure ""
+  preview item rest (Right items) chain = do
+    let buffered = session
+          { sessionTypes = Map.insert bufferName (Forall [] (TStream noEffects TBytes item TUnit)) (sessionTypes session)
+          , sessionValues = Map.insert bufferName (VStream [SourceListStage items] ReturnUnit) (sessionValues session)
+          }
+    shown <- runAllowed buffered (bufferName <> " | " <> chainText chain <> rest <> " | take " <> show previewSize <> " | collect")
+    pure $ case shown of
+      Left why -> "(not run: " <> why <> ")"
+      Right values -> cut 64 (intercalate " · " (map plain values))
+  plain value = case value of
+    VStr t -> t
+    VBytes b -> dropWhileEnd (== '\n') (Text.unpack (Text.decodeUtf8Lenient b))
+    other -> render other
+  cut n t = if length t > n then take (n - 1) t <> "…" else t
+
+-- | The name the buffered source has in a preview: a name the parser takes
+-- and a person does not write.
+bufferName :: Name
+bufferName = "fill'source"
+
+-- | How many items of the source a preview sees, and how many lines of its
+-- own it shows.
+bufferSize, previewSize :: Int
+bufferSize = 200
+previewSize = 5
+
+-- | Run a line that collects, if all it does is read files: its items, or
+-- why it did not run.
+runAllowed :: Session -> String -> IO (Either String [Value])
+runAllowed session text = case parseCommandWith (sessionFixities session) (sessionBound session) text of
+  Right (Run expression) -> case elaborateRunWith (sessionClasses session) (sessionTypes session) expression of
+    Left err -> pure (Left (renderError err))
+    Right (actionTy, _, code) -> case closeEffects (fst (unqualify actionTy)) (actionEffects actionTy) of
+      Nothing -> pure (Left "its effects are not known")
+      Just row@(EffRow labels _)
+        | not (Set.null (Set.delete Filesystem labels)) -> pure (Left ("it needs " <> renderEffectRow row))
+        | otherwise -> do
+            runtime <- newRuntimeWith (sessionRoots session) (sessionShell session)
+            result <- Exception.try (runComp runtime (eval (sessionValues session) code) >>= \v -> Exception.evaluate (length (render v)) >> pure v)
+            pure $ case result of
+              Left (e :: SomeException) -> Left (takeWhile (/= '\n') (show e))
+              Right (VRecord fields) | Just (VList items) <- lookup "items" fields -> Right items
+              Right _ -> Left "it gave no items"
+  _ -> pure (Left "it does not parse")
