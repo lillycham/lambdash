@@ -92,6 +92,7 @@ Like the host, the evaluator can diverge.
 | [classes](docs/classes.md) | classes and instances, `Eq`, `Ord`, `Show`, and how dictionary passing works |
 | `:help` | at the prompt: an overview, `:help NAME`, `:help TOPIC`, `:help CLASS` |
 | [types](docs/types.md) | annotations `(e : t)` and signatures `f : t` |
+| [holes](docs/holes.md) | `_` in an expression: what type would fit there |
 | [data](docs/data.md) | `data` types, `case` and patterns, `let rec` |
 | [startup](docs/startup.md) | `init.lsh`, run before the first prompt |
 | [scripts](docs/scripts.md) | `lambdash FILE`, `-x`, and what a script does on Ctrl-C |

@@ -286,6 +286,9 @@ atom =
     <|> record
     <|> spanned (SList <$> between (symbol "[") (char ']') (withComma True expr `sepBy` symbol ","))
     <|> accessor
+    -- A lambda's _ parameter comes first, in 'lambda', and a pattern's _
+    -- in 'pattern': here, _ is a hole.
+    <|> spanned (SHole <$ try (char '_' <* notFollowedBy identifierChar))
     <|> spanned (SVar <$> identifier)
 
 -- | An expression in parentheses, an operator as a value, or a section.

@@ -65,6 +65,8 @@ data Surface = Surface Span Node
 data Node
   = SVar Name
   | SLit Lit
+  | -- | @_@ where an expression goes: a hole, whose type the checker tells.
+    SHole
   | -- | @x y -> body@.
     SLam [Name] Surface
   | SApp Surface Surface
@@ -194,6 +196,9 @@ data Declaration
 data Expr
   = EVar Name
   | ELit Lit
+  | -- | @_@: a hole. A line with one never runs: the checker reports what
+    -- type would fit there.
+    EHole
   | ELam Name Expr
   | EApp Expr Expr
   | EPipe Expr Expr

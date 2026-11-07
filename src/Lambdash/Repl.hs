@@ -483,9 +483,20 @@ renderRow (RExtend label ty rest) = do
 -- >   y = 1 + true
 -- >       ^
 renderErrorIn :: String -> InferError -> String
+renderErrorIn source (Holes holes) =
+  intercalate "\n" [holeLine hole <> marked source (holeSpan hole) | hole <- holes]
 renderErrorIn source err = case errorSpan err of
   Nothing -> renderError err
-  Just (Span from to) ->
+  Just place -> renderError err <> marked source place
+
+-- | What a hole would take.
+holeLine :: Hole -> String
+holeLine hole = "hole: " <> renderEffectsType (holeType hole)
+
+-- | The line of a span, and a mark under the span, each on a line of its
+-- own after a newline.
+marked :: String -> Span -> String
+marked source (Span from to) =
     let before = take from source
         lineStart = from - length (takeWhile (/= '\n') (reverse before))
         line = takeWhile (/= '\n') (drop lineStart source)
@@ -493,10 +504,11 @@ renderErrorIn source err = case errorSpan err of
         width = max 1 (length (dropWhileEnd (`elem` (" \t" :: String)) text))
         -- A tab before the mark is a tab under it too, so the mark lines up.
         pad = map (\c -> if c == '\t' then '\t' else ' ') (take (from - lineStart) line)
-    in renderError err <> "\n  " <> line <> "\n  " <> pad <> replicate width '^'
+    in "\n  " <> line <> "\n  " <> pad <> replicate width '^'
 
 renderError :: InferError -> String
 renderError (Located _ err) = renderError err
+renderError (Holes holes) = intercalate "\n" [holeLine hole | hole <- holes]
 renderError (Unbound name) = "unbound name: " <> name
 renderError (NoInstance p) = "no instance: " <> evalState (renderPred p) Map.empty
 renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.empty

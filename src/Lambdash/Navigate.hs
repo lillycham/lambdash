@@ -24,7 +24,7 @@ import Control.Exception (IOException, try)
 import Data.Char (isUpper)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Lambdash.Check (Checked (..), Use (..), hoverAt, identifierChar, operatorChar, useAt, walk)
 import Lambdash.Complete (Candidate (..), completeField, isNameChar, namesStarting)
 import Lambdash.Infer (Scheme (..), elaborateRunWith, inferWith)
@@ -75,12 +75,10 @@ entries :: Session -> String -> IO [Entry]
 entries start text = map entry <$> walk start text
 
 entry :: Checked -> Entry
-entry (Checked n chunk before after problem _) =
+entry (Checked n chunk before after problems _) =
   let parsed = either (const Nothing) Just (parseCommandWith (sessionFixities before) (sessionBound before) chunk)
       -- A chunk that fails binds nothing, so it defines nothing.
-      defined = case problem of
-        Nothing -> maybe [] (symbolsOf n chunk after) parsed
-        Just _ -> []
+      defined = if null problems then maybe [] (symbolsOf n chunk after) parsed else []
   in Entry n before parsed defined
 
 -- | What a file defines, in order. A name defined twice is there twice.
@@ -367,7 +365,7 @@ inlayHints start text = do
         then checks before (signature <> "\n" <> chunk)
         else pure False
       pure (Just (Hint (symbolLine s) (symbolTo s) ty (if ok then Just (n, signature <> "\n") else Nothing)))
-  checks before candidate = all (isNothing . checkedProblem) <$> walk before candidate
+  checks before candidate = all (null . checkedProblems) <$> walk before candidate
 
 -- | A line or block that runs: its first and last lines, and the effects
 -- it may have, as its type gives them, or none.
@@ -384,7 +382,7 @@ data Lens = Lens
 lenses :: Session -> String -> IO [Lens]
 lenses start text = mapMaybe lensOf <$> walk start text
  where
-  lensOf (Checked n chunk before _ Nothing _) = do
+  lensOf (Checked n chunk before _ [] _) = do
     command <- either (const Nothing) Just (parseCommandWith (sessionFixities before) (sessionBound before) chunk)
     expression <- case command of
       Run e -> Just e

@@ -8,6 +8,8 @@ flake activates and no file changes.
 ## What it reports
 
 - A parse error, at its line and column.
+- A hole, `_`, at its place, with the type that would fit there. See
+  [holes](holes.md).
 - A type error, under the expression it is about. A mismatch is under the
   argument that does not fit, or under the expression that does not fit its
   annotation. A missing instance, such as `Num Bool`, is under the use

@@ -84,6 +84,9 @@ tests :: [(String, Bool)]
 tests =
   [ ("a clean file has no problems", problems ["f = x -> x + 1", "f 2"] == [])
   , ("a missing instance is where the dictionary was asked for", problems ["f = x -> x + 1", "y = f true"] == [(2, Just 5, "no instance: Num Bool")])
+  , ("a hole is a problem at its place, with its type", problems ["x = stringLength _"] == [(1, Just 18, "hole: String")])
+  , ("each hole is a problem of its own",
+      [(problemColumn p, problemMessage p) | p <- check initial "y = stringLength _ + _\n"] == [(Just 18, "hole: String"), (Just 22, "hole: Int")])
   , ("a mismatch is at the argument that does not fit",
       [(problemLine p, problemColumn p, problemEndColumn p) | p <- check initial "x = stringLength true\n"] == [(1, Just 18, Just 22)])
   , ("an annotation that does not fit is at its expression",
