@@ -17,7 +17,7 @@ import Language.LSP.Protocol.Message
 import Language.LSP.Protocol.Types
 import Language.LSP.Server
 import Language.LSP.VFS (virtualFileText, virtualFileVersion)
-import Lambdash.Check (Problem (..), checkText, hoverAt)
+import Lambdash.Check (Problem (..), checkText)
 import Lambdash.Navigate
 import Lambdash.Repl (Session (..), initial)
 import System.FilePath (takeDirectory)
@@ -58,7 +58,7 @@ handlers = mconcat
   , requestHandler SMethod_TextDocumentHover $ \(TRequestMessage _ _ _ (HoverParams (TextDocumentIdentifier uri) (Position line column) _)) respond -> do
       text <- textOf (toNormalizedUri uri)
       let (row, at') = fromPosition text (Position line column)
-      at <- liftIO (hoverAt (startFor (toNormalizedUri uri)) text row at')
+      at <- liftIO (typeAt (startFor (toNormalizedUri uri)) text row at')
       respond (Right (maybe (InR Null) (InL . hover text) at))
   , requestHandler SMethod_TextDocumentDocumentSymbol $ \(TRequestMessage _ _ _ (DocumentSymbolParams _ _ (TextDocumentIdentifier uri))) respond -> do
       text <- textOf (toNormalizedUri uri)
@@ -223,7 +223,8 @@ maxProblems :: Int
 maxProblems = 100
 
 -- | Lines and columns count from 0 in the protocol, and from 1 in a
--- 'Problem'. A problem without a column covers its lines.
+-- 'Problem'. A problem without a column covers its lines; one with a column
+-- and an end column covers the text between.
 diagnostic :: String -> Problem -> Diagnostic
 diagnostic text problem =
   -- Range, severity, code, code description, source, message, tags,
@@ -234,8 +235,10 @@ diagnostic text problem =
   line n = fromIntegral (n - 1)
   (start, end) = case problemColumn problem of
     Just column ->
-      let units n = fromIntegral (toUnits (lineOf text (problemLine problem)) n)
-      in (Position (line (problemLine problem)) (units (column - 1)), Position (line (problemLine problem)) (units column))
+      let units l n = fromIntegral (toUnits (lineOf text l) n)
+          final = problemEndLine problem
+          after = maybe (units (problemLine problem) column) (\c -> units final (c - 1)) (problemEndColumn problem)
+      in (Position (line (problemLine problem)) (units (problemLine problem) (column - 1)), Position (line final) after)
     Nothing -> (Position (line (problemLine problem)) 0, Position (line (problemEndLine problem) + 1) 0)
 
 -- | A line of the text, counting from 1, or nothing past the end.

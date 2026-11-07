@@ -59,6 +59,9 @@ definitionIn start source line column = unsafePerformIO (definitionAt start (unl
 completions :: Session -> [String] -> Int -> Int -> (Int, [Suggestion])
 completions start source line column = unsafePerformIO (completionsAt start (unlines source) line column)
 
+typed :: [String] -> Int -> Int -> Maybe String
+typed source line column = (\(_, _, _, t) -> t) <$> unsafePerformIO (typeAt initial (unlines source) line column)
+
 offered :: Session -> [String] -> Int -> Int -> [String]
 offered start source line column = map suggestionText (snd (completions start source line column))
 
@@ -80,14 +83,20 @@ listModule = "double = x -> x + x\ninfixr 5 <:>\n(<:>) = x xs -> [x] <> xs\n"
 tests :: [(String, Bool)]
 tests =
   [ ("a clean file has no problems", problems ["f = x -> x + 1", "f 2"] == [])
-  , ("a type error marks its line", problems ["f = x -> x + 1", "y = f true"] == [(2, Nothing, "no instance: Num Bool")])
+  , ("a missing instance is where the dictionary was asked for", problems ["f = x -> x + 1", "y = f true"] == [(2, Just 5, "no instance: Num Bool")])
+  , ("a mismatch is at the argument that does not fit",
+      [(problemLine p, problemColumn p, problemEndColumn p) | p <- check initial "x = stringLength true\n"] == [(1, Just 18, Just 22)])
+  , ("an annotation that does not fit is at its expression",
+      [(problemColumn p, problemEndColumn p) | p <- check initial "x = (true : Int)\n"] == [(Just 6, Just 10)])
+  , ("applying what is not a function is at the application",
+      [(problemColumn p, problemEndColumn p) | p <- check initial "x = true 1\n"] == [(Just 5, Just 11)])
   , ("a parse error has its column, without the excerpt",
       case problems ["x = 1", "z = ("] of
         [(2, Just 6, message)] -> "unexpected end of input" `isPrefixOf` message
         _ -> False)
   , ("bindings carry on to later lines", problems ["f = x -> x", "g = y -> f y", "g 1"] == [])
   -- y is then unbound, so the second line is the external command y.
-  , ("a failed line binds nothing", problems ["y = 1 + true", "y"] == [(1, Nothing, "no instance: Num Bool")])
+  , ("a failed line binds nothing", problems ["y = 1 + true", "y"] == [(1, Just 5, "no instance: Num Bool")])
   , ("a signature waits for its binding", problems ["f : Int -> Int", "f = x -> x", "f true"] /= [])
   , ("a data type declared again is a new type", map (\(line, _, _) -> line) (problems ["data T = A Int", "x = A 1", "data T = A String", "case x of A s -> stringLength s end"]) == [4])
   , ("declarations and let rec", problems ["data Maybe a = Nothing | Just a", "let rec len = m -> case m of Nothing -> 0; Just _ -> 1 end", "len (Just 1)"] == [])
@@ -97,14 +106,14 @@ tests =
   , ("hover: a later binding changes it", hover ["f = 1", "f = true", "f"] 3 1 == Just (3, 1, 2, "f : Bool"))
   , ("hover: a use has the type from before its line", hover ["x = true", "x = if x then 1 else 2"] 2 8 == Just (2, 8, 9, "x : Bool") && hover ["x = true", "x = if x then 1 else 2"] 2 1 == Just (2, 1, 2, "x : Int"))
   , ("hover: a let rec member has its new type", fmap (\(_, _, _, t) -> t) (hover ["let rec f = n -> f n"] 1 18) == Just "f : a -> b")
-  , ("a signature names a class that exists", check initial "bad : Unknown a => a -> a\n" == [Problem 1 Nothing 1 "no class Unknown"])
+  , ("a signature names a class that exists", check initial "bad : Unknown a => a -> a\n" == [Problem 1 Nothing 1 "no class Unknown" Nothing])
   , ("a parse error after a tab is at its character", map problemColumn (check initial "\tx = )\n") == [Just 6])
   , ("hover: a parameter shows nothing", hover ["f = 1", "g = f -> f"] 2 10 == Nothing)
   , ("hover: a builtin and an operator", fmap (\(_, _, _, t) -> t) (hover ["print 1"] 1 3) == Just "print : a -> Comp {console} ()" && fmap (\(_, _, _, t) -> t) (hover ["1 + 2"] 1 3) == Just "(+) : Num a => a -> a -> a")
   , ("hover: nothing on a space or a command", hover ["f 1"] 1 2 == Nothing && hover ["git status"] 1 2 == Nothing)
-  , ("an error in a block marks every line of it", [(problemLine p, problemEndLine p) | p <- check initial (unlines ["f = do", "  print (1 + true)", "end"])] == [(1, 3)])
+  , ("an error in a block is on its own line, not the whole block", [(problemLine p, problemColumn p, problemEndLine p) | p <- check initial (unlines ["f = do", "  print (1 + true)", "end"])] == [(2, Just 10, 2)])
   , ("import: a module's names are known", withModules [("m.lsh", listModule)] (\s -> problemsIn s ["import \"m.lsh\"", "y = double 2"]) == [])
-  , ("import: an imported name has its type", withModules [("m.lsh", listModule)] (\s -> problemsIn s ["import \"m.lsh\"", "y = double true"]) == [(2, Nothing, "no instance: Num Bool")]
+  , ("import: an imported name has its type", withModules [("m.lsh", listModule)] (\s -> problemsIn s ["import \"m.lsh\"", "y = double true"]) == [(2, Just 5, "no instance: Num Bool")]
       && withModules [("m.lsh", listModule)] (\s -> fmap (\(_, _, _, t) -> t) (hoverIn s ["m = import \"m.lsh\"", "m.double 2"] 2 3)) == Just "m.double : Num a => a -> a")
   , ("hover: a field selection is not a prefixed name", fmap (\(_, from, to, _) -> (from, to)) (hover ["r = {x = 1}", "r.x"] 2 1) == Just (1, 2))
   -- Read from the left, 1 <:> 2 would need 2 to be a list.
@@ -184,6 +193,13 @@ tests =
   , ("lenses: a value is pure, and a block is one lens over its lines",
       lensesOf ["1 + 2", "do", "  print 1;", "  echo hi", "end"] == [(1, 1, "pure"), (2, 5, "{exec echo, console}")])
   , ("lenses: a line that fails has none", lensesOf ["y = 1 + true", "print (1 + true)"] == [])
+  , ("hover: a parameter has its type, at a use and at its binder",
+      typed ["g = n -> stringLength n"] 1 23 == Just "n : String" && typed ["g = n -> stringLength n"] 1 5 == Just "n : String")
+  , ("hover: a parameter keeps its class context", typed ["f = x -> x + 1"] 1 10 == Just "x : Num a => a")
+  , ("hover: the inner of two parameters of one name", typed ["f = x -> (x -> stringLength x)"] 1 29 == Just "x : String" && typed ["f = x -> (x -> stringLength x)"] 1 11 == Just "x : String" && typed ["f = x -> (x -> stringLength x)"] 1 5 == Nothing)
+  , ("hover: a pattern variable", typed ["data Box = Box Int", "f = b -> case b of Box v -> v + 1 end"] 2 29 == Just "v : Int")
+  , ("hover: a binder nothing uses shows nothing", typed ["f = x -> 1"] 1 5 == Nothing)
+  , ("hover: a top-level name still has its session type", typed ["f = x -> x", "g = f 1"] 2 5 == Just "f : a -> a")
   ]
 
 main :: IO ()

@@ -21,12 +21,20 @@ building 0.1
 ## When a line fails
 
 The first line that fails stops the script. Its place and message go to
-stderr, and the status is 1:
+stderr, and the status is 1. A type error also shows its line, with a mark
+under the expression it is about:
 
 ```text
+$ cat fail.lsh
+x = 1
+print (x + 2)
+y = x + 1
+print (stringLength x)
 $ lambdash fail.lsh
 3
-fail.lsh:4: type mismatch: Int and Bool
+fail.lsh:4: type mismatch: String and Int
+  print (stringLength x)
+                      ^
 $ echo $?
 1
 ```

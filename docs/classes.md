@@ -12,6 +12,8 @@ f : Eq a => a -> Bool
 {a = true, b = true}
 λ> eq (x -> x) (x -> x)
 no instance: Eq (a -> a)
+  eq (x -> x) (x -> x)
+  ^^
 ```
 
 Operators are ordinary functions with symbol names: `a == b` is `(==) a b`,

@@ -4,7 +4,7 @@ module Main (main) where
 
 import Control.Exception (ErrorCall (..), SomeException, evaluate, toException, try)
 import Control.Monad (unless, when)
-import Data.List (isInfixOf)
+import Data.List (intercalate, isInfixOf)
 import Data.Set qualified as Set
 import Lambdash.Desugar (stripLocations)
 import Lambdash.Complete (Candidate (..), completeField, completeName)
@@ -32,7 +32,7 @@ sessionIO = go initial
     case result of
       Quit -> pure ["<quit>"]
       Continue next out -> (out :) <$> go next ls
-      Failed out -> (out :) <$> go s ls
+      Failed out -> (message out :) <$> go s ls
 
 -- | The prompt after some lines.
 promptAfter :: [String] -> String
@@ -68,7 +68,7 @@ withModules files input = unsafePerformIO $ do
     case result of
       Quit -> pure ["<quit>"]
       Continue next out -> (out :) <$> go next ls
-      Failed out -> (out :) <$> go s ls
+      Failed out -> (message out :) <$> go s ls
 
 -- | Run a script file with these lines, as @lambdash FILE@ does: its
 -- status, what went to stdout, and what went to stderr.
@@ -82,10 +82,18 @@ script trace source = unsafePerformIO $ do
   err <- newIORef []
   status <- runFile (\s -> modifyIORef' out (s :)) (\s -> modifyIORef' err (s :)) trace path initial
   removeFile path
-  (,,) status <$> (reverse <$> readIORef out) <*> (map (fromFile . dropDirectory path) . reverse <$> readIORef err)
+  (,,) status <$> (reverse <$> readIORef out) <*> (map (message . fromFile . dropDirectory path) . reverse <$> readIORef err)
  where
   dropDirectory path line = maybe line id (stripPrefixOf path line)
   stripPrefixOf prefix line = if take (length prefix) line == prefix then Just ("script.lsh" <> drop (length prefix) line) else Nothing
+
+-- | A failure without the two lines that show where a type error is, the
+-- line and a mark under it: the tests of those look at them on their own.
+-- A parse error's own excerpt stays.
+message :: String -> String
+message text = case reverse (lines text) of
+  mark : _ : rest | '^' `elem` mark, all (`elem` (" \t^" :: String)) mark, not (null rest) -> intercalate "\n" (reverse rest)
+  _ -> text
 
 -- | A failure's message without the module's directory: from its last
 -- path part on.
@@ -193,7 +201,7 @@ scripted text after = unsafePerformIO $ do
   (ready, reports) <- runScript path initial
   removeFile path
   shown <- go ready after
-  pure (map (\r -> if take (length path) r == path then drop (length path) r else r) reports, shown)
+  pure (map (\r -> message (if take (length path) r == path then drop (length path) r else r)) reports, shown)
  where
   go _ [] = pure []
   go s (l : ls) = do
@@ -201,7 +209,12 @@ scripted text after = unsafePerformIO $ do
     case result of
       Quit -> pure ["<quit>"]
       Continue next out -> (out :) <$> go next ls
-      Failed out -> (out :) <$> go s ls
+      Failed out -> (message out :) <$> go s ls
+
+-- | Whether a step failed with exactly this text.
+failsWith :: Step -> String -> Bool
+failsWith (Failed text) expected = text == expected
+failsWith _ _ = False
 
 tests :: [(String, Bool)]
 tests =
@@ -302,6 +315,9 @@ tests =
   , ("step: a type query runs nothing and binds nothing", final [":t y -> y", "y"] == "command not found: y")
   , ("step: a checker error", session ["not \"s\""] == ["type mismatch: Bool and String"])
   , ("step: a literal where Bool is wanted", session ["not 1"] == ["no instance: Num Bool"])
+  , ("step: a type error shows its line, with a mark under the expression",
+      unsafePerformIO (step initial "y = 1 + true") `failsWith` "no instance: Num Bool\n  y = 1 + true\n      ^"
+        && unsafePerformIO (step initial "stringLength true") `failsWith` "type mismatch: String and Bool\n  stringLength true\n               ^^^^")
   , ("step: a parse error shows something", not (null (final ["(1"])))
   , ("step: a failed binding binds nothing", final ["x = not 1", "x"] == "command not found: x")
   , ("step: a failed binding keeps the old value", final ["x = 1", "x = not 1", "x"] == "1")

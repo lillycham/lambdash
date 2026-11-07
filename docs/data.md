@@ -45,6 +45,8 @@ T#1
 λ> case x of A s -> stringLength s end
 type mismatch: T#1 and T
   T#1 is an earlier declaration of T
+  case x of A s -> stringLength s end
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
 - Bindings keep the old type, and its constructors and instances go with it.

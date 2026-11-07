@@ -17,6 +17,7 @@ module Lambdash.Navigate
   , inlayHints
   , Lens (..)
   , lenses
+  , typeAt
   ) where
 
 import Control.Exception (IOException, try)
@@ -24,9 +25,9 @@ import Data.Char (isUpper)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
-import Lambdash.Check (Problem, Use (..), identifierChar, operatorChar, useAt, walk)
+import Lambdash.Check (Checked (..), Use (..), hoverAt, identifierChar, operatorChar, useAt, walk)
 import Lambdash.Complete (Candidate (..), completeField, isNameChar, namesStarting)
-import Lambdash.Infer (elaborateRunWith, inferWith)
+import Lambdash.Infer (Scheme (..), elaborateRunWith, inferWith)
 import Lambdash.Parser (reservedNames)
 import Lambdash.Repl (Command (..), Session (..), initial, modulePath, parseCommandWith, renderEffectRow, renderEffectsType, sessionBound)
 import Lambdash.Syntax (Arg (..), Declaration (..), Expr (..), Name, Span (..), patternVars)
@@ -73,8 +74,8 @@ data Entry = Entry
 entries :: Session -> String -> IO [Entry]
 entries start text = map entry <$> walk start text
 
-entry :: (Int, String, Session, Session, Maybe Problem) -> Entry
-entry (n, chunk, before, after, problem) =
+entry :: Checked -> Entry
+entry (Checked n chunk before after problem _) =
   let parsed = either (const Nothing) Just (parseCommandWith (sessionFixities before) (sessionBound before) chunk)
       -- A chunk that fails binds nothing, so it defines nothing.
       defined = case problem of
@@ -297,10 +298,10 @@ completionsAt start text line column = do
   let source = concat (take 1 (drop (line - 1) (lines text)))
       word = reverse (takeWhile isNameChar (reverse (take (column - 1) source)))
       from = column - length word
-      containing = [(c, before) | (n, c, before, _, _) <- walked, n <= line, line < n + length (lines c)]
+      containing = [(c, before) | Checked n c before _ _ _ <- walked, n <= line, line < n + length (lines c)]
       (chunk, session) = case containing of
         found : _ -> found
-        [] -> ("", maybe start (\(_, _, _, after, _) -> after) (lastOf walked))
+        [] -> ("", maybe start checkedAfter (lastOf walked))
       named = [suggest c | c <- namesStarting session word]
       dotted = '.' `elem` word
       fields = [Suggestion t FieldSuggestion (Just h) | Candidate t h <- completeField session word]
@@ -350,7 +351,7 @@ inlayHints start text = do
   walked <- walk start text
   concat <$> mapM hintsOf walked
  where
-  hintsOf walked@(n, chunk, before, _, _) =
+  hintsOf walked@(Checked n chunk before _ _ _) =
     let e = entry walked
         unsigned = [s | s <- entrySymbols e, symbolSort s `elem` [ValueSymbol, FunctionSymbol], Map.notMember (symbolName s) (sessionSignatures before)]
     in case entryCommand e of
@@ -366,7 +367,7 @@ inlayHints start text = do
         then checks before (signature <> "\n" <> chunk)
         else pure False
       pure (Just (Hint (symbolLine s) (symbolTo s) ty (if ok then Just (n, signature <> "\n") else Nothing)))
-  checks before candidate = all (\(_, _, _, _, problem) -> isNothing problem) <$> walk before candidate
+  checks before candidate = all (isNothing . checkedProblem) <$> walk before candidate
 
 -- | A line or block that runs: its first and last lines, and the effects
 -- it may have, as its type gives them, or none.
@@ -383,7 +384,7 @@ data Lens = Lens
 lenses :: Session -> String -> IO [Lens]
 lenses start text = mapMaybe lensOf <$> walk start text
  where
-  lensOf (n, chunk, before, _, Nothing) = do
+  lensOf (Checked n chunk before _ Nothing _) = do
     command <- either (const Nothing) Just (parseCommandWith (sessionFixities before) (sessionBound before) chunk)
     expression <- case command of
       Run e -> Just e
@@ -509,3 +510,37 @@ wordOffsets n text =
   ]
  where
   part ch = identifierChar ch || ch == '.' || ch == '$'
+
+-- | What hover shows: for a name the session knows, as 'hoverAt' does;
+-- for a name the line binds itself, such as a parameter, its type there,
+-- from the types the checker found in the line. On a binder, the type is
+-- that of a use of it, so a binder nothing uses shows nothing.
+typeAt :: Session -> String -> Int -> Int -> IO (Maybe (Int, Int, Int, String))
+typeAt start text line column = do
+  named <- hoverAt start text line column
+  case named of
+    Just found -> pure (Just found)
+    Nothing -> do
+      walked <- walk start text
+      pure $ do
+        use <- useAt walked text line column
+        command <- useCommand use
+        let name = useName use
+            chunk = useChunk use
+            expressions = expressionsOf command
+            bindingFrom offset = fromMaybe Free (listToMaybe [b | e <- expressions, let b = bindingAt chunk name offset e, b /= Free])
+            binding = bindingFrom (offsetIn use)
+            shown ty = (line, useFrom use, useTo use, name <> " : " <> renderEffectsType ty)
+        case binding of
+          Local _ _ -> listToMaybe
+            [ shown ty
+            | (Span from to, ty) <- useTypes use
+            , trim (take (to - from) (drop from chunk)) == name
+            , bindingFrom from == binding
+            ]
+          Unplaced -> Nothing
+          Free -> do
+            Forall _ ty <- Map.lookup name (sessionTypes (useBefore use))
+            pure (shown ty)
+ where
+  trim = reverse . dropWhile (`elem` (" \t\n" :: String)) . reverse
