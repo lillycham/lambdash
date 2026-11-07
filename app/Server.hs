@@ -11,6 +11,7 @@ module Server (serve) where
 
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (toJSON)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Language.LSP.Diagnostics (partitionBySource)
 import Language.LSP.Protocol.Message
@@ -84,6 +85,12 @@ handlers = mconcat
       text <- textOf (toNormalizedUri uri)
       found <- liftIO (lenses (startFor (toNormalizedUri uri)) text)
       respond (Right (InL (concatMap (codeLens uri) found)))
+  -- A hole's fits, as edits that put each one in its place.
+  , requestHandler SMethod_TextDocumentCodeAction $ \(TRequestMessage _ _ _ (CodeActionParams _ _ (TextDocumentIdentifier uri) (Range (Position first _) (Position final _)) _)) respond -> do
+      text <- textOf (toNormalizedUri uri)
+      problems <- liftIO (checkText (startFor (toNormalizedUri uri)) text)
+      let holes = [p | p <- problems, not (null (problemFills p)), let l = fromIntegral (problemLine p - 1), first <= l, l <= final]
+      respond (Right (InL [InR (fillAction uri text p fill) | p <- holes, fill <- problemFills p]))
   , notificationHandler SMethod_TextDocumentDidClose $ \(TNotificationMessage _ _ (DidCloseTextDocumentParams (TextDocumentIdentifier uri))) ->
       publishDiagnostics maxProblems (toNormalizedUri uri) Nothing (partitionBySource [])
   ]
@@ -155,6 +162,24 @@ codeLens uri l =
   ]
  where
   range = Range (Position (fromIntegral (lensFirst l - 1)) 0) (Position (fromIntegral (lensFirst l - 1)) 0)
+
+-- | Put a fit where its hole is.
+fillAction :: Uri -> String -> Problem -> String -> CodeAction
+fillAction uri text p fill = CodeAction
+  { _title = Text.pack ("Fill _ with " <> fill)
+  , _kind = Just CodeActionKind_QuickFix
+  , _diagnostics = Nothing
+  , _isPreferred = Nothing
+  , _disabled = Nothing
+  , _edit = Just (WorkspaceEdit (Just (Map.singleton uri [TextEdit range (Text.pack fill)])) Nothing Nothing)
+  , _command = Nothing
+  , _data_ = Nothing
+  }
+ where
+  source = lineOf text (problemLine p)
+  from = maybe 1 id (problemColumn p)
+  to = maybe (from + 1) id (problemEndColumn p)
+  range = Range (toPosition source (problemLine p) from) (toPosition source (problemLine p) to)
 
 -- | A definition in this file, or in a module's.
 location :: Uri -> Place -> Location

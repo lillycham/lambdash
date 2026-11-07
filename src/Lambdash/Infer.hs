@@ -159,7 +159,11 @@ startingAt n = InferState n Nothing [] Map.empty []
 holesAfter :: Subst -> Infer ()
 holesAfter s = do
   sites <- gets holeSites
-  when (not (null sites)) $
+  when (not (null sites)) $ do
+    -- A class predicate on a known type, such as Integral String, has no
+    -- unknown that a hole could still decide: if no instance gives it, that
+    -- is the line's error, not its holes. Predicates on unknowns wait.
+    _ <- simplify [(n, applyPred s p) | (n, p) <- classPreds s]
     failWith (Holes [Hole place (withContext s ty) (applyEnv s env) | (place, ty, env) <- reverse sites])
 
 -- | A type with a substitution applied, and the class context of its

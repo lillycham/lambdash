@@ -16,7 +16,7 @@ common shared
 library
   import:          shared
   hs-source-dirs:  src
-  exposed-modules: Lambdash, Lambdash.Check, Lambdash.Classes, Lambdash.Complete, Lambdash.Find, Lambdash.Declare, Lambdash.Desugar, Lambdash.Eval, Lambdash.Help, Lambdash.Infer, Lambdash.Lines, Lambdash.Navigate, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.TypeSyntax, Lambdash.Unify
+  exposed-modules: Lambdash, Lambdash.Check, Lambdash.Classes, Lambdash.Complete, Lambdash.Find, Lambdash.Declare, Lambdash.Desugar, Lambdash.Eval, Lambdash.Fill, Lambdash.Help, Lambdash.Infer, Lambdash.Lines, Lambdash.Navigate, Lambdash.Nix, Lambdash.Overlay, Lambdash.Parser, Lambdash.Process, Lambdash.Repl, Lambdash.Runtime, Lambdash.Stream, Lambdash.Syntax, Lambdash.Trust, Lambdash.TypeSyntax, Lambdash.Unify
   c-sources:       cbits/spawn.c
   build-depends:   base, aeson, async, bytestring, containers, directory, filepath, megaparsec, mtl, process, stm, text, transformers, unix
 
@@ -25,7 +25,7 @@ executable lambdash
   hs-source-dirs: app
   main-is:        Main.hs
   other-modules:  Server
-  build-depends:  aeson, base, directory, filepath, isocline, lambdash, lsp, lsp-types, optparse-applicative, text
+  build-depends:  aeson, base, containers, directory, filepath, isocline, lambdash, lsp, lsp-types, optparse-applicative, text
   ghc-options:    -threaded
 
 -- Job-control spike. The threaded RTS is the point of the test.
