@@ -14,11 +14,13 @@ module Lambdash.Fill
   ( Fit (..)
   , fitsFor
   , rankIn
+  , Chain (..)
+  , chainsFor
   ) where
 
 import Data.Char (isAlphaNum, isLetter)
 import Data.Either (isRight)
-import Data.List (sortOn)
+import Data.List (intercalate, isPrefixOf, isSuffixOf, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Lambdash.Infer (Env, Hole (..), InferError (..), Name, Scheme (..), Span (..), ftv, ftvScheme, instantiate, unlocated)
@@ -142,3 +144,100 @@ rankIn session builtins name
   | Map.notMember name session = 0
   | Map.member name builtins && Map.lookup name builtins == Map.lookup name session = 2
   | otherwise = 1
+
+-- | A chain of stages for a pipeline hole: its text, how many steps it
+-- has, and whether a number in it is a stand-in, as the 5 of @take 5@.
+data Chain = Chain
+  { chainText :: String
+  , chainSteps :: Int
+  , chainStandIn :: Bool
+  }
+  deriving (Eq, Show)
+
+-- | How many lines a search may check, and how many steps a chain may have.
+chainChecks, chainDepth :: Int
+chainChecks = 300
+chainDepth = 3
+
+-- | Chains of stages that fill a pipeline hole, shortest first. A chain
+-- grows a step at a time, and the checker tells what comes out of it so
+-- far: the chain is put in the line with a hole after it, and the hole's
+-- type is the answer. A chain is complete when the line checks with it.
+--
+-- A step is a stage the scope has (@sorted@, @unique@, @lines@), one that
+-- takes a number, with 5 standing in for it (@take 5@), one that takes a
+-- function of the items, with a field (@map .name@, @sortedOn .size@), or
+-- a test of the items (@filter isEmpty@). A chain can also end with a fit
+-- for the hole, as 'fitsFor' finds it.
+chainsFor :: (String -> Either InferError a) -> (Name -> Int) -> String -> Hole -> [Chain]
+chainsFor check rank source hole = dedupe (search chainChecks [([], hole)])
+ where
+  Span from to = holeSpan hole
+  -- The line with these steps in the hole, and maybe a hole after them.
+  line steps = take from source <> intercalate " | " steps <> drop to source
+  open steps = line (steps <> ["_"])
+  holeAfter steps = case check (open steps) of
+    Left err | Holes [h] <- unlocated err -> Just h
+    _ -> Nothing
+
+  -- Breadth first: each round extends every chain of the round before.
+  search _ [] = []
+  search budget frontier =
+    let (found, next, spent) = foldl expand ([], [], 0) frontier
+    in found <> if spent >= budget then [] else search (budget - spent) next
+
+  expand (found, next, spent) (steps, h) =
+    let depth = length steps
+        -- A fit for the hole ends the chain: the line checks with it.
+        endings =
+          [ chain (steps <> [fitText fit])
+          | fit <- fitsFor check rank (open steps) h
+          , null (fitHoles fit)
+          , closedOutput h || "." `isPrefixOf` fitText fit
+          ]
+        candidates = if depth < chainDepth then stepsFor h else []
+        complete = [chain (steps <> [s]) | s <- candidates, isRight (check (line (steps <> [s])))]
+        grown = [(steps <> [s], h') | s <- candidates, Just h' <- [holeAfter (steps <> [s])]]
+    in (found <> endings <> complete, next <> grown, spent + 1 + 2 * length candidates)
+
+  chain steps = Chain (intercalate " | " steps) (length steps) (any (" 5" `isSuffixOf`) steps)
+
+  -- A hole whose output nothing decides, as in ls "." | _, takes any
+  -- function of the items: only fields end such a chain.
+  closedOutput h = case bare (holeType h) of
+    TFun _ (TVar _) -> False
+    _ -> True
+
+  -- The steps to try after a hole: what its items allow.
+  stepsFor h =
+    let scope = holeScope h
+        item = case bare (holeType h) of
+          TFun input _ -> Just input
+          _ -> Nothing
+        stages = [name | (name, Forall _ ty) <- Map.toList scope, usable name, isStage (bare ty)]
+        counted = [name <> " 5" | (name, Forall _ ty) <- Map.toList scope, usable name, TFun (TCon "Int") rest <- [bare ty], isStage rest]
+        -- A stage that takes a function of the items gets each field:
+        -- map .name, sortedOn .size, filter .ok.
+        fieldsOf = case item of
+          Just (TRecord row) ->
+            [ name <> " ." <> label
+            | (name, Forall _ ty) <- Map.toList scope, usable name
+            , TFun (TFun _ _) rest <- [bare ty], isStage rest
+            , (label, _) <- recordFields row
+            ]
+          _ -> []
+        tests = ["filter " <> name | (name, Forall _ ty) <- Map.toList scope, usable name, TFun _ (TCon "Bool") <- [bare ty]]
+    in fieldsOf <> sortOn rankOf stages <> counted <> tests
+  rankOf name = (rank name, name)
+  isStage ty = case ty of
+    TStage _ _ -> True
+    _ -> False
+  recordFields (RExtend label ty rest) = (label, ty) : recordFields rest
+  recordFields _ = []
+
+  dedupe = go Set.empty
+   where
+    go _ [] = []
+    go seen (c : cs)
+      | Set.member (chainText c) seen = go seen cs
+      | otherwise = c : go (Set.insert (chainText c) seen) cs

@@ -25,6 +25,7 @@ module Lambdash.Parser
   ( Parser,
     Bound (..),
     isModule,
+    integer,
     reservedNames,
     stringLiteral,
     runIn,

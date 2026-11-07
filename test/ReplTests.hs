@@ -5,6 +5,7 @@ module Main (main) where
 import Control.Exception (ErrorCall (..), SomeException, evaluate, toException, try)
 import Control.Monad (unless, when)
 import Data.List (intercalate, isInfixOf)
+import Data.Maybe (listToMaybe)
 import Data.Set qualified as Set
 import Lambdash.Desugar (stripLocations)
 import Lambdash.Complete (Candidate (..), completeField, completeName)
@@ -330,6 +331,20 @@ tests =
   , ("hole: what fits shows under it, the session's names first",
       lines (final ["title = \"hi\"", "stringLength _"]) !! 3 == "  fits: title, (display _), (max _ _), (min _ _), (show _)")
   , ("hole: a failed binding with a hole binds nothing", final ["x = stringLength _", "x"] == "command not found: x")
+  , ("fill: chains for a pipeline hole, previewed on the real items",
+      let shown = lines (final [":fill each [\"b\", \"a\", \"b\"] | _ | encodeLine"])
+          row name = [l | l <- shown, (" " <> name <> " ") `isInfixOf` (l <> " ")]
+      in any ("b · a" `isInfixOf`) (row "unique") && any ("a · b · b" `isInfixOf`) (row "sorted"))
+  , ("fill: a stand-in number is said to be one",
+      "the 5 in take 5 or drop 5 stands in for a number" `elem` lines (final [":fill each [\"b\", \"a\"] | _ | encodeLine"]))
+  , ("fill: a line without one hole is refused",
+      final [":fill each [\"a\"] | encodeLine"] == ":fill takes a line with one hole between pipes, as in ls \".\" | _ | encodeLine")
+  , ("fill: a source that runs a program does not run",
+      "not run: it needs {exec printf}" `elem` lines (final [":fill printf \"a\" | lines | _ | encodeLine"]))
+  , ("pick: the line goes in the history, and a wrong number fails",
+      let s = after [":fill each [\"b\", \"a\"] | _ | encodeLine", ":pick 1"]
+      in sessionOffer s /= Nothing && sessionOffer s == listToMaybe (sessionFilled s)
+        && final [":fill each [\"b\"] | _ | encodeLine", ":pick 99"] == "no line 99: :fill numbers its lines")
   , ("step: a parse error shows something", not (null (final ["(1"])))
   , ("step: a failed binding binds nothing", final ["x = not 1", "x"] == "command not found: x")
   , ("step: a failed binding keeps the old value", final ["x = 1", "x = not 1", "x"] == "1")

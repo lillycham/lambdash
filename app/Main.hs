@@ -7,7 +7,7 @@ import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notic
 import Options.Applicative (ParserInfo, customExecParser, flag', fullDesc, header, help, helper, info, long, many, metavar, noIntersperse, optional, prefs, short, showHelpOnError, strArgument, switch, (<|>))
 import System.Environment (lookupEnv)
 import Lambdash.Complete (Candidate (..), completeField, completeName, isNameChar)
-import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (Completion), enableAutoTab, enableBraceInsertion, enableMultiline, readlineExMaybe, setHistory)
+import System.Console.Isocline (CompletionEnv, completeFileName, completeWord, Completion (Completion), enableAutoTab, enableBraceInsertion, historyAdd, enableMultiline, readlineExMaybe, setHistory)
 import Foreign.C.String (CString, withCString)
 import System.Exit (ExitCode (..), exitWith)
 import Server (serve)
@@ -187,7 +187,9 @@ loop restoreTerminal before = do
           loop restoreTerminal session
         Continue next output -> do
           unless (null output) (putStrLn output)
-          loop restoreTerminal next
+          -- :pick offers a line: it goes in the history, for ↑.
+          mapM_ historyAdd (sessionOffer next)
+          loop restoreTerminal next {sessionOffer = Nothing}
 
 -- | Tab: the session's names that start with the word before the cursor,
 -- each with its type in the menu, then file names. Paths and the arguments
