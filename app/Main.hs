@@ -2,7 +2,7 @@ module Main (main) where
 
 import Control.Monad (unless, void, when)
 import Lambdash.Nix (withRootDirectory)
-import Lambdash.Process (runAsScript, saveShellTerminal, setupTerminal)
+import Lambdash.Process (currentDirectory, goneNotice, runAsScript, saveShellTerminal, setupTerminal)
 import Lambdash.Repl (Session (..), Step (..), arrive, initial, needsMore, notices, runFile, runScript, sessionPrompt, startupFile, step)
 import Options.Applicative (ParserInfo, customExecParser, flag', fullDesc, header, help, helper, info, long, many, metavar, noIntersperse, optional, prefs, short, showHelpOnError, strArgument, switch, (<|>))
 import System.Environment (lookupEnv)
@@ -12,7 +12,7 @@ import Foreign.C.String (CString, withCString)
 import System.Exit (ExitCode (..), exitWith)
 import Server (serve)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory, getHomeDirectory)
+import System.Directory (createDirectoryIfMissing, getHomeDirectory)
 import System.FilePath ((</>))
 import System.IO (BufferMode (..), hPutStrLn, hSetBuffering, hSetEncoding, stderr, stdin, stdout)
 
@@ -86,7 +86,7 @@ shell options = do
   restoreTerminal <- saveShellTerminal
   withRootDirectory $ \roots -> do
     -- Starting in a directory is arriving in it.
-    cwd <- getCurrentDirectory
+    cwd <- currentDirectory
     (arrived, messages) <- arrive cwd initial {sessionRoots = roots}
     mapM_ putStrLn messages
     -- The startup file runs before the first prompt. --no-init skips it.
@@ -170,7 +170,9 @@ loop restoreTerminal before = do
   -- Background jobs report at the next prompt, as in other shells.
   (session, messages) <- notices before
   mapM_ putStrLn messages
-  cwd <- getCurrentDirectory
+  -- Something may have removed the directory: say so once, and go on in it.
+  goneNotice >>= mapM_ putStrLn
+  cwd <- currentDirectory
   input <- readInput session (sessionPrompt cwd session)
   case input of
     End -> pure ()

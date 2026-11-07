@@ -35,7 +35,7 @@ import Control.Monad (forM_, void)
 import System.Posix.Signals (Handler (..), installHandler, sigINT)
 import Data.List (dropWhileEnd, intercalate, sort, sortBy, transpose)
 import Lambdash.Classes (extendFields, fromIntName, instanceName, recordFields, superField)
-import System.Directory (doesDirectoryExist, getCurrentDirectory, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
+import System.Directory (doesDirectoryExist, getFileSize, getHomeDirectory, listDirectory, pathIsSymbolicLink, setCurrentDirectory)
 import System.Environment (lookupEnv, setEnv)
 import Control.Monad (when)
 import Lambdash.Infer (Arg (..), Env, Expr (..), Lit (..), Name, Scheme (..), mono)
@@ -43,7 +43,8 @@ import Lambdash.Syntax (Pattern (..))
 import Lambdash.Nix (resolveDev, resolvePkg)
 import Lambdash.Overlay
 import Lambdash.Runtime
-import Lambdash.Process (Status (..))
+import Lambdash.Process (Status (..), currentDirectory, directoryGone)
+import System.FilePath (isRelative, joinPath, splitDirectories, (</>))
 import Lambdash.Stream (StreamError (..))
 import Lambdash.Stream (Stage (..), runStagesAll)
 import Lambdash.Lines (runLines)
@@ -297,6 +298,15 @@ expandPath "~" = getHomeDirectory
 expandPath ('~' : '/' : rest) = (<> "/" <> rest) <$> getHomeDirectory
 expandPath path = pure path
 
+-- | A path with its @.@ and @..@ parts resolved as text, as a shell's
+-- logical cd does: @/a/b/../c@ is @/a/c@.
+logical :: FilePath -> FilePath
+logical = joinPath . reverse . foldl step [] . splitDirectories
+ where
+  step (top : rest) ".." | top /= "/" = rest
+  step parts "." = parts
+  step parts part = part : parts
+
 -- | @cd path@. @cd -@ goes back. @PWD@ and @OLDPWD@ follow, as in other
 -- shells, and later spawns inherit the new directory.
 --
@@ -304,13 +314,17 @@ expandPath path = pure path
 -- keeps the new directory.
 changeDirectory :: String -> IO ()
 changeDirectory path = do
-  old <- getCurrentDirectory
-  target <- if path == "-" then maybe old id <$> lookupEnv "OLDPWD" else expandPath path
+  old <- currentDirectory
+  written <- if path == "-" then maybe old id <$> lookupEnv "OLDPWD" else expandPath path
+  -- From a directory that no longer exists, a relative path starts at
+  -- where it was, so cd .. leaves it.
+  gone <- directoryGone
+  let target = if gone && isRelative written then logical (old </> written) else written
   result <- try (setCurrentDirectory target) :: IO (Either IOException ())
   case result of
     Left _ -> throwIO (StreamError ("cd: no such directory: " <> path))
     Right () -> do
-      new <- getCurrentDirectory
+      new <- currentDirectory
       setEnv "OLDPWD" old
       setEnv "PWD" new
 
@@ -393,7 +407,7 @@ foregroundJob job result = do
 warnShadows :: Runtime -> Overlay -> IO ()
 warnShadows runtime layer = do
   state <- readIORef (runtimeState runtime)
-  cwd <- getCurrentDirectory
+  cwd <- currentDirectory
   let outer = withLayers (runtimeLocal runtime) (inScope cwd state)
       inner = withLayers [layer] outer
       fresh = [shadow | shadow <- shadows inner, shadow `notElem` shadows outer]
@@ -520,7 +534,7 @@ builtins =
     useV _ = error "use: the checker passed a non-Overlay"
     -- Active in this directory and below, for the rest of the session.
     useLocalV (VOverlay overlay) = VComp $ \runtime -> do
-      cwd <- getCurrentDirectory
+      cwd <- currentDirectory
       modifyIORef' (runtimeState runtime) (useOverlayIn cwd overlay)
       pure VUnit
     useLocalV _ = error "useLocal: the checker passed a non-Overlay"

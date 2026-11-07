@@ -27,7 +27,7 @@ import System.Posix.IO (stdInput)
 import System.Posix.Terminal (queryTerminal)
 import Data.Map.Strict qualified as Map
 import Lambdash.Overlay
-import System.Directory (getCurrentDirectory)
+import Lambdash.Process (currentDirectory)
 import System.Environment (getEnvironment)
 import System.Posix.Types (ProcessGroupID)
 
@@ -167,5 +167,5 @@ runtimeEnviron :: Runtime -> IO Environ
 runtimeEnviron runtime = do
   base <- Map.fromList <$> getEnvironment
   state <- readIORef (runtimeState runtime)
-  cwd <- getCurrentDirectory
+  cwd <- currentDirectory
   pure (effective base (withLayers (runtimeLocal runtime) (inScope cwd state)))

@@ -1,0 +1,54 @@
+#!/usr/bin/env expect
+# Usage: expect test/directories.exp path/to/lambdash
+# The working directory goes away under the shell, as when a worktree is
+# removed: the shell keeps going, says so once, and cd .. leaves.
+set timeout 5
+set stty_init "sane"
+source [file join [file dirname [info script]] pause.tcl]
+proc fail {what} { puts "\nFAIL: $what"; exit 1 }
+proc see {pattern what} {
+  expect {
+    -re $pattern { puts "\nPASS: $what" }
+    timeout { fail "$what (timeout)" }
+    eof { fail "$what (shell died)" }
+  }
+}
+proc prompt {} { see {λ> (?:\x1b\[[0-9;]*m)*$} "prompt" }
+
+set state [exec mktemp -d]
+set parent [exec mktemp -d]
+set gone "$parent/gone"
+exec mkdir $gone
+spawn env XDG_STATE_HOME=$state XDG_CONFIG_HOME=$state [lindex $argv 0]
+prompt
+
+send "cd $gone\r"
+prompt
+exec rm -rf $gone
+pause 200
+
+send "print 1\r"
+see {1\r\n} "a line runs after the directory has gone"
+see {this directory no longer exists: [^\r\n]*/gone\r\ncd to leave it} "the shell says so"
+prompt
+send "print 2\r"
+expect {
+  -re {no longer exists} { fail "it says so only once" }
+  -re {2\r\n} { puts "\nPASS: it says so only once" }
+  timeout { fail "the next line (timeout)" }
+  eof { fail "the next line (shell died)" }
+}
+prompt
+
+send "cd ..\r"
+prompt
+send "x <- pwd | lines | collect\r"
+prompt
+send "x.items\r"
+see "\\\[\"\[^\"\]*[file tail $parent]\"\\\]" "cd .. goes to the parent"
+prompt
+
+send ":q\r"
+expect eof
+exec rm -rf $state $parent
+puts "\nALL PASSED"

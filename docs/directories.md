@@ -34,6 +34,13 @@ spawns inherit the directory.
 `cd` changes the process at once. A line that fails after a `cd` keeps the
 new directory.
 
+When something removes the directory the shell is in, such as a removed
+git worktree, the shell keeps going. The prompt says once that the
+directory no longer exists. The shell keeps the path it had, so `cd ..`
+and other relative paths start there, as a logical `cd` does in other
+shells. Programs that the shell starts still get the removed directory, so
+`pwd` itself reports that it is gone.
+
 ## `ls`
 
 ```text

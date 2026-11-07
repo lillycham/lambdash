@@ -64,7 +64,7 @@ import Lambdash.Overlay
 import Lambdash.Trust (Source (..), autoName, flakeHash, flakeSource)
 import Lambdash.Trust qualified as Trust
 import Lambdash.Runtime
-import Lambdash.Process (Status (..), giveTerminal, isScript, programExists)
+import Lambdash.Process (Status (..), currentDirectory, giveTerminal, isScript, programExists)
 import Lambdash.Unify
 import Lambdash.Classes (ClassEnv (..), ClassInfo (..), DataInfo (..), Instance (..), addClass, addData, addInstance, instanceName, lookupClass, lookupData, prelude, retireData, retiredName)
 import Lambdash.Help qualified as Help
@@ -74,7 +74,7 @@ import Lambdash.Syntax (Declaration (..), SPred (..), SType (..), renderPattern)
 import Data.Map.Lazy qualified as Map.Lazy
 import Text.Megaparsec ((<|>), eof, errorBundlePretty, lookAhead, many, notFollowedBy, optional, satisfy, some, try)
 import Text.Megaparsec.Char (char)
-import System.Directory (XdgDirectory (..), canonicalizePath, doesFileExist, getCurrentDirectory, getHomeDirectory, getXdgDirectory, makeAbsolute)
+import System.Directory (XdgDirectory (..), canonicalizePath, doesFileExist, getHomeDirectory, getXdgDirectory, makeAbsolute)
 import System.FilePath (takeDirectory, (</>))
 
 import System.Environment (lookupEnv)
@@ -567,7 +567,7 @@ renderPair message left right = flip evalState Map.empty $ do
 committed :: Runtime -> ShellState -> Session -> String -> IO Step
 committed runtime start next text = do
   state <- readIORef (runtimeState runtime)
-  cwd <- getCurrentDirectory
+  cwd <- currentDirectory
   let before = shadows (inScope cwd (sessionShell next))
       warnings = [renderShadow shadow | shadow <- shadows (inScope cwd state), shadow `notElem` before]
       output extra = intercalate "\n" (filter (not . null) (extra <> [text]))
@@ -842,9 +842,9 @@ settle result = case result of
 -- and that is reported after its output.
 step :: Session -> String -> IO Step
 step session input = do
-  before <- getCurrentDirectory
+  before <- currentDirectory
   result <- (stepLine session input >>= settle) `catch` \err -> maybe (throwIO err) (pure . Failed) (lineFailure err)
-  after <- getCurrentDirectory
+  after <- currentDirectory
   -- A script does not activate flakes as it enters directories: what it
   -- does must not depend on which directories the user approved. It can
   -- still use one, with @with .# do ... end@.
@@ -872,7 +872,7 @@ stepLine session input =
       | otherwise -> pure (Continue session {sessionWarned = True}
           "there are jobs: :q again to quit; stopped ones get SIGHUP, running ones keep running")
     Right Allow -> do
-      cwd <- getCurrentDirectory
+      cwd <- currentDirectory
       hasFlake <- doesFileExist (cwd <> "/flake.nix")
       source <- if hasFlake then flakeSource cwd else pure (Left "no flake.nix here")
       case source of
@@ -882,7 +882,7 @@ stepLine session input =
           (next, messages) <- arrive cwd session
           pure (Continue next (intercalate "\n" messages))
     Right Deny -> do
-      cwd <- getCurrentDirectory
+      cwd <- currentDirectory
       Trust.deny cwd
       let shell = sessionShell session
           name = case [n | (n, d) <- Map.toList (scopes shell), d == cwd] of
@@ -956,11 +956,11 @@ stepLine session input =
     Right (TypeOf expression) -> checked (inferWith classes types expression) $ \ty ->
       pure (Continue session (renderEffectsType ty))
     Right (ShowEnv Nothing) -> do
-      cwd <- getCurrentDirectory
+      cwd <- currentDirectory
       pure (Continue session (describeEnvironments cwd (sessionShell session)))
     Right (ShowEnv (Just name)) -> do
       base <- lookupEnv name
-      cwd <- getCurrentDirectory
+      cwd <- currentDirectory
       pure (Continue session (describeVariable base name (inScope cwd (sessionShell session))))
     -- What runs is the elaborated line: each class method gets its
     -- dictionary. A line that runs defaults its ambiguous unknowns to ().
@@ -1173,7 +1173,7 @@ loadModule = loadModuleWith stepLine
 -- from home after `~/`. The file may not exist.
 modulePath :: Session -> FilePath -> IO FilePath
 modulePath session written = do
-  base <- maybe getCurrentDirectory pure (sessionDirectory session)
+  base <- maybe currentDirectory pure (sessionDirectory session)
   home <- getHomeDirectory
   pure $ case written of
     '~' : '/' : rest -> home </> rest
