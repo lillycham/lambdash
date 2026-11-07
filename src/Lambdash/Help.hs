@@ -54,6 +54,7 @@ topics =
       [ "a | b connects bytes between externals, and values between stages."
       , "lines splits bytes; map f, filter p, .field transform; collect ends:"
       , "  {items, status, statuses}.  pipefail s fails on the first failed stage."
+      , "take n, drop n, unique, sorted, sortedOn f, reverse, count: more stages."
       , "each [..] streams a list.   docs/pipelines.md, docs/streams.md" ])
   , ("jobs", unlines'
       [ "e & starts a job and gives a handle: j <- sleep 9 &.  wait j, fg j."
@@ -116,6 +117,13 @@ builtins =
   , ("length", "the number of items in a list")
   , ("sort", "sort a list, stably")
   , ("sortOn", "sort a list by a key, stably")
+  , ("take", "a stage that passes the first n items, then stops what feeds it")
+  , ("drop", "a stage that skips the first n items")
+  , ("unique", "a stage that passes the first of each value, in order")
+  , ("sorted", "a stage that sorts its items, stably, once its input ends")
+  , ("sortedOn", "a stage that sorts its items by a key, stably, once its input ends")
+  , ("reverse", "a stage that gives its items in reverse, once its input ends")
+  , ("count", "a stage that gives the number of its items, once its input ends")
   , ("contains", "contains needle s: whether s contains needle")
   , ("startsWith", "startsWith prefix s")
   , ("isEmpty", "whether a String is empty")

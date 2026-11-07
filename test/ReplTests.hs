@@ -211,6 +211,10 @@ scripted text after = unsafePerformIO $ do
       Continue next out -> (out :) <$> go next ls
       Failed out -> (message out :) <$> go s ls
 
+-- | The items a stream gives, collected.
+items :: String -> String
+items stream = final ["r <- " <> stream <> " | collect", "r.items"]
+
 -- | Whether a step failed with exactly this text.
 failsWith :: Step -> String -> Bool
 failsWith (Failed text) expected = text == expected
@@ -512,6 +516,18 @@ tests =
   , ("class: statuses compare", final ["s <- sh -c \"exit 1\"", "{a = eq s s}"] == "{a = true}")
   , ("class: overlays compare", final ["eq (overlay \"o\" []) (overlay \"o\" [])"] == "true")
   , ("class: an ambiguous type defaults to ()", final ["eq [] []"] == "true")
+  , ("stages: sorted, unique and reverse",
+      items "each [3, 1, 2, 3, 1] | sorted" == "[1, 1, 2, 3, 3]"
+        && items "each [3, 1, 2, 3, 1] | unique" == "[3, 1, 2]"
+        && items "each [3, 1, 2] | reverse" == "[2, 1, 3]")
+  , ("stages: sortedOn a field",
+      final ["r <- each [{n = \"b\", s = 2}, {n = \"a\", s = 9}, {n = \"c\", s = 1}] | sortedOn .s | map .n | collect", "r.items"] == "[\"c\", \"b\", \"a\"]")
+  , ("stages: take and drop, and at the edges",
+      items "each [1, 2, 3] | take 2" == "[1, 2]" && items "each [1, 2, 3] | drop 2" == "[3]"
+        && items "each [1] | take 0" == "[]" && items "each [1] | drop 5" == "[]")
+  , ("stages: count, also of nothing", items "each [7, 8, 9] | count" == "[3]" && items "each [] | count" == "[0]")
+  , ("stages: take stops an endless source", final ["r <- yes | lines | take 3 | collect", "r.items"] == "[\"y\", \"y\", \"y\"]")
+  , ("stages: sorted needs Ord", final ["each [x -> x] | sorted | collect"] == "no instance: Ord (a -> a)")
   , ("class: a method in a pipeline", final ["r <- each [3, 1, 2] | filter (x -> lt x 3) | collect", "r.items"] == "[1, 2]")
   , ("class: a method in a block", fst (prints ["do x <- pure 3; print (lt x 4) end"]) == "true\n")
   , ("class: a method as a value", final ["m = (x -> x) lt", "m \"a\" \"b\""] == "type mismatch: () and String")

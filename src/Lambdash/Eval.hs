@@ -28,6 +28,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.List (isInfixOf, isPrefixOf)
 import Data.IORef
+import Data.Sequence qualified as Seq
 import Control.Concurrent.STM
 import Control.Exception (IOException, SomeException, bracket, displayException, fromException, throwIO, try)
 import Control.Monad (forM_, void)
@@ -411,6 +412,10 @@ builtins =
     ("filter", Forall [t] (TFun (TFun (TVar t) TBool) (TStage (TVar t) (TVar t))), VBuiltin "filter" filterV),
     ("map", Forall [t, u] (TFun (TFun (TVar t) (TVar u)) (TStage (TVar t) (TVar u))), VBuiltin "map" mapV),
     ("collect", Forall [t] (TCollector (TVar t) (TVar t)), VCollector []),
+    ("take", Forall [t] (TFun TInt (TStage (TVar t) (TVar t))), VBuiltin "take" takeV),
+    ("drop", Forall [t] (TFun TInt (TStage (TVar t) (TVar t))), VBuiltin "drop" dropV),
+    ("reverse", Forall [t] (TStage (TVar t) (TVar t)), VStage [TransformStage (\receive emit -> drain receive >>= mapM_ emit . reverse)]),
+    ("count", Forall [t] (TStage (TVar t) TInt), VStage [TransformStage (\receive emit -> drain receive >>= emit . VInt . length)]),
     ("each", Forall [t] (TFun (TList (TVar t)) (TStream noEffects TBytes (TVar t) TUnit)), VBuiltin "each" eachV),
     ("length", Forall [t] (TFun (TList (TVar t)) TInt), VBuiltin "length" lengthV),
     ("contains", mono (TFun TString (TFun TString TBool)), VBuiltin "contains" (stringPredicate isInfixOf)),
@@ -462,6 +467,17 @@ builtins =
       runComp runtime (applyValue next value)
     lineStage receive emit = runLines (fmap (fmap bytes) receive) (emit . VStr)
     mapV function = VStage [MapStage (applyValue function)]
+    -- After n items, take returns: its input closes, so what feeds it stops,
+    -- as yes stops for head.
+    takeV (VInt n) = VStage [TransformStage (\receive emit ->
+      let loop k = when (k > 0) (receive >>= maybe (pure ()) (\value -> emit value >> loop (k - 1)))
+      in loop n)]
+    takeV _ = error "take: the checker passed a non-Int"
+    dropV (VInt n) = VStage [TransformStage (\receive emit ->
+      let skip k = if k > 0 then receive >>= maybe (pure ()) (const (skip (k - 1))) else pass
+          pass = receive >>= maybe (pure ()) (\value -> emit value >> pass)
+      in skip n)]
+    dropV _ = error "drop: the checker passed a non-Int"
     filterV predicate = VStage [TransformStage (\receive emit ->
       let loop = receive >>= maybe (pure ()) (\value -> do
             case applyValue predicate value of
@@ -594,12 +610,24 @@ methods =
     , Forall [Var 0, Var 1] (TClass [IsIn "Ord" (TVar (Var 1))]
         (TFun (TFun (TVar (Var 0)) (TVar (Var 1))) (TFun (TList (TVar (Var 0))) (TList (TVar (Var 0))))))
     , VBuiltin "sortOn" (\d -> VBuiltin "sortOn" (\key -> VBuiltin "sortOn" (\xs -> VList (sortWith d (applyValue key) (items xs))))) )
+  -- The stages that sort wait for the end of their input, as table does.
+  , ( "sorted"
+    , Forall [Var 0] (TClass [IsIn "Ord" (TVar (Var 0))] (TStage (TVar (Var 0)) (TVar (Var 0))))
+    , VBuiltin "sorted" (\d -> VStage [TransformStage (\receive emit -> drain receive >>= mapM_ emit . sortWith d id)]) )
+  , ( "sortedOn"
+    , Forall [Var 0, Var 1] (TClass [IsIn "Ord" (TVar (Var 1))]
+        (TFun (TFun (TVar (Var 0)) (TVar (Var 1))) (TStage (TVar (Var 0)) (TVar (Var 0)))))
+    , VBuiltin "sortedOn" (\d -> VBuiltin "sortedOn" (\key -> VStage [TransformStage (\receive emit -> drain receive >>= mapM_ emit . sortWith d (applyValue key))])) )
+  -- The first of each value, in the order they come. It streams, and keeps
+  -- the values it has seen in order, to find each one in log n.
+  , ( "unique"
+    , Forall [Var 0] (TClass [IsIn "Ord" (TVar (Var 0))] (TStage (TVar (Var 0)) (TVar (Var 0))))
+    , VBuiltin "unique" (\d -> VStage [TransformStage (uniqueStage d)]) )
   ]
  where
   method name cls shape = alias name cls name shape
   tableStage d receive emit = do
-    let drain sofar = receive >>= maybe (pure (reverse sofar)) (\row -> drain (row : sofar))
-    rows <- drain []
+    rows <- drain receive
     case rows of
       VRecord first : _ -> do
         let labels = map fst first
@@ -615,6 +643,23 @@ methods =
     (name, Forall [Var 0] (TClass [IsIn cls (TVar (Var 0))] (shape (TVar (Var 0)))), VBuiltin name (select field))
   items (VList xs) = xs
   items _ = error "sort: the checker passed a non-list"
+  uniqueStage d receive emit = go Seq.empty
+   where
+    go seen = receive >>= maybe (pure ()) (\value -> case place seen value of
+      Nothing -> go seen
+      Just at -> emit value >> go (Seq.insertAt at value seen))
+    -- Where a value goes among the sorted values seen, or nothing if it is
+    -- one of them.
+    place seen value = search 0 (Seq.length seen)
+     where
+      search lo hi
+        | lo >= hi = Just lo
+        | otherwise =
+            let mid = (lo + hi) `div` 2
+            in case compareBy d value (Seq.index seen mid) of
+              EQ -> Nothing
+              LT -> search lo mid
+              GT -> search (mid + 1) hi
   -- A stable sort by the dictionary's lt.
   sortWith d key = sortBy (\a b -> compareBy d (key a) (key b))
   compareBy d a b
@@ -797,3 +842,9 @@ structuralLt a b = case (a, b) of
 -- means. See "Lambdash.Desugar".
 aliases :: [(Name, Scheme, Value)]
 aliases = [('%' : n, t, x) | (n, t, x) <- builtins, n `elem` ["pkg", "use", "useLocal", "not"]]
+
+-- | Every item a stage receives, in order, once its input ends.
+drain :: IO (Maybe a) -> IO [a]
+drain receive = go []
+ where
+  go sofar = receive >>= maybe (pure (reverse sofar)) (go . (: sofar))
