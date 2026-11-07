@@ -100,7 +100,7 @@ infinite expr = case inferIn prelude expr of
 
 tests :: [(String, Bool)]
 tests =
-  [ ("fresh: counts up", runReaderT (evalStateT ((,) <$> fresh <*> fresh) 0) Classes.prelude == Right (t0, t1))
+  [ ("fresh: counts up", runReaderT (evalStateT ((,) <$> fresh <*> fresh) (startingAt 0)) Classes.prelude == Right (t0, t1))
   , ("ftv: an unknown", ftv t0 == Set.fromList [Var 0])
   , ("ftv: both sides of a function", ftv (t0 ~> TInt ~> t1) == Set.fromList [Var 0, Var 1])
   , ("ftv: nothing in a concrete type", ftv (TInt ~> TBool) == Set.empty)

@@ -39,9 +39,16 @@ module Lambdash.Infer
   , elaborateRunWith
   , elaborateInstance
   , elaborateSigned
+  , elaborateTraced
+  , elaborateRunTraced
+  , elaborateSignedTraced
+  , errorSpan
+  , unlocated
+  , InferState
+  , startingAt
   ) where
 
-import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, mapStateT, put, runStateT)
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, gets, modify, put, runStateT)
 import Control.Monad.Trans.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad (foldM, when)
@@ -93,14 +100,81 @@ data InferError
   | -- | @&@ on a computation that changes the directory, which belongs to
     -- the whole shell.
     BackgroundCwd
+  | -- | An error, and the innermost expression it is about.
+    Located Span InferError
   deriving (Eq, Show)
+
+-- | Where an error is, if the checker knows.
+errorSpan :: InferError -> Maybe Span
+errorSpan (Located place _) = Just place
+errorSpan _ = Nothing
+
+-- | An error without its place.
+unlocated :: InferError -> InferError
+unlocated (Located _ err) = unlocated err
+unlocated err = err
+
+-- | An error at a place, unless an inner place already has it.
+locate :: Span -> InferError -> InferError
+locate _ err@(Located _ _) = err
+locate place err = Located place err
 
 -- | The state is the next unused unknown, and the classes and instances in
 -- scope are read-only. Failure is 'InferError': see 'failWith'.
-type Infer = StateT Int (ReaderT ClassEnv (Either InferError))
+type Infer = StateT InferState (ReaderT ClassEnv (Either InferError))
+
+-- | What checking keeps as it goes: the next unknown, the span of the
+-- expression it is in, the type of each span it has finished, and the
+-- span where each dictionary was asked for. The types are as far as the
+-- checker had got: the final substitution finishes them. See 'runTraced'.
+data InferState = InferState
+  { nextVar :: !Int
+  , checkingSpan :: Maybe Span
+  , spanTypes :: [(Span, Ty)]
+  , evidenceSpans :: Map Name Span
+  }
+
+startingAt :: Int -> InferState
+startingAt n = InferState n Nothing [] Map.empty
 
 failWith :: InferError -> Infer a
 failWith = lift . lift . Left
+
+-- | Run an action, and on failure the handler instead.
+catching :: Infer a -> (InferError -> Infer a) -> Infer a
+catching action handler = do
+  state <- get
+  env <- classEnv
+  case runReaderT (runStateT action state) env of
+    Left err -> handler err
+    Right (result, next) -> put next >> pure result
+
+-- | Run an action, and give its failure this place if it has none.
+locatingAt :: Span -> Infer a -> Infer a
+locatingAt place action = action `catching` (failWith . locate place)
+
+-- | Run an action at a dictionary's place, if it has one.
+atEvidence :: Name -> Infer a -> Infer a
+atEvidence evidence action = do
+  place <- gets (Map.lookup evidence . evidenceSpans)
+  maybe action (\p -> locatingAt p action) place
+
+-- | Run a whole check, and give back the type of each span it went
+-- through, finished with the final substitution: the zonk. A type keeps
+-- the class context of the unknowns in it, so the @1@ of @x -> x + 1@
+-- is @Num a => a@.
+runTraced :: ClassEnv -> Int -> Infer (a, Subst) -> Either InferError (a, [(Span, Ty)])
+runTraced classes start go = runReaderT (evalStateT traced (startingAt start)) classes
+ where
+  traced = do
+    (result, solved) <- go
+    seen <- gets spanTypes
+    pure (result, [(place, finished solved ty) | (place, ty) <- reverse seen])
+  finished solved ty =
+    let bare = apply solved ty
+        vars = ftv bare
+        context = nub [p' | (_, p) <- classPreds solved, let p' = applyPred solved p, let pv = predVars p', not (Set.null pv), pv `Set.isSubsetOf` vars]
+    in if null context then bare else TClass context bare
 
 classEnv :: Infer ClassEnv
 classEnv = lift ask
@@ -108,13 +182,17 @@ classEnv = lift ask
 -- | Make an unknown that nothing has used yet.
 fresh :: Infer Ty
 fresh = do
-  n <- get
-  put (n + 1)
+  n <- gets nextVar
+  modify (\st -> st {nextVar = n + 1})
   pure (TVar (Var n))
 
 -- | Run unification in here.
 unifying :: Unifier a -> Infer a
-unifying = mapStateT (lift . either (Left . Unify) Right)
+unifying u = do
+  state <- get
+  case runStateT u (nextVar state) of
+    Left err -> failWith (Unify err)
+    Right (result, next) -> put state {nextVar = next} >> pure result
 
 -- | The unknowns that appear in a type.
 --
@@ -272,7 +350,12 @@ infer env (EApp e1 e2) = do
   (s2, t2, e2') <- infer (applyEnv s1 env) e2
   tv <- fresh
   let t1' = apply s2 t1
-  s3 <- unifying (unify t1' (TFun t2 tv))
+      -- When the function is known to be one, a mismatch is the argument
+      -- that does not fit it. Otherwise it is the application.
+      blame = case (t1', e2) of
+        (TFun _ _, ELoc place _) -> locatingAt place
+        _ -> id
+  s3 <- blame (unifying (unify t1' (TFun t2 tv)))
   let s_final = s3 `compose` s2 `compose` s1
   pure (s_final, apply s3 tv, EApp e1' e2')
 
@@ -439,7 +522,12 @@ infer env (EAnn e written) = do
   let (bound, annotated) = writtenType [] written
   t <- unifying (instantiate (Forall bound annotated))
   (s1, te, e') <- infer env e
-  s2 <- fitting (apply s1 te) (apply s1 t)
+  -- What does not fit the written type is the expression, not the
+  -- parentheses around it.
+  let blame = case e of
+        ELoc place _ -> locatingAt place
+        _ -> id
+  s2 <- blame (fitting (apply s1 te) (apply s1 t))
   pure (s2 `compose` s1, apply s2 (apply s1 t), e')
 
 -- Both branches have one type, except their rows: two computations, jobs
@@ -485,7 +573,10 @@ infer env (ECase scrutinee arms) = do
 
 -- A location changes nothing about the type.
 infer env (ELoc location e) = do
-  (s, t, e') <- infer env e
+  outer <- gets checkingSpan
+  modify (\st -> st {checkingSpan = Just location})
+  (s, t, e') <- locatingAt location (infer env e)
+  modify (\st -> st {checkingSpan = outer, spanTypes = (location, t) : spanTypes st})
   pure (s, t, ELoc location e')
 
 -- Run the first, then the rest, with the union of their rows. Like a lambda
@@ -739,9 +830,13 @@ inferRun env e = do
 -- | A name for the dictionary of one predicate. No identifier can spell it.
 freshEvidence :: Infer Name
 freshEvidence = do
-  n <- get
-  put (n + 1)
-  pure ("%d" <> show n)
+  n <- gets nextVar
+  let evidence = "%d" <> show n
+  modify (\st -> st
+    { nextVar = n + 1
+    , evidenceSpans = maybe (evidenceSpans st) (\p -> Map.insert evidence p (evidenceSpans st)) (checkingSpan st)
+    })
+  pure evidence
 
 -- | Generalise a @let@ binding over the unknowns the environment does not
 -- fix, and over the dictionaries its scheme needs. Predicates that mention
@@ -780,7 +875,9 @@ simplify [] = pure ([], [])
 simplify ((evidence, IsIn cls ty) : rest) = do
   (bindings, residual) <- simplify rest
   env <- classEnv
-  case ty of
+  -- A missing instance is where its dictionary was asked for. One that a
+  -- dictionary needs, such as Show a for Show [a], is there too.
+  atEvidence evidence $ case ty of
     TVar _ -> pure (bindings, (evidence, IsIn cls ty) : residual)
     -- A record is an instance when every field is, and an open tail is a
     -- predicate on the tail: Eq {a : Int | r} needs Eq Int and Eq { | r}.
@@ -904,18 +1001,14 @@ defaultPreds preds = do
   (bindings, residual) <- simplify defaulted `orElse` preds
   case residual of
     [] -> pure (bindings, fill)
-    (_, p) : _ -> failWith ((Ambiguous p))
+    (n, p) : _ -> atEvidence n (failWith (Ambiguous p))
  where
   -- A candidate that fails gives an ambiguity, not a missing instance.
-  orElse action original = do
-    state <- get
-    env <- classEnv
-    case runReaderT (runStateT action state) env of
-      Left (NoInstance _) -> case original of
-        (_, p) : _ -> failWith ((Ambiguous p))
-        [] -> pure ([], [])
-      Left err -> failWith (err)
-      Right (result, next) -> put next >> pure result
+  orElse action original = action `catching` \err -> case unlocated err of
+    NoInstance _ -> case original of
+      (n, p) : _ -> atEvidence n (failWith (Ambiguous p))
+      [] -> pure ([], [])
+    _ -> failWith err
 
 -- | The external commands that an expression names, also under lambdas.
 commands :: Expr -> [Name]
@@ -951,12 +1044,15 @@ elaborateIn :: Mode -> Env -> Expr -> Either InferError (Ty, Expr)
 elaborateIn = elaborateWith prelude
 
 elaborateWith :: ClassEnv -> Mode -> Env -> Expr -> Either InferError (Ty, Expr)
-elaborateWith classes mode env expr = runReaderT (evalStateT go (nextUnknown env)) classes
- where
-  go = do
-    (s, t, code) <- infer env expr
-    (solved, ty) <- finish env s t
-    resolveClasses mode (isLambda expr) solved ty code
+elaborateWith classes mode env expr = fst <$> elaborateTraced classes mode env expr
+
+-- | 'elaborateWith', and the type of each span of the expression.
+elaborateTraced :: ClassEnv -> Mode -> Env -> Expr -> Either InferError ((Ty, Expr), [(Span, Ty)])
+elaborateTraced classes mode env expr = runTraced classes (nextUnknown env) $ do
+  (s, t, code) <- infer env expr
+  (solved, ty) <- finish env s t
+  elaborated <- resolveClasses mode (isLambda expr) solved ty code
+  pure (elaborated, solved)
 
 checkedConstraints :: Subst -> Infer Subst
 checkedConstraints = lift . lift . either (Left . Unify) Right . solveConstraints
@@ -984,7 +1080,11 @@ elaborateRunIn :: Env -> Expr -> Either InferError (Ty, Ty, Expr)
 elaborateRunIn = elaborateRunWith prelude
 
 elaborateRunWith :: ClassEnv -> Env -> Expr -> Either InferError (Ty, Ty, Expr)
-elaborateRunWith classes env expr = runReaderT (evalStateT go (nextUnknown env)) classes
+elaborateRunWith classes env expr = fst <$> elaborateRunTraced classes env expr
+
+-- | 'elaborateRunWith', and the type of each span of the expression.
+elaborateRunTraced :: ClassEnv -> Env -> Expr -> Either InferError ((Ty, Ty, Expr), [(Span, Ty)])
+elaborateRunTraced classes env expr = runTraced classes (nextUnknown env) go
  where
   go = do
     (s1, t, code) <- infer env expr
@@ -1004,9 +1104,10 @@ elaborateRunWith classes env expr = runReaderT (evalStateT go (nextUnknown env))
     (_, result) <- finish env s2 resultTy
     -- Defaulting chooses for the action and its result alike.
     (both, code') <- resolveClasses Defaulting False solved (TFun actionTy result) code
-    pure $ case both of
-      TFun actionTy' result' -> (actionTy', result', code')
-      _ -> (actionTy, result, code')
+    let elaborated = case both of
+          TFun actionTy' result' -> (actionTy', result', code')
+          _ -> (actionTy, result, code')
+    pure (elaborated, solved)
 
 -- | Check an instance declaration, and elaborate its dictionary: a record of
 -- its methods and of its superclasses' dictionaries, under a lambda for each
@@ -1019,7 +1120,7 @@ elaborateRunWith classes env expr = runReaderT (evalStateT go (nextUnknown env))
 -- says. Every predicate a method needs must follow from an instance or from
 -- the context, as must each superclass of the head.
 elaborateInstance :: ClassEnv -> Env -> Instance -> Ty -> [(String, Expr)] -> Either InferError Expr
-elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT go start) classes
+elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT go (startingAt start)) classes
  where
   cls = instClass inst
   start = maximum (nextUnknown env : [n + 1 | Var n <- Set.toList (ftv headTy)])
@@ -1089,7 +1190,11 @@ elaborateInstance classes env inst headTy definitions = runReaderT (evalStateT g
 -- Record tails are rigid too. Effect rows stay flexible: the binding's own
 -- effects fill them in, so the preflight still sees its commands.
 elaborateSigned :: ClassEnv -> Env -> ([SPred], SType) -> Expr -> Either InferError (Ty, Expr)
-elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go start) classes
+elaborateSigned classes env signature expr = fst <$> elaborateSignedTraced classes env signature expr
+
+-- | 'elaborateSigned', and the type of each span of the expression.
+elaborateSignedTraced :: ClassEnv -> Env -> ([SPred], SType) -> Expr -> Either InferError ((Ty, Expr), [(Span, Ty)])
+elaborateSignedTraced classes env (context, written) expr = runTraced classes start go
  where
   (bound, signature) = writtenType context written
   start = maximum (nextUnknown env : [n + 1 | Var n <- bound])
@@ -1126,7 +1231,7 @@ elaborateSigned classes env (context, written) expr = runReaderT (evalStateT go 
     (defaulted, chosen) <- defaultPreds (filter (not . onRigid) residual)
     let final = apply chosen ty
         shown = if null givens then final else TClass (map snd givens) final
-    pure (shown, foldr ELam (wrapLets (resolved <> defaulted <> bindings) code) (map fst givens))
+    pure ((shown, foldr ELam (wrapLets (resolved <> defaulted <> bindings) code) (map fst givens)), solved)
   isVar (TVar _) = True
   isVar _ = False
   isRowVar (RVar _) = True

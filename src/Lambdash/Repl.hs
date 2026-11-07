@@ -16,6 +16,7 @@ module Lambdash.Repl
   , renderEffectsType
   , renderEffectRow
   , renderError
+  , renderErrorIn
   , writtenCheck
   , Step (..)
   , step
@@ -38,7 +39,7 @@ import Data.Bifunctor (first)
 import Data.Char (chr, isAlphaNum, ord)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.List (intercalate, isPrefixOf, nub, partition)
+import Data.List (dropWhileEnd, intercalate, isPrefixOf, nub, partition)
 import Control.Concurrent.STM
 import Control.Exception (ArithException, ErrorCall (..), IOException, PatternMatchFail (..), SomeException, catch, fromException, throwIO)
 import System.Exit (ExitCode (..))
@@ -475,7 +476,27 @@ renderRow (RExtend label ty rest) = do
 -- > type mismatch: Int and Bool
 -- > infinite type: a and a -> b
 -- > no field: nmae
+-- | An error, and when the checker knows where it is, the line it is on
+-- with a mark under the expression:
+--
+-- > no instance: Num Bool
+-- >   y = 1 + true
+-- >       ^
+renderErrorIn :: String -> InferError -> String
+renderErrorIn source err = case errorSpan err of
+  Nothing -> renderError err
+  Just (Span from to) ->
+    let before = take from source
+        lineStart = from - length (takeWhile (/= '\n') (reverse before))
+        line = takeWhile (/= '\n') (drop lineStart source)
+        text = takeWhile (/= '\n') (take (to - from) (drop from source))
+        width = max 1 (length (dropWhileEnd (`elem` (" \t" :: String)) text))
+        -- A tab before the mark is a tab under it too, so the mark lines up.
+        pad = map (\c -> if c == '\t' then '\t' else ' ') (take (from - lineStart) line)
+    in renderError err <> "\n  " <> line <> "\n  " <> pad <> replicate width '^'
+
 renderError :: InferError -> String
+renderError (Located _ err) = renderError err
 renderError (Unbound name) = "unbound name: " <> name
 renderError (NoInstance p) = "no instance: " <> evalState (renderPred p) Map.empty
 renderError (Ambiguous p) = "ambiguous type: " <> evalState (renderPred p) Map.empty
@@ -962,7 +983,7 @@ stepLine session input =
     values = sessionValues session
     start = sessionShell session
     checked result onSuccess = case result of
-      Left err -> pure (Failed (renderError err))
+      Left err -> pure (Failed (renderErrorIn input err))
       Right ty -> onSuccess ty
     -- Generalising after a run is sound while no value can be mutable. A
     -- mutable reference would need a value restriction here.

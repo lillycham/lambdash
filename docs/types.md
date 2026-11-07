@@ -51,6 +51,8 @@ in OCaml:
 Int -> Int
 λ> (true : Int)
 type mismatch: Bool and Int
+  (true : Int)
+   ^^^^
 ```
 
 ## Signatures: `f : t`, then `f = e`

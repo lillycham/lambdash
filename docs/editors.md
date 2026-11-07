@@ -8,8 +8,11 @@ flake activates and no file changes.
 ## What it reports
 
 - A parse error, at its line and column.
-- A type error, on the whole of its line, or of its block. The checker does
-  not keep locations in its errors yet.
+- A type error, under the expression it is about. A mismatch is under the
+  argument that does not fit, or under the expression that does not fit its
+  annotation. A missing instance, such as `Num Bool`, is under the use
+  that asked for it: the `1` of `1 + true`. An error the checker cannot
+  place, such as a failed `import`, is on its whole line or block.
 
 ## Hover
 
@@ -17,9 +20,13 @@ Hover on a name to see its type at that point in the file, as `:t` shows
 it: a later binding of the same name changes it. A name that a line uses
 has the type it had before that line, so in `x = if x then 1 else 2` the
 `x` on the right is the earlier one. The `x` on the left, where the line
-binds it, has the new type. A name that its own line binds, such as a
-lambda's parameter or a pattern variable, shows nothing for now. Hover has
-no types for parts of an expression yet.
+binds it, has the new type.
+
+A name that its own line binds, such as a lambda's parameter, a `let`, a
+pattern variable or an `x <- e`, shows its type in that line, with its
+class context: in `f = x -> x + 1`, `x` is `Num a => a`. On the binder
+itself, the type comes from a use of it, so a binder that nothing uses shows
+nothing. Hover shows names only, not other parts of an expression.
 
 Columns count characters. The server converts them to the UTF-16 units of
 the protocol, so a line with a tab or an emoji puts each mark in its place.

@@ -29,6 +29,8 @@ end
 
   ```text
   /home/me/.config/lambdash/init.lsh:2: type mismatch: Int and Bool
+    y = x + true
+            ^^^^
   ```
 
 - `:q` ends the file, not the shell.
