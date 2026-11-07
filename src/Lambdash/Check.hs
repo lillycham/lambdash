@@ -22,13 +22,12 @@ module Lambdash.Check
 import Control.Exception (IOException, try)
 import Data.Char (isAlphaNum, isDigit, isLetter)
 import Data.List (intercalate)
-import Data.Map.Lazy qualified as Map.Lazy
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Lambdash.Eval (Value)
 import Lambdash.Infer
 import Lambdash.Parser (Bound (..))
-import Lambdash.Repl (Command (..), Session (..), Step (..), declareIn, loadModuleWith, mergeModule, needsMore, parseCommandWith, renderEffectsType, renderError, sessionBound, writtenCheck)
+import Lambdash.Fill (Fit (..), fitsFor, rankIn)
+import Lambdash.Repl (Command (..), Session (..), Step (..), checkLine, checkLineText, initial, loadModuleWith, mergeModule, needsMore, parseCommandWith, renderEffectsType, renderError, sessionBound)
 import Lambdash.Syntax (patternVars)
 import Lambdash.Unify (Ty)
 
@@ -42,6 +41,8 @@ data Problem = Problem
   , problemMessage :: String
   , -- | With a column, the column after the problem on its last line.
     problemEndColumn :: Maybe Int
+  , -- | For a hole, the texts that fit it, best first.
+    problemFills :: [String]
   }
   deriving (Eq, Show)
 
@@ -73,12 +74,12 @@ walk start = go start . chunks
   -- could place. Any other is the whole chunk.
   locate n chunk (Left (line, column, message)) =
     let text = concat (take 1 (drop (line - 1) (lines chunk)))
-    in [Problem (n + line - 1) (Just (characterColumn text column)) (n + line - 1) message Nothing]
+    in [Problem (n + line - 1) (Just (characterColumn text column)) (n + line - 1) message Nothing []]
   locate n chunk (Right found) = map (placed n chunk) found
-  placed n chunk (Just place, message) =
+  placed n chunk (Just place, message, fills) =
     let (fromLine, fromColumn, toLine, toColumn) = spanPlace chunk place
-    in Problem (n + fromLine - 1) (Just fromColumn) (n + toLine - 1) message (Just toColumn)
-  placed n chunk (Nothing, message) = Problem n Nothing (n + length (lines chunk) - 1) message Nothing
+    in Problem (n + fromLine - 1) (Just fromColumn) (n + toLine - 1) message (Just toColumn) fills
+  placed n chunk (Nothing, message, fills) = Problem n Nothing (n + length (lines chunk) - 1) message Nothing fills
 
 -- | A chunk of a file, checked: its first line, its text, the sessions
 -- before and after it, its problems, and the type of each span the checker
@@ -265,7 +266,7 @@ locals parsed = case parsed of
 
 -- | One chunk: the session after it, or what is wrong. A parse error has a
 -- line and column in the chunk. An import that fails is wrong on its line.
-checkChunk :: Session -> String -> IO (Either (Either (Int, Int, String) [(Maybe Span, String)]) (Session, [(Span, Ty)]))
+checkChunk :: Session -> String -> IO (Either (Either (Int, Int, String) [(Maybe Span, String, [String])]) (Session, [(Span, Ty)]))
 checkChunk session chunk =
   case parseCommandWith (sessionFixities session) (sessionBound session) chunk of
     Left err -> pure (Left (Left (parseError err)))
@@ -274,15 +275,22 @@ checkChunk session chunk =
       -- a problem too, and not the end of the server.
       loaded <- try (loadModuleWith checkStep session path)
       pure $ case loaded of
-        Left (err :: IOException) -> Left (Right [(Nothing, show err)])
-        Right (Left message) -> Left (Right [(Nothing, message)])
+        Left (err :: IOException) -> Left (Right [(Nothing, show err, [])])
+        Right (Left message) -> Left (Right [(Nothing, message, [])])
         Right (Right found) -> Right (fst (mergeModule alias found session), [])
     Right parsed -> pure (either (Left . Right . problemsOf) Right (checkLine session parsed))
  where
-  -- Each hole is a problem of its own, at its place, with its type.
+  -- Each hole is a problem of its own, at its place, with its type and
+  -- what fits it.
   problemsOf err = case unlocated err of
-    Holes holes -> [(Just (holeSpan hole), "hole: " <> renderEffectsType (holeType hole)) | hole <- holes]
-    _ -> [(errorSpan err, renderError err)]
+    Holes holes ->
+      [ (Just (holeSpan hole), "hole: " <> renderEffectsType (holeType hole) <> shown fills, fills)
+      | hole <- holes
+      , let fills = map fitText (take 12 (fitsFor (checkLineText session) (rankIn (sessionTypes session) (sessionTypes initial)) chunk hole))
+      ]
+    _ -> [(errorSpan err, renderError err, [])]
+  shown [] = ""
+  shown fills = "\nfits: " <> intercalate ", " (take 6 fills) <> (if length fills > 6 then ", …" else "")
 
 -- | A module's definition, for 'loadModuleWith': checked as a line of the
 -- file is, so its value is a placeholder that nothing asks for.
@@ -292,51 +300,6 @@ checkStep session chunk = pure $
     Left err -> Failed err
     Right parsed -> either (Failed . renderError) ((`Continue` "") . fst) (checkLine session parsed)
 
--- | One parsed line, other than an import: the session after it, and the
--- type of each span of the line.
-checkLine :: Session -> Command -> Either InferError (Session, [(Span, Ty)])
-checkLine session = typed
- where
-  types = sessionTypes session
-  classes = sessionClasses session
-  typed parsed = case parsed of
-    Run expression -> (session,) . snd <$> elaborateTraced classes Defaulting types expression
-    TypeOf expression -> (session,) . snd <$> elaborateTraced classes Showing types expression
-    ShowElab _ expression -> (session,) . snd <$> elaborateTraced classes Defaulting types expression
-    Bind name expression -> do
-      ((ty, _), spans) <- maybe (elaborateTraced classes Generalising types expression)
-        (\sig -> elaborateSignedTraced classes types sig expression)
-        (Map.lookup name (sessionSignatures session))
-      pure (bind name ty (unsigned name session), spans)
-    -- Each member checks the whole group, so the first gives every span.
-    BindRec group -> do
-      done <- traverse (\(name, _) -> (,) name <$> maybe
-        (elaborateTraced classes Generalising types (ELetRec group (EVar name)))
-        (\sig -> elaborateSignedTraced classes types sig (ELetRec group (EVar name)))
-        (Map.lookup name (sessionSignatures session))) group
-      pure ( foldl (\now (name, ((ty, _), _)) -> bind name ty (unsigned name now)) session done
-           , concat (take 1 [spans | (_, (_, spans)) <- done]) )
-    BindRun name expression -> do
-      ((_, ty, _), spans) <- elaborateRunTraced classes types expression
-      pure (bind name ty session, spans)
-    Declare written -> (,[]) . fst <$> declareIn session written
-    -- As at the prompt: a signature that names no class, or constrains
-    -- another unknown, is wrong where it is written.
-    Signature name context written -> case writtenCheck classes context written of
-      Just problem -> Left (BadDeclaration problem)
-      Nothing -> pure (session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)}, [])
-    SetFixity fixity names ->
-      pure (session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names}, [])
-    _ -> pure (session, [])
-  -- Only the type matters here. The value is never asked for, because
-  -- nothing evaluates.
-  bind name ty now = now
-    { sessionTypes = Map.insert name (generalise (sessionTypes now) ty) (sessionTypes now)
-    , sessionValues = Map.Lazy.insert name unevaluated (sessionValues now)
-    }
-  unsigned name now = now {sessionSignatures = Map.delete name (sessionSignatures now)}
-  unevaluated :: Value
-  unevaluated = error "Lambdash.Check: a checked file never evaluates"
 
 -- | Megaparsec's report starts @<input>:LINE:COLUMN:@. The rest is the
 -- message, with the source line and a caret.

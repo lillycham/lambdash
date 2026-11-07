@@ -17,6 +17,8 @@ module Lambdash.Repl
   , renderEffectRow
   , renderError
   , renderErrorIn
+  , checkLine
+  , checkLineText
   , writtenCheck
   , Step (..)
   , step
@@ -38,6 +40,7 @@ import Control.Monad.Trans.State.Strict (State, evalState, get, put)
 import Data.Bifunctor (first)
 import Data.Char (chr, isAlphaNum, ord)
 import Data.Map.Strict qualified as Map
+import Lambdash.Fill (Fit (..), fitsFor, rankIn)
 import Data.Set qualified as Set
 import Data.List (dropWhileEnd, intercalate, isPrefixOf, nub, partition)
 import Control.Concurrent.STM
@@ -488,6 +491,17 @@ renderErrorIn source (Holes holes) =
 renderErrorIn source err = case errorSpan err of
   Nothing -> renderError err
   Just place -> renderError err <> marked source place
+
+-- | An error in a line at the prompt, as 'renderErrorIn' shows it. A hole
+-- also shows what fits it: names first, then refinements, up to six.
+reportIn :: Session -> String -> InferError -> String
+reportIn session source err = case unlocated err of
+  Holes holes -> intercalate "\n" [holeLine hole <> marked source (holeSpan hole) <> fitsLine (fitsOf hole) | hole <- holes]
+  _ -> renderErrorIn source err
+ where
+  fitsOf = fitsFor (checkLineText session) (rankIn (sessionTypes session) (sessionTypes initial)) source
+  fitsLine [] = ""
+  fitsLine fits = "\n  fits: " <> intercalate ", " (map fitText (take 6 fits)) <> (if length fits > 6 then ", …" else "")
 
 -- | What a hole would take.
 holeLine :: Hole -> String
@@ -995,7 +1009,7 @@ stepLine session input =
     values = sessionValues session
     start = sessionShell session
     checked result onSuccess = case result of
-      Left err -> pure (Failed (renderErrorIn input err))
+      Left err -> pure (Failed (reportIn session input err))
       Right ty -> onSuccess ty
     -- Generalising after a run is sound while no value can be mutable. A
     -- mutable reference would need a value restriction here.
@@ -1399,3 +1413,57 @@ foundMessage session found = intercalate "\n" (map line shown <> more)
     displayName name <> " : " <> typeOf name <> (if reordered then "   (arguments in another order)" else "")
   typeOf name = either (const "?") renderEffectsType
     (inferWith (sessionClasses session) (sessionTypes session) (EVar name))
+
+-- | One parsed line, other than an import: the session after it, and the
+-- type of each span of the line.
+checkLine :: Session -> Command -> Either InferError (Session, [(Span, Ty)])
+checkLine session = typed
+ where
+  types = sessionTypes session
+  classes = sessionClasses session
+  typed parsed = case parsed of
+    Run expression -> (session,) . snd <$> elaborateTraced classes Defaulting types expression
+    TypeOf expression -> (session,) . snd <$> elaborateTraced classes Showing types expression
+    ShowElab _ expression -> (session,) . snd <$> elaborateTraced classes Defaulting types expression
+    Bind name expression -> do
+      ((ty, _), spans) <- maybe (elaborateTraced classes Generalising types expression)
+        (\sig -> elaborateSignedTraced classes types sig expression)
+        (Map.lookup name (sessionSignatures session))
+      pure (bound name ty (unsigned name session), spans)
+    -- Each member checks the whole group, so the first gives every span.
+    BindRec group -> do
+      done <- traverse (\(name, _) -> (,) name <$> maybe
+        (elaborateTraced classes Generalising types (ELetRec group (EVar name)))
+        (\sig -> elaborateSignedTraced classes types sig (ELetRec group (EVar name)))
+        (Map.lookup name (sessionSignatures session))) group
+      pure ( foldl (\now (name, ((ty, _), _)) -> bound name ty (unsigned name now)) session done
+           , concat (take 1 [spans | (_, (_, spans)) <- done]) )
+    BindRun name expression -> do
+      ((_, ty, _), spans) <- elaborateRunTraced classes types expression
+      pure (bound name ty session, spans)
+    Declare written -> (,[]) . fst <$> declareIn session written
+    -- As at the prompt: a signature that names no class, or constrains
+    -- another unknown, is wrong where it is written.
+    Signature name context written -> case writtenCheck classes context written of
+      Just problem -> Left (BadDeclaration problem)
+      Nothing -> pure (session {sessionSignatures = Map.insert name (context, written) (sessionSignatures session)}, [])
+    SetFixity fixity names ->
+      pure (session {sessionFixities = foldr (`Map.insert` fixity) (sessionFixities session) names}, [])
+    _ -> pure (session, [])
+  -- Only the type matters here. The value is never asked for, because
+  -- nothing evaluates.
+  bound name ty now = now
+    { sessionTypes = Map.insert name (generalise (sessionTypes now) ty) (sessionTypes now)
+    , sessionValues = Map.Lazy.insert name unevaluated (sessionValues now)
+    }
+  unsigned name now = now {sessionSignatures = Map.delete name (sessionSignatures now)}
+  unevaluated :: Value
+  unevaluated = error "checkLine: a checked line never evaluates"
+
+-- | Whether a line of text checks in a session, as a line of a file does:
+-- the session after it, or what is wrong. An import is not checked here.
+checkLineText :: Session -> String -> Either InferError (Session, [(Span, Ty)])
+checkLineText session text = case parseCommandWith (sessionFixities session) (sessionBound session) text of
+  Left err -> Left (BadDeclaration err)
+  Right (Import _ _) -> Right (session, [])
+  Right parsed -> checkLine session parsed

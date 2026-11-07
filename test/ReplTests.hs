@@ -323,10 +323,12 @@ tests =
       unsafePerformIO (step initial "y = 1 + true") `failsWith` "no instance: Num Bool\n  y = 1 + true\n      ^"
         && unsafePerformIO (step initial "stringLength true") `failsWith` "type mismatch: String and Bool\n  stringLength true\n               ^^^^")
   , ("hole: the line does not run, and shows what would fit",
-      unsafePerformIO (step initial "stringLength _") `failsWith` "hole: String\n  stringLength _\n               ^")
+      unsafePerformIO (step initial "stringLength _") `failsWith` "hole: String\n  stringLength _\n               ^\n  fits: (display _), (max _ _), (min _ _), (show _)")
   , ("hole: _ is still a lambda's parameter and a pattern", session ["(_ -> 1) 2", "case 3 of _ -> 4 end"] == ["1", "4"])
   , ("hole: a stage between pipes is a function of the items",
-      message (final ["each [1, 2] | _ | encodeLine"]) == "hole: Num a => a -> String")
+      takeWhile (/= '\n') (final ["each [1, 2] | _ | encodeLine"]) == "hole: Num a => a -> String")
+  , ("hole: what fits shows under it, the session's names first",
+      lines (final ["title = \"hi\"", "stringLength _"]) !! 3 == "  fits: title, (display _), (max _ _), (min _ _), (show _)")
   , ("hole: a failed binding with a hole binds nothing", final ["x = stringLength _", "x"] == "command not found: x")
   , ("step: a parse error shows something", not (null (final ["(1"])))
   , ("step: a failed binding binds nothing", final ["x = not 1", "x"] == "command not found: x")

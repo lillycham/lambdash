@@ -68,6 +68,10 @@ offered start source line column = map suggestionText (snd (completions start so
 lensesOf :: [String] -> [(Int, Int, String)]
 lensesOf source = [(lensFirst l, lensLast l, lensEffects l) | l <- unsafePerformIO (lenses initial (unlines source))]
 
+-- | What fits the first hole of a file.
+fills :: [String] -> [String]
+fills source = concat (take 1 [problemFills p | p <- check initial (unlines source), not (null (problemFills p))])
+
 hints :: [String] -> [Hint]
 hints source = unsafePerformIO (inlayHints initial (unlines source))
 
@@ -84,9 +88,18 @@ tests :: [(String, Bool)]
 tests =
   [ ("a clean file has no problems", problems ["f = x -> x + 1", "f 2"] == [])
   , ("a missing instance is where the dictionary was asked for", problems ["f = x -> x + 1", "y = f true"] == [(2, Just 5, "no instance: Num Bool")])
-  , ("a hole is a problem at its place, with its type", problems ["x = stringLength _"] == [(1, Just 18, "hole: String")])
+  , ("a hole is a problem at its place, with its type", [(l, c, takeWhile (/= '\n') m) | (l, c, m) <- problems ["x = stringLength _"]] == [(1, Just 18, "hole: String")])
+  , ("fits: a name of the right type, and refinements after the names",
+      let found = fills ["title = \"hi\"", "n = stringLength _"]
+      in take 1 found == ["title"] && "(show _)" `elem` found)
+  , ("fits: nothing that needs an instance that is missing", "(div _ _)" `notElem` fills ["n = stringLength _"])
+  , ("fits: a name the line binds comes first", take 1 (fills ["title = \"hi\"", "f = n -> stringLength _"]) == ["n"])
+  , ("fits: a record's fields, for a hole that takes it",
+      all (`elem` fills ["r <- each [{a = 1, b = \"x\"}] | map _ | collect"]) [".a", ".b"])
+  , ("fits: a binding with a signature, and a refinement that leaves a hole",
+      "(stringLength _)" `elem` fills ["y : Int", "y = _"])
   , ("each hole is a problem of its own",
-      [(problemColumn p, problemMessage p) | p <- check initial "y = stringLength _ + _\n"] == [(Just 18, "hole: String"), (Just 22, "hole: Int")])
+      [(problemColumn p, takeWhile (/= '\n') (problemMessage p)) | p <- check initial "y = stringLength _ + _\n"] == [(Just 18, "hole: String"), (Just 22, "hole: Int")])
   , ("a mismatch is at the argument that does not fit",
       [(problemLine p, problemColumn p, problemEndColumn p) | p <- check initial "x = stringLength true\n"] == [(1, Just 18, Just 22)])
   , ("an annotation that does not fit is at its expression",
@@ -109,7 +122,7 @@ tests =
   , ("hover: a later binding changes it", hover ["f = 1", "f = true", "f"] 3 1 == Just (3, 1, 2, "f : Bool"))
   , ("hover: a use has the type from before its line", hover ["x = true", "x = if x then 1 else 2"] 2 8 == Just (2, 8, 9, "x : Bool") && hover ["x = true", "x = if x then 1 else 2"] 2 1 == Just (2, 1, 2, "x : Int"))
   , ("hover: a let rec member has its new type", fmap (\(_, _, _, t) -> t) (hover ["let rec f = n -> f n"] 1 18) == Just "f : a -> b")
-  , ("a signature names a class that exists", check initial "bad : Unknown a => a -> a\n" == [Problem 1 Nothing 1 "no class Unknown" Nothing])
+  , ("a signature names a class that exists", check initial "bad : Unknown a => a -> a\n" == [Problem 1 Nothing 1 "no class Unknown" Nothing []])
   , ("a parse error after a tab is at its character", map problemColumn (check initial "\tx = )\n") == [Just 6])
   , ("hover: a parameter shows nothing", hover ["f = 1", "g = f -> f"] 2 10 == Nothing)
   , ("hover: a builtin and an operator", fmap (\(_, _, _, t) -> t) (hover ["print 1"] 1 3) == Just "print : a -> Comp {console} ()" && fmap (\(_, _, _, t) -> t) (hover ["1 + 2"] 1 3) == Just "(+) : Num a => a -> a -> a")
