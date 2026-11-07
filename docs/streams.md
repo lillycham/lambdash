@@ -18,8 +18,26 @@ The record preserves the producer's exit status.
 | `filter` | `(a -> Bool) -> Stage a a` | Retain items that satisfy a pure predicate. |
 | `map` | `(a -> b) -> Stage a b` | Transform each item. |
 | `collect` | `Collector a a` | Gather items and retain the source return value. |
+| `take` | `Int -> Stage a a` | Pass the first n items, then stop the stages before it. |
+| `drop` | `Int -> Stage a a` | Skip the first n items. |
+| `unique` | `Ord a => Stage a a` | Pass the first of each value, in the order they come. |
+| `sorted` | `Ord a => Stage a a` | Sort the items, stably. |
+| `sortedOn` | `Ord b => (a -> b) -> Stage a a` | Sort the items by a key, stably. |
+| `reverse` | `Stage a a` | Give the items in reverse order. |
+| `count` | `Stage a Int` | Give the number of items, as one item. |
 | `each` | `[a] -> Stream Bytes a ()` | Emit a finite list as stream items. |
 | `length` | `[a] -> Int` | Count list items. |
+
+`sorted`, `sortedOn`, `reverse` and `count` wait for the end of their input, as
+`table` does, so they never end on an endless source. `take` ends one:
+after n items it stops, and so do the stages before it, as `head` stops
+`yes`. `unique` streams, and keeps every value it has seen.
+
+```text
+ls "." | sortedOn .size | reverse | take 3 | map .name
+```
+
+The three largest entries here, by size.
 
 An adapter or collector is a value. A bare `lines` shows `<stage>` and runs nothing.
 Adapters compose with other adapters, pure functions and collectors.
